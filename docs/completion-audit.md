@@ -44,9 +44,12 @@ go vet ./...                                PASS
 node --check web/app.js                     PASS
 node test/web/roles.test.js                 PASS
 kubectl kustomize deploy/kubernetes/base    PASS
-PostgreSQL 16 migration 001..015            PASS
+PostgreSQL 16 migration 001..016            PASS
 PostgreSQL 16 backup/restore round trip     PASS
 PostgreSQL 16 quality benchmark contract    PASS
+PostgreSQL 16 notification outbox delivery  PASS
+SMTP protocol connection test               PASS
+Notification outbox 1,205-event paging      PASS
 PostgreSQL 16 DSN-only application startup PASS
 PostgreSQL 실패→SQLite 복구→PostgreSQL 논리 이전·재기동 PASS
 node test/web/admin-ui.test.js              PASS

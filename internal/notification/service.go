@@ -151,48 +151,107 @@ WHERE d.status IN ('pending','failed') ORDER BY d.created_at LIMIT 100`)
 }
 
 func (s *Service) seed(ctx context.Context, cfg Config, now time.Time) error {
-	rows, err := s.store.DB.QueryContext(ctx, `SELECT n.id,n.user_id,u.email,n.created_at FROM notifications n JOIN users u ON u.id=n.user_id ORDER BY n.created_at DESC LIMIT 1000`)
-	if err != nil {
-		return err
-	}
-	type notice struct {
-		id, userID, email string
-		createdAt         time.Time
-	}
-	var notices []notice
-	for rows.Next() {
-		var item notice
-		if err = rows.Scan(&item.id, &item.userID, &item.email, &item.createdAt); err != nil {
+	for _, destination := range []struct{ channel, value string }{
+		{"webhook", cfg.WebhookURL},
+		{"messenger", cfg.MessengerWebhookURL},
+	} {
+		if destination.value == "" {
+			continue
+		}
+		if err := s.seedFixedDestination(ctx, destination.channel, destination.value, cfg.ActiveSince, now); err != nil {
 			return err
 		}
-		if !item.createdAt.Before(cfg.ActiveSince) {
-			notices = append(notices, item)
-		}
 	}
-	if err = rows.Close(); err != nil {
-		return err
+	if cfg.SMTPEnabled {
+		return s.seedEmail(ctx, cfg.ActiveSince, now)
 	}
-	for _, item := range notices {
-		destinations := []struct{ channel, destination string }{
-			{"webhook", cfg.WebhookURL},
-			{"messenger", cfg.MessengerWebhookURL},
+	return nil
+}
+
+func (s *Service) seedFixedDestination(ctx context.Context, channel, destination string, activeSince, now time.Time) error {
+	hash := destinationHash(channel, destination)
+	activeSinceValue := any(activeSince)
+	if s.store.Driver() == "sqlite" {
+		// SQLite CURRENT_TIMESTAMP has second precision. Round down so a
+		// notification created later in the same second as the setting update
+		// is not skipped.
+		activeSinceValue = activeSince.UTC().Truncate(time.Second).Format("2006-01-02 15:04:05")
+	}
+	for {
+		rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT n.id
+FROM notifications n
+WHERE n.created_at>=? AND NOT EXISTS (
+  SELECT 1 FROM notification_deliveries d
+  WHERE d.notification_id=n.id AND d.channel=? AND d.destination_hash=?
+)
+ORDER BY n.created_at,n.id LIMIT 1000`), activeSinceValue, channel, hash)
+		if err != nil {
+			return err
 		}
-		if cfg.SMTPEnabled && strings.TrimSpace(item.email) != "" {
-			destinations = append(destinations, struct{ channel, destination string }{"email", item.email})
-		}
-		for _, destination := range destinations {
-			if destination.destination == "" {
-				continue
+		var notificationIDs []string
+		for rows.Next() {
+			var id string
+			if err = rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
 			}
-			hash := destinationHash(destination.channel, destination.destination)
-			id := deliveryID(item.id, destination.channel, hash)
-			_, err = s.store.DB.ExecContext(ctx, s.store.Rebind(`INSERT INTO notification_deliveries(id,notification_id,channel,destination_hash,next_attempt_at) VALUES(?,?,?,?,?) ON CONFLICT(notification_id,channel,destination_hash) DO NOTHING`), id, item.id, destination.channel, hash, now)
-			if err != nil {
+			notificationIDs = append(notificationIDs, id)
+		}
+		if err = rows.Close(); err != nil {
+			return err
+		}
+		for _, notificationID := range notificationIDs {
+			id := deliveryID(notificationID, channel, hash)
+			if _, err = s.store.DB.ExecContext(ctx, s.store.Rebind(`INSERT INTO notification_deliveries(id,notification_id,channel,destination_hash,next_attempt_at) VALUES(?,?,?,?,?) ON CONFLICT(notification_id,channel,destination_hash) DO NOTHING`), id, notificationID, channel, hash, now); err != nil {
 				return err
 			}
 		}
+		if len(notificationIDs) < 1000 {
+			return nil
+		}
 	}
-	return nil
+}
+
+func (s *Service) seedEmail(ctx context.Context, activeSince, now time.Time) error {
+	activeSinceValue := any(activeSince)
+	if s.store.Driver() == "sqlite" {
+		activeSinceValue = activeSince.UTC().Truncate(time.Second).Format("2006-01-02 15:04:05")
+	}
+	for {
+		rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT n.id,u.email
+FROM notifications n JOIN users u ON u.id=n.user_id
+WHERE n.created_at>=? AND u.email<>'' AND NOT EXISTS (
+  SELECT 1 FROM notification_deliveries d
+  WHERE d.notification_id=n.id AND d.channel='email'
+)
+ORDER BY n.created_at,n.id LIMIT 1000`), activeSinceValue)
+		if err != nil {
+			return err
+		}
+		type recipient struct{ notificationID, email string }
+		var recipients []recipient
+		for rows.Next() {
+			var item recipient
+			if err = rows.Scan(&item.notificationID, &item.email); err != nil {
+				rows.Close()
+				return err
+			}
+			recipients = append(recipients, item)
+		}
+		if err = rows.Close(); err != nil {
+			return err
+		}
+		for _, item := range recipients {
+			hash := destinationHash("email", item.email)
+			id := deliveryID(item.notificationID, "email", hash)
+			if _, err = s.store.DB.ExecContext(ctx, s.store.Rebind(`INSERT INTO notification_deliveries(id,notification_id,channel,destination_hash,next_attempt_at) VALUES(?,?,?,?,?) ON CONFLICT(notification_id,channel,destination_hash) DO NOTHING`), id, item.notificationID, "email", hash, now); err != nil {
+				return err
+			}
+		}
+		if len(recipients) < 1000 {
+			return nil
+		}
+	}
 }
 
 func (s *Service) send(ctx context.Context, client *http.Client, cfg Config, item delivery) error {
