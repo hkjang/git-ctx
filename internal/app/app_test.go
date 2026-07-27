@@ -1027,11 +1027,15 @@ func TestSettingCRUDAndMaskPreservation(t *testing.T) {
 	}
 	rec = request(http.MethodGet, "/api/v1/admin/settings/ui", "")
 	var got struct {
-		Value map[string]any `json:"value"`
+		Value        map[string]any `json:"value"`
+		Version      int            `json:"version"`
+		UpdatedBy    string         `json:"updatedBy"`
+		UpdatedAt    time.Time      `json:"updatedAt"`
+		MaskedFields []string       `json:"maskedFields"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	if got.Value["apiToken"] != "********" {
-		t.Fatalf("secret not masked: %#v", got.Value)
+	if got.Value["serviceName"] != "A" || got.Value["apiToken"] != "********" || got.Version != 1 || got.UpdatedBy != "bootstrap-admin" || got.UpdatedAt.IsZero() || !slices.Contains(got.MaskedFields, "apiToken") {
+		t.Fatalf("stored setting was not fully represented: %#v", got)
 	}
 	rec = request(http.MethodPut, "/api/v1/admin/settings/ui", `{"serviceName":"B","apiToken":"********"}`)
 	if rec.Code != 200 {
@@ -1051,6 +1055,60 @@ func TestSettingCRUDAndMaskPreservation(t *testing.T) {
 	rec = request(http.MethodGet, "/api/v1/admin/settings/ui", "")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("deleted setting remained status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSourceSettingsReturnAllNonSecretValuesAndSecretPresence(t *testing.T) {
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:source-setting-display?mode=memory&cache=shared&_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	configs := map[string]map[string]any{
+		"bitbucket": {
+			"baseUrl": "https://bitbucket.internal", "apiPrefix": "/rest/api/1.0",
+			"pat": "bitbucket-secret", "tlsVerify": true, "timeoutSeconds": float64(27),
+		},
+		"gitlab": {
+			"baseUrl": "https://gitlab.internal", "token": "gitlab-secret",
+			"tlsVerify": false, "timeoutSeconds": float64(19),
+		},
+	}
+	for category, value := range configs {
+		raw, _ := json.Marshal(value)
+		sealed, sealErr := a.seal(raw)
+		if sealErr != nil {
+			t.Fatal(sealErr)
+		}
+		_, err = a.store.DB.Exec(a.store.Rebind(`INSERT INTO system_settings(category,version,value_encrypted,updated_by,updated_at) VALUES(?,?,?,?,?)`), category, 3, sealed, "source-admin-user", time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/settings/"+category, nil)
+		req.Header.Set("Authorization", "Bearer bootstrap")
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", category, rec.Code, rec.Body.String())
+		}
+		var response struct {
+			Value        map[string]any `json:"value"`
+			Version      int            `json:"version"`
+			UpdatedBy    string         `json:"updatedBy"`
+			MaskedFields []string       `json:"maskedFields"`
+		}
+		if err = json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		secretField := map[string]string{"bitbucket": "pat", "gitlab": "token"}[category]
+		if response.Value["baseUrl"] != value["baseUrl"] || response.Value["timeoutSeconds"] != value["timeoutSeconds"] ||
+			response.Value[secretField] != "********" || response.Version != 3 || response.UpdatedBy != "source-admin-user" ||
+			!slices.Contains(response.MaskedFields, secretField) {
+			t.Fatalf("%s response=%#v", category, response)
+		}
 	}
 }
 

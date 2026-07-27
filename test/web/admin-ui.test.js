@@ -17,6 +17,7 @@ for (const id of [
   "quick-nav-dialog",
   "keycloak-runtime-status",
   "setting-tabs",
+  "setting-load-status",
   "delete-setting",
   "database-status",
   "database-admin-section",
@@ -49,6 +50,8 @@ assert.match(script, /api\/v1\/admin\/database\/status/);
 assert.match(script, /api\/v1\/admin\/database\/\$\{action\}/);
 assert.match(script, /Keycloak Base URL/);
 assert.match(script, /loadCurrentSetting/);
+assert.match(script, /비밀값.*마스킹됨/);
+assert.match(script, /data-secret-stored/);
 assert.match(script, /api\/v1\/admin\/users/);
 assert.match(script, /configureMCPKeyScopes/);
 assert.match(html, /search-repositories/);

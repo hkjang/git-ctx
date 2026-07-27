@@ -695,8 +695,16 @@ function renderSettingFields(category, value) {
         return `<label data-field-key="${key}">${esc(label)}<select data-setting-key="${key}" data-setting-type="string">${choices.map((choice) => `<option ${choice === current ? "selected" : ""}>${esc(choice)}</option>`).join("")}</select></label>`;
       }
       if (type === "password") {
-        const placeholder = current === "********" ? "저장된 Secret 유지" : "";
-        return `<label data-field-key="${key}">${esc(label)}<input data-setting-key="${key}" data-setting-type="password" type="password" value="" placeholder="${placeholder}" autocomplete="new-password" /></label>`;
+        const stored = current === "********";
+        const reference =
+          typeof current === "string" && current.startsWith("secret://");
+        const shown = stored || reference ? current : "";
+        const help = stored
+          ? "저장된 비밀값입니다. 변경하려면 새 값을 입력하세요."
+          : reference
+            ? `관리 Secret 참조: ${current}`
+            : "저장 시 암호화되며 다시 원문으로 표시되지 않습니다.";
+        return `<label data-field-key="${key}">${esc(label)}<input data-setting-key="${key}" data-setting-type="password" data-secret-stored="${stored}" type="password" value="${esc(shown)}" autocomplete="new-password" /><small class="field-help">${esc(help)}</small></label>`;
       }
       const inputType = type === "array" ? "text" : type;
       const shown = Array.isArray(current) ? current.join(",") : current;
@@ -728,8 +736,10 @@ function renderSettingFields(category, value) {
                     .filter(Boolean)
                 : type === "json"
                   ? JSON.parse(field.value || "{}")
-                : type === "password" && !field.value
-                  ? next[field.dataset.settingKey] || ""
+                : type === "password" &&
+                    (field.value === "********" ||
+                      (!field.value && field.dataset.secretStored === "true"))
+                  ? "********"
                 : field.value;
           $("#setting-json").value = JSON.stringify(next, null, 2);
           field.setCustomValidity("");
@@ -739,6 +749,14 @@ function renderSettingFields(category, value) {
         }
       }),
   );
+  document
+    .querySelectorAll('[data-setting-type="password"][data-secret-stored="true"]')
+    .forEach(
+      (field) =>
+        (field.onfocus = () => {
+          if (field.value === "********") field.select();
+        }),
+    );
   applyTLSFieldState();
 }
 function applyTLSFieldState() {
@@ -812,6 +830,10 @@ function setupAdmin(roles, capabilities) {
       if ($("#category").value !== category) return;
       $("#setting-json").value = JSON.stringify(x.value, null, 2);
       renderSettingFields(category, x.value);
+      const maskedCount = (x.maskedFields || []).length;
+      $("#setting-load-status").className = "wide notice ok";
+      $("#setting-load-status").textContent =
+        `저장된 설정 v${x.version}을 불러왔습니다 · ${date(x.updatedAt)} · ${x.updatedBy || "알 수 없는 관리자"}${maskedCount ? ` · 비밀값 ${maskedCount}개 마스킹됨` : ""}`;
       $("#delete-setting").hidden = false;
       if (category === "keycloak") refreshKeycloakStatus();
     } catch (e) {
@@ -823,6 +845,9 @@ function setupAdmin(roles, capabilities) {
       const defaults = settingDefaults(category);
       $("#setting-json").value = JSON.stringify(defaults, null, 2);
       renderSettingFields(category, defaults);
+      $("#setting-load-status").className = "wide notice";
+      $("#setting-load-status").textContent =
+        "저장된 설정이 없습니다. 기본값을 표시합니다.";
       $("#delete-setting").hidden = true;
       if (category === "keycloak") refreshKeycloakStatus();
     }

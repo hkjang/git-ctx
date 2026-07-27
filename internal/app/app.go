@@ -1392,7 +1392,9 @@ func (a *App) getSetting(w http.ResponseWriter, r *http.Request) {
 	}
 	var sealed []byte
 	var version int
-	if err := a.store.DB.QueryRowContext(r.Context(), a.store.Rebind(`SELECT version,value_encrypted FROM system_settings WHERE category=?`), category).Scan(&version, &sealed); err != nil {
+	var updatedBy string
+	var updatedAt time.Time
+	if err := a.store.DB.QueryRowContext(r.Context(), a.store.Rebind(`SELECT version,value_encrypted,updated_by,updated_at FROM system_settings WHERE category=?`), category).Scan(&version, &sealed, &updatedBy, &updatedAt); err != nil {
 		problem(w, 404, "not_found", "Setting category not configured")
 		return
 	}
@@ -1406,8 +1408,12 @@ func (a *App) getSetting(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, "invalid_stored_setting", "Stored setting is invalid")
 		return
 	}
-	maskSecrets(value)
-	jsonOut(w, 200, map[string]any{"category": category, "version": version, "value": value})
+	maskedFields := maskSecrets(value)
+	slices.Sort(maskedFields)
+	jsonOut(w, 200, map[string]any{
+		"category": category, "version": version, "value": value,
+		"updatedBy": updatedBy, "updatedAt": updatedAt, "maskedFields": maskedFields,
+	})
 }
 func (a *App) previewKeycloak(w http.ResponseWriter, r *http.Request) {
 	var in struct {
@@ -2337,15 +2343,25 @@ func settingCategories() map[string]bool {
 		"observability": true, "backup": true, "retention": true, "vault": true,
 	}
 }
-func maskSecrets(value map[string]any) {
+func maskSecrets(value map[string]any) []string {
+	masked := []string{}
+	maskSecretPaths(value, "", &masked)
+	return masked
+}
+func maskSecretPaths(value map[string]any, prefix string, masked *[]string) {
 	for key, item := range value {
 		if reference, ok := item.(string); ok && strings.HasPrefix(reference, "secret://") {
 			continue
+		}
+		path := key
+		if prefix != "" {
+			path = prefix + "." + key
 		}
 		lower := strings.ToLower(key)
 		if lower == "dsn" {
 			if item != nil && item != "" {
 				value[key] = "********"
+				*masked = append(*masked, path)
 			}
 			continue
 		}
@@ -2355,11 +2371,12 @@ func maskSecrets(value map[string]any) {
 			strings.HasSuffix(lower, "pat") {
 			if item != nil && item != "" {
 				value[key] = "********"
+				*masked = append(*masked, path)
 			}
 			continue
 		}
 		if nested, ok := item.(map[string]any); ok {
-			maskSecrets(nested)
+			maskSecretPaths(nested, path, masked)
 		}
 	}
 }

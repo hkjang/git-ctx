@@ -22,7 +22,7 @@
 | 관측성 | 완료 | JSON 요청 로그, 동적 로그 레벨, request ID, health/readiness, Prometheus와 동적 OTLP HTTP tracing |
 | 백업·복구 | 완료(애플리케이션 범위) | SQLite/PostgreSQL 공통 암호화 아카이브, 주기·보존, 무결성 검증, 트랜잭션 복원, 세션 무효화와 관리자 UI/API |
 | 검색 품질 평가 | 완료 | ACL 적용 정답 사례, Recall@K·MRR·nDCG@K, 임계값 회귀 판정, 이력·상세 UI/API |
-| 관리자 연동 설정 | 완료 | Keycloak·Bitbucket·GitLab·Embedding·Reranker 전용 필드, 실제 호출 시험, 마스킹·암호화 저장 |
+| 관리자 연동 설정 | 완료 | Keycloak·Bitbucket·GitLab·Embedding·Reranker 전용 필드, 실제 호출 시험, 일반값 자동 재조회, 버전·수정자·시각과 비밀 필드별 마스킹·암호화 저장 |
 | OpenSearch | 완료(계약 시험) | 관리자 연결·index mapping 시험, ref별 delete/bulk projection, repository·ref·principal 선필터, DB 청크 hydration, Worker 재시도 |
 | 최초·복구 관리자 세션 | 완료 | 최초 일회용 토큰을 30분 HttpOnly·SameSite 세션으로 교환하고 실제 `platform-admin` SSO 로그인 성공 시 전역 폐기. 이후 CLI 서명 복구 토큰의 1회 소비·만료·Origin 검증·영구 MCP 키 생성 차단 |
 | 버전 표시 | 완료 | 공개 설정과 `/api/v1/me` 버전 제공, 로그인 전 상단·안내와 로그인 후 프로필 표시 |
