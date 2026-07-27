@@ -15,6 +15,11 @@ import (
 	"git-ctx/internal/auth"
 	"git-ctx/internal/search"
 	"git-ctx/internal/store"
+	"git-ctx/internal/version"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 type Server struct {
@@ -108,7 +113,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Mcp-Session-Id", sessionID)
 		write(w, response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
 			"protocolVersion": protocol, "capabilities": map[string]any{"tools": map[string]any{"listChanged": false}},
-			"serverInfo": map[string]any{"name": "git-ctx", "version": "0.1.0"}}})
+			"serverInfo": map[string]any{"name": "git-ctx", "version": version.Version}}})
 	case "notifications/initialized":
 		w.WriteHeader(http.StatusAccepted)
 	case "ping":
@@ -198,6 +203,10 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 		write(w, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32602, Message: "Unknown tool"}})
 		return
 	}
+	ctx, span := otel.Tracer("git-ctx/mcp").Start(r.Context(), "mcp."+params.Name,
+		oteltrace.WithAttributes(attribute.String("mcp.tool.name", params.Name)))
+	defer span.End()
+	r = r.WithContext(ctx)
 	if !s.toolEnabled(r.Context(), params.Name) {
 		write(w, response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"content": []map[string]string{{"type": "text", "text": "This MCP tool is disabled by the platform administrator."}}, "isError": true}})
 		return
@@ -216,14 +225,18 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 		err = errors.New("this API key is not allowed to call the requested tool")
 	}
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "MCP authorization failed")
 		s.finishCall(w, r, req, p, params.Name, libraryID, start, "", err)
 		return
 	}
 	cacheKey := s.cacheKey(p, params.Name, params.Arguments)
 	if cached, ok := s.cached(cacheKey); ok {
+		span.SetAttributes(attribute.Bool("git_ctx.cache.hit", true))
 		s.finishCall(w, r, req, p, params.Name, libraryID, start, cached, nil)
 		return
 	}
+	span.SetAttributes(attribute.Bool("git_ctx.cache.hit", false))
 	switch params.Name {
 	case "resolve-library-id":
 		var items []search.Library
@@ -243,6 +256,9 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 	}
 	if err == nil {
 		s.storeCache(r.Context(), params.Name, cacheKey, text)
+	} else {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "MCP tool call failed")
 	}
 	s.finishCall(w, r, req, p, params.Name, libraryID, start, text, err)
 }

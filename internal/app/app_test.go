@@ -4,14 +4,50 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"git-ctx/internal/auth"
 	"git-ctx/internal/config"
+	"git-ctx/internal/observability"
 )
+
+func TestHTTPTraceContextPropagation(t *testing.T) {
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:http-trace?mode=memory&cache=shared&_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), PublicURL: "http://localhost:4747",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	cfg := observability.Config{Enabled: true, Endpoint: collector.URL + "/v1/traces", ServiceName: "git-ctx-test", SampleRatio: 1, Timeout: time.Second, AllowInsecureLocalhost: true}
+	if err = a.traces.Apply(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	const traceID = "0af7651916cd43dd8448eb211c80319c"
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Header.Set("Traceparent", "00-"+traceID+"-b7ad6b7169203331-01")
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Header().Get("X-Trace-Id") != traceID {
+		t.Fatalf("status=%d trace=%q", rec.Code, rec.Header().Get("X-Trace-Id"))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err = a.traces.ForceFlush(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestAdministrativeRoleMatrix(t *testing.T) {
 	principal := func(role string) auth.Principal { return auth.Principal{Roles: []string{role}} }
@@ -43,6 +79,20 @@ func TestAdministrativeRoleMatrix(t *testing.T) {
 	}
 	if settingRoleAllowed(principal("source-admin"), "keycloak") {
 		t.Fatal("source-admin gained platform-only Keycloak settings")
+	}
+}
+
+func TestAuthorizationHeadersAreMaskedAndPreserved(t *testing.T) {
+	value := map[string]any{"headers": map[string]any{"Authorization": "Bearer secret", "X-API-Key": "key-secret", "X-Tenant": "tenant-a"}}
+	maskSecrets(value)
+	headers := value["headers"].(map[string]any)
+	if headers["Authorization"] != "********" || headers["X-API-Key"] != "********" || headers["X-Tenant"] != "tenant-a" {
+		t.Fatalf("unexpected masked headers: %#v", headers)
+	}
+	previous := map[string]any{"headers": map[string]any{"Authorization": "Bearer old", "X-API-Key": "old-key"}}
+	preserveMasked(previous, value)
+	if headers["Authorization"] != "Bearer old" || headers["X-API-Key"] != "old-key" {
+		t.Fatalf("masked headers were not preserved: %#v", headers)
 	}
 }
 

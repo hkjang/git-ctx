@@ -41,7 +41,7 @@ Go 모듈형 모놀리스로 시작하되 API/MCP/indexer/scheduler 프로세스
 | Secret Scan | 완료 | 개인키 차단, 자격증명·클라우드 키 마스킹, 보안 이벤트 이력 |
 | 그룹 ACL | 완료 | Keycloak→Bitbucket 그룹 매핑을 사용자·API 키 후보 검색에 적용 |
 | 키 알림 | 완료 | 7일 이내 만료와 호출량 초과 이상 사용 알림 |
-| Kubernetes/관측/백업 | 부분 | Kustomize, hardened deployment, JSON 로그·readiness·Prometheus 구현; OTel·자동 백업은 미구현 |
+| Kubernetes/관측/백업 | 부분 | Kustomize, hardened deployment, JSON 로그·readiness·Prometheus·동적 OTLP tracing 구현; 자동 백업은 미구현 |
 
 상세한 구현 증거와 실환경 승인 경계는
 [completion-audit.md](completion-audit.md)에 기록한다.

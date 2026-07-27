@@ -444,7 +444,7 @@ async function refreshSecurity(capabilities = activeCapabilities) {
     ]);
     if (health) {
       $("#system-health").textContent =
-        `저장소 ${health.repositories} · 청크 ${health.chunks} · 활성 키 ${health.activeApiKeys} · 대기 ${health.indexJobs.pending} · 실패 ${health.indexJobs.failed}`;
+        `저장소 ${health.repositories} · 청크 ${health.chunks} · 활성 키 ${health.activeApiKeys} · 대기 ${health.indexJobs.pending} · 실패 ${health.indexJobs.failed} · Trace ${health.observability?.tracingEnabled ? "활성" : "비활성"}`;
       $("#system-health").classList.add("ok");
     }
     $("#admin-keys").innerHTML =

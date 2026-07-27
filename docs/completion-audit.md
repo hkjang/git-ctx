@@ -17,7 +17,7 @@
 | 관리자 기능 | 완료(구현 범위) | 설정·연결시험·버전·rollback, 저장소·정책·작업, MCP 도구, 키·감사·보안·상태 UI/API와 역할별 메뉴·쓰기 통제 |
 | 데이터베이스 | 완료 | SQLite 회귀 시험 및 빈 PostgreSQL 16에서 001~009 migration/readiness 실검증 |
 | 배포 | 완료 | 비루트 Docker 이미지 실행, Compose, Kubernetes Kustomize와 기본 NetworkPolicy 렌더링 |
-| 기본 관측성 | 완료 | JSON 요청 로그, request ID, health/readiness, Prometheus 지표 |
+| 관측성 | 완료 | JSON 요청 로그, request ID, health/readiness, Prometheus와 동적 OTLP HTTP tracing |
 
 2026-07-27 로컬 검증 결과:
 
@@ -38,7 +38,6 @@ Default listen address :4747 readiness      PASS
 |---|---|---|
 | 검색 품질 자동 벤치마크 | 미구현 | 사내 정답 데이터셋으로 Recall@K·MRR·nDCG 회귀 게이트 구축 |
 | OpenSearch | 미구현 | 2단계 고도화 시 BM25 인덱스와 ACL 필터 계약 구현 |
-| OpenTelemetry tracing | 미구현 | Collector endpoint, trace propagation, export 실패 정책 구현 |
 | 자동 백업·복원 실행기 | 미구현 | PostgreSQL/Object Storage 백업 작업과 복원 검증 자동화 |
 | Vault/KMS 직접 어댑터 | 미구현 | 현재 bootstrap master key와 암호화 DB 방식 대신 사내 Secret Store 연동 |
 | 레거시 MCP SSE endpoint | 미구현(선택) | 승인 대상 구형 클라이언트가 요구할 때 추가 |

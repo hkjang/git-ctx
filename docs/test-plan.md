@@ -13,7 +13,8 @@ docker build -t git-ctx:verify .
 
 자동 테스트는 API 키 원문 비저장, 키 제한·회전, OIDC 서명과 역할 매핑, Bitbucket
 6.9.1/GitLab API 계약, ACL 비노출, MCP 세션·도구 계약, 50개 동시 호출, Webhook
-중복, Worker 재시도, Secret Scan, SQLite migration을 포함한다.
+중복, Worker 재시도, Secret Scan, SQLite migration, OTLP protobuf export와 W3C
+trace context 전파를 포함한다.
 
 ## 부하 시험
 

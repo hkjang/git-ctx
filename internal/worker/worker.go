@@ -13,6 +13,10 @@ import (
 	"git-ctx/internal/indexer"
 	"git-ctx/internal/source"
 	"git-ctx/internal/store"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 type SourceFactory func(context.Context, string) (source.RepositorySource, error)
@@ -111,10 +115,19 @@ func (w *Worker) claim(ctx context.Context) (job, bool, error) {
 	}
 	return j, err == nil, err
 }
-func (w *Worker) execute(ctx context.Context, j job) error {
+func (w *Worker) execute(ctx context.Context, j job) (err error) {
+	ctx, span := otel.Tracer("git-ctx/indexer").Start(ctx, "index.job",
+		oteltrace.WithAttributes(attribute.String("git_ctx.index_job.id", j.ID), attribute.String("git_ctx.repository.id", j.RepositoryID), attribute.String("git_ctx.ref.name", j.RefName), attribute.Int("git_ctx.index_job.attempt", j.Attempts)))
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "index job failed")
+		}
+		span.End()
+	}()
 	var r repository
 	var external string
-	err := w.store.DB.QueryRowContext(ctx, w.store.Rebind(`SELECT source_type,source_external_id,project_key,slug,name,description,default_branch FROM repositories WHERE id=? AND enabled=1`), j.RepositoryID).Scan(&r.SourceType, &external, &r.ProjectKey, &r.Slug, &r.Name, &r.Description, &r.DefaultBranch)
+	err = w.store.DB.QueryRowContext(ctx, w.store.Rebind(`SELECT source_type,source_external_id,project_key,slug,name,description,default_branch FROM repositories WHERE id=? AND enabled=1`), j.RepositoryID).Scan(&r.SourceType, &external, &r.ProjectKey, &r.Slug, &r.Name, &r.Description, &r.DefaultBranch)
 	if err != nil {
 		return fmt.Errorf("load repository: %w", err)
 	}

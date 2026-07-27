@@ -147,3 +147,31 @@ embedding 요청으로 연결을 시험하며 모델 차원 변경 후에는 전
   "notice": ""
 }
 ```
+
+## OpenTelemetry 추적
+
+`observability` 설정을 저장할 때 임시 span을 실제 Collector로 전송해 endpoint, TLS,
+사내 CA, proxy와 인증 헤더를 검증한다. 저장에 성공하면 새 provider가 즉시 적용되고
+기존 provider는 flush 후 종료된다. HTTP 요청은 W3C `traceparent`를 이어받으며 응답의
+`X-Trace-Id`로 장애 로그와 trace를 연결할 수 있다. MCP 질의 원문과 문서 원문은 span
+attribute에 기록하지 않는다.
+
+```json
+{
+  "enabled": true,
+  "otlpEndpoint": "https://otel-collector.company.local/v1/traces",
+  "serviceName": "git-ctx",
+  "sampleRatio": 0.1,
+  "headers": {
+    "Authorization": "Bearer secret"
+  },
+  "timeoutSeconds": 10,
+  "tlsVerify": true,
+  "caCertificate": "-----BEGIN CERTIFICATE-----...",
+  "proxyUrl": ""
+}
+```
+
+`headers.Authorization`, Token, API Key 필드는 재조회 시 마스킹되며 원문은 암호화된
+설정에만 보관된다. 평문 HTTP endpoint는 기본 거부한다. 로컬 Collector 시험에서만
+`allowInsecureLocalhost: true`로 localhost HTTP를 허용할 수 있다.

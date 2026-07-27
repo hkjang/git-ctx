@@ -33,13 +33,20 @@ import (
 	gitlabsource "git-ctx/internal/gitlab"
 	"git-ctx/internal/indexer"
 	"git-ctx/internal/mcp"
+	"git-ctx/internal/observability"
 	"git-ctx/internal/rerank"
 	"git-ctx/internal/scheduler"
 	"git-ctx/internal/search"
 	"git-ctx/internal/source"
 	"git-ctx/internal/store"
+	"git-ctx/internal/version"
 	"git-ctx/internal/webhook"
 	"git-ctx/internal/worker"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/oauth2"
 )
 
@@ -53,6 +60,7 @@ type App struct {
 	aead   cipher.AEAD
 	oidc   *auth.OIDCVerifier
 	hooks  *webhook.Service
+	traces *observability.Manager
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
@@ -70,7 +78,12 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &App{cfg: c, store: s, keys: apikey.New(s, c.KeyPepper), aead: aead, mux: http.NewServeMux()}
+	a := &App{cfg: c, store: s, keys: apikey.New(s, c.KeyPepper), aead: aead, mux: http.NewServeMux(), traces: observability.New()}
+	if settings, loadErr := a.loadSettingMap(ctx, "observability"); loadErr == nil {
+		if applyErr := a.traces.Apply(ctx, observabilityConfigFromMap(settings)); applyErr != nil {
+			slog.Warn("stored observability setting could not be applied", "error", applyErr)
+		}
+	}
 	a.oidc = auth.NewOIDCVerifier(a.loadOIDCConfig)
 	a.hooks = webhook.New(s)
 	a.search = search.New(s)
@@ -112,9 +125,12 @@ func (a *App) Close() {
 		a.cancel()
 	}
 	a.wg.Wait()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = a.traces.Shutdown(shutdownCtx)
 	_ = a.store.DB.Close()
 }
-func (a *App) Handler() http.Handler { return requestLogging(securityHeaders(a.mux)) }
+func (a *App) Handler() http.Handler { return tracing(requestLogging(securityHeaders(a.mux))) }
 func (a *App) routes() {
 	a.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -830,6 +846,12 @@ func (a *App) putSetting(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, "internal_error", e.Error())
 		return
 	}
+	if category == "observability" {
+		if e = a.traces.Apply(r.Context(), observabilityConfigFromMap(value)); e != nil {
+			problem(w, 500, "setting_apply_failed", "Observability setting was saved but could not be applied")
+			return
+		}
+	}
 	a.audit(r, p, "settings.update", category, category, "success", map[string]any{"version": version})
 	jsonOut(w, 200, map[string]any{"category": category, "version": version, "secretFields": "encrypted and masked"})
 }
@@ -899,6 +921,12 @@ func (a *App) rollbackSetting(w http.ResponseWriter, r *http.Request) {
 	if err = tx.Commit(); err != nil {
 		problem(w, 500, "rollback_failed", err.Error())
 		return
+	}
+	if category == "observability" {
+		if err = a.traces.Apply(r.Context(), observabilityConfigFromMap(value)); err != nil {
+			problem(w, 500, "setting_apply_failed", "Rolled back observability setting was saved but could not be applied")
+			return
+		}
 	}
 	a.audit(r, p, "settings.rollback", category, category, "success", map[string]any{"fromVersion": current, "targetVersion": in.TargetVersion, "newVersion": newVersion})
 	jsonOut(w, 200, map[string]any{"category": category, "version": newVersion, "restoredFrom": in.TargetVersion})
@@ -1162,8 +1190,38 @@ func validateSetting(ctx context.Context, category string, value map[string]any)
 				return fmt.Errorf("reranker connection test: %w", err)
 			}
 		}
+	case "observability":
+		return observability.Validate(ctx, observabilityConfigFromMap(value))
 	}
 	return nil
+}
+func observabilityConfigFromMap(settings map[string]any) observability.Config {
+	cfg := observability.Config{ServiceName: "git-ctx", SampleRatio: 1, Timeout: 10 * time.Second, Headers: map[string]string{}}
+	cfg.Enabled, _ = settings["enabled"].(bool)
+	cfg.Endpoint, _ = settings["otlpEndpoint"].(string)
+	if value, ok := settings["serviceName"].(string); ok && value != "" {
+		cfg.ServiceName = value
+	}
+	if value, ok := settings["sampleRatio"].(float64); ok {
+		cfg.SampleRatio = value
+	}
+	if value, ok := settings["timeoutSeconds"].(float64); ok && value > 0 {
+		cfg.Timeout = time.Duration(value * float64(time.Second))
+	}
+	if value, ok := settings["tlsVerify"].(bool); ok {
+		cfg.TLSVerify = &value
+	}
+	cfg.CACertificate, _ = settings["caCertificate"].(string)
+	cfg.ProxyURL, _ = settings["proxyUrl"].(string)
+	cfg.AllowInsecureLocalhost, _ = settings["allowInsecureLocalhost"].(bool)
+	if headers, ok := settings["headers"].(map[string]any); ok {
+		for key, value := range headers {
+			if text, ok := value.(string); ok {
+				cfg.Headers[key] = text
+			}
+		}
+	}
+	return cfg
 }
 func validatePublicAssetURL(value string) error {
 	if strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "//") {
@@ -1297,6 +1355,7 @@ func maskSecrets(value map[string]any) {
 		lower := strings.ToLower(key)
 		if strings.Contains(lower, "secret") || strings.Contains(lower, "password") ||
 			strings.Contains(lower, "token") || strings.Contains(lower, "apikey") ||
+			strings.Contains(lower, "api-key") || strings.Contains(lower, "authorization") ||
 			strings.HasSuffix(lower, "pat") {
 			if item != nil && item != "" {
 				value[key] = "********"
@@ -1746,7 +1805,7 @@ func (a *App) adminHealth(w http.ResponseWriter, r *http.Request) {
 	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM api_keys WHERE revoked_at IS NULL AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at>CURRENT_TIMESTAMP)`).Scan(&activeKeys)
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
-	jsonOut(w, 200, map[string]any{"status": "ok", "database": "ok", "repositories": repositories, "chunks": chunks, "indexJobs": map[string]int64{"pending": pending, "failed": failed}, "activeApiKeys": activeKeys, "go": map[string]any{"goroutines": runtime.NumGoroutine(), "allocatedBytes": memory.Alloc}})
+	jsonOut(w, 200, map[string]any{"status": "ok", "version": version.Version, "database": "ok", "repositories": repositories, "chunks": chunks, "indexJobs": map[string]int64{"pending": pending, "failed": failed}, "activeApiKeys": activeKeys, "observability": map[string]bool{"tracingEnabled": a.traces.Enabled()}, "go": map[string]any{"goroutines": runtime.NumGoroutine(), "allocatedBytes": memory.Alloc}})
 }
 func (a *App) metrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
@@ -1767,6 +1826,7 @@ func (a *App) metrics(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n%s %d\n", item.name, item.help, item.name, item.name, value)
 	}
 	fmt.Fprintf(w, "# HELP git_ctx_go_goroutines Current goroutines\n# TYPE git_ctx_go_goroutines gauge\ngit_ctx_go_goroutines %d\n", runtime.NumGoroutine())
+	fmt.Fprintf(w, "# HELP git_ctx_tracing_enabled OTLP tracing provider enabled\n# TYPE git_ctx_tracing_enabled gauge\ngit_ctx_tracing_enabled %d\n", boolInt(a.traces.Enabled()))
 }
 func (a *App) audit(r *http.Request, p auth.Principal, action, rt, rid, outcome string, metadata any) {
 	raw, _ := json.Marshal(metadata)
@@ -1885,6 +1945,32 @@ func (w *statusWriter) Write(body []byte) (int, error) {
 	n, err := w.ResponseWriter.Write(body)
 	w.bytes += n
 	return n, err
+}
+func tracing(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+		ctx, span := otel.Tracer("git-ctx/http").Start(ctx, r.Method+" "+r.URL.Path,
+			trace.WithSpanKind(trace.SpanKindServer),
+			trace.WithAttributes(attribute.String("http.request.method", r.Method), attribute.String("url.path", r.URL.Path)))
+		defer span.End()
+		if span.SpanContext().IsValid() {
+			w.Header().Set("X-Trace-Id", span.SpanContext().TraceID().String())
+		}
+		wrapped := &statusWriter{ResponseWriter: w}
+		next.ServeHTTP(wrapped, r.WithContext(ctx))
+		status := wrapped.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		span.SetAttributes(attribute.Int("http.response.status_code", status))
+		if r.Pattern != "" {
+			span.SetName(r.Method + " " + r.Pattern)
+			span.SetAttributes(attribute.String("http.route", r.Pattern))
+		}
+		if status >= 500 {
+			span.SetStatus(codes.Error, http.StatusText(status))
+		}
+	})
 }
 func requestLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

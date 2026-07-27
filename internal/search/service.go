@@ -12,6 +12,10 @@ import (
 	"git-ctx/internal/embedding"
 	"git-ctx/internal/rerank"
 	"git-ctx/internal/store"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 type Config struct {
@@ -59,7 +63,16 @@ type Library struct {
 	Versions                          []string
 }
 
-func (s *Service) Resolve(ctx context.Context, principals []string, name, query string) ([]Library, error) {
+func (s *Service) Resolve(ctx context.Context, principals []string, name, query string) (libraries []Library, err error) {
+	ctx, span := otel.Tracer("git-ctx/search").Start(ctx, "search.resolve-library",
+		oteltrace.WithAttributes(attribute.Int("git_ctx.acl.principal_count", len(principals))))
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "library resolution failed")
+		}
+		span.End()
+	}()
 	if strings.TrimSpace(name) == "" || strings.TrimSpace(query) == "" {
 		return nil, errors.New("libraryName and query are required")
 	}
@@ -122,10 +135,20 @@ WHERE r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p.principal='*')`), 
 	for i := range found {
 		out[i] = found[i].Library
 	}
+	span.SetAttributes(attribute.Int("git_ctx.search.result_count", len(out)))
 	return out, rows.Err()
 }
 
-func (s *Service) Query(ctx context.Context, principals []string, libraryID, query string) (string, error) {
+func (s *Service) Query(ctx context.Context, principals []string, libraryID, query string) (result string, err error) {
+	ctx, span := otel.Tracer("git-ctx/search").Start(ctx, "search.query-docs",
+		oteltrace.WithAttributes(attribute.String("git_ctx.library_id", libraryID), attribute.Int("git_ctx.acl.principal_count", len(principals))))
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "documentation query failed")
+		}
+		span.End()
+	}()
 	parts := strings.Split(strings.TrimPrefix(libraryID, "/"), "/")
 	if len(parts) < 2 || len(parts) > 3 || strings.TrimSpace(query) == "" {
 		return "", errors.New("libraryId must use /organization/project[/version] and query is required")
@@ -140,7 +163,7 @@ func (s *Service) Query(ctx context.Context, principals []string, libraryID, que
 		args = append(args, principal)
 	}
 	var repoID, name, defaultRef, sourceType string
-	err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(`
+	err = s.store.DB.QueryRowContext(ctx, s.store.Rebind(`
 SELECT r.id,r.name,r.default_branch,r.source_type FROM repositories r JOIN repository_permissions p ON p.repository_id=r.id
 WHERE r.library_id=? AND r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p.principal='*') LIMIT 1`), args...).Scan(&repoID, &name, &defaultRef, &sourceType)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -266,8 +289,10 @@ WHERE r.library_id=? AND r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p
 		hits = hits[:cfg.FinalK]
 	}
 	if len(hits) == 0 {
+		span.SetAttributes(attribute.Int("git_ctx.search.result_count", 0))
 		return fmt.Sprintf("No indexed documentation matched the query in %s at %s. Try another term or version.", name, ref), nil
 	}
+	span.SetAttributes(attribute.Int("git_ctx.search.result_count", len(hits)))
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s\n\n", name)
 	for _, h := range hits {
