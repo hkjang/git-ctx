@@ -50,8 +50,12 @@ endpoint를 표시하므로 입력값 시험과 실제 적용 상태를 구분�
 }
 ```
 
-PAT 대신 `username`과 `password`를 설정할 수 있다. 서비스 계정에는 프로젝트,
-저장소, ref, 파일과 권한을 읽고 저장소 webhook을 관리하는 최소 권한만 부여한다.
+PAT 대신 `username`과 `password`를 설정할 수 있다. 연결 시험은 프로젝트와 첫
+저장소를 탐색한 뒤 저장소·프로젝트 권한과 브랜치 API까지 확인한다. Bitbucket 6.x의
+권한 조회 및 Webhook 등록 API 자체가 관리자 권한을 요구하므로 서비스 계정에는 색인
+대상 프로젝트의 `PROJECT_ADMIN`이 필요하다. 전역 `ADMIN`/`SYS_ADMIN`
+사용자의 상속 권한은 서비스 계정이 전역 권한 API를 읽을 수 있을 때만 합성하며,
+읽을 수 없으면 Fail Closed로 제외한다.
 
 ## GitLab
 
@@ -66,6 +70,10 @@ PAT 대신 `username`과 `password`를 설정할 수 있다. 서비스 계정에
   "timeoutSeconds": 30
 }
 ```
+
+연결 시험은 그룹·프로젝트 탐색뿐 아니라 첫 프로젝트의 멤버 ACL과 브랜치 API까지
+검증한다. `internal` 프로젝트의 전체 접근은 GitLab 사용자 ID가 매핑된 플랫폼
+사용자에게만 적용하고, `public` 프로젝트만 모든 인증 사용자에게 허용한다.
 
 ## MCP와 색인
 

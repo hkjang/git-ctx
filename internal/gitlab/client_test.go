@@ -31,6 +31,8 @@ func TestGitLabAdapterPaginationFilesAndPermissions(t *testing.T) {
 			w.Write([]byte("# Guide"))
 		case "/api/v4/projects/core%2Fdemo/members/all":
 			w.Write([]byte(`[{"id":42,"username":"alice","access_level":30}]`))
+		case "/api/v4/projects/core%2Fdemo":
+			w.Write([]byte(`{"visibility":"internal"}`))
 		case "/api/v4/projects/core%2Fdemo/search":
 			if r.URL.Query().Get("scope") != "blobs" || r.URL.Query().Get("search") != "gpu usage" || r.URL.Query().Get("ref") != "main" {
 				t.Errorf("search query=%s", r.URL.RawQuery)
@@ -59,7 +61,7 @@ func TestGitLabAdapterPaginationFilesAndPermissions(t *testing.T) {
 		t.Fatalf("body=%q err=%v", body, err)
 	}
 	perms, err := c.GetPermissions(context.Background(), ref)
-	if err != nil || len(perms) != 1 || perms[0].Principal != "gitlab:42" || perms[0].Permission != "developer" {
+	if err != nil || len(perms) != 2 || perms[0].Principal != "gitlab:42" || perms[0].Permission != "developer" || perms[1].Principal != "gitlab:authenticated" {
 		t.Fatalf("permissions=%#v err=%v", perms, err)
 	}
 	hits, err := c.SearchQuery(context.Background(), ref, "main", "gpu usage", 5)

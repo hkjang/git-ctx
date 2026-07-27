@@ -198,6 +198,19 @@ func (c *Client) GetPermissions(ctx context.Context, r source.RepositoryRef) ([]
 	for i, m := range members {
 		out[i] = source.Permission{Principal: "gitlab:" + strconv.FormatInt(m.ID, 10), Kind: "user", Permission: accessName(m.AccessLevel)}
 	}
+	var project struct {
+		Visibility string `json:"visibility"`
+	}
+	if err := c.json(ctx, http.MethodGet, c.repo(r), nil, nil, &project); err != nil {
+		return nil, err
+	}
+	// Every git-ctx query is authenticated. GitLab public and internal projects
+	// are therefore readable by all platform users without an explicit member row.
+	if project.Visibility == "public" {
+		out = append(out, source.Permission{Principal: "*", Kind: "all", Permission: "read"})
+	} else if project.Visibility == "internal" {
+		out = append(out, source.Permission{Principal: "gitlab:authenticated", Kind: "all", Permission: "read"})
+	}
 	return out, nil
 }
 func (c *Client) RegisterWebhook(ctx context.Context, r source.RepositoryRef, target, secret string) error {

@@ -209,6 +209,18 @@ func TestPlatformAdminUserCRUDAndDisabledOIDCUser(t *testing.T) {
 	}
 }
 
+func TestSourceACLPrincipalsKeepBothIdentityMappings(t *testing.T) {
+	got := sourceACLPrincipals("alice.bb", "42", []string{"group:engineering"})
+	for _, want := range []string{"alice.bb", "bitbucket:licensed", "gitlab:42", "gitlab:authenticated", "group:engineering"} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("missing %q in %v", want, got)
+		}
+	}
+	if got := sourceACLPrincipals("", "", []string{"group:engineering"}); slices.Contains(got, "bitbucket:licensed") || slices.Contains(got, "gitlab:authenticated") {
+		t.Fatalf("unmapped user received source-wide principal: %v", got)
+	}
+}
+
 func TestAdministrativeBackupRestoreFlow(t *testing.T) {
 	a, err := New(context.Background(), config.Config{
 		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "app-backup.db") + "?_foreign_keys=on&_busy_timeout=5000",
@@ -394,6 +406,62 @@ func TestVaultAdminConnectionTest(t *testing.T) {
 	var audits int
 	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE action='settings.test' AND resource_id='vault' AND outcome='success'`).Scan(&audits); err != nil || audits != 1 {
 		t.Fatalf("audits=%d err=%v", audits, err)
+	}
+}
+
+func TestBitbucketConnectionTestValidatesACLAndBranches(t *testing.T) {
+	denyACL := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/rest/api/1.0/projects":
+			io.WriteString(w, `{"values":[{"key":"PRJ"}],"isLastPage":true}`)
+		case "/rest/api/1.0/projects/PRJ/repos":
+			io.WriteString(w, `{"values":[{"id":1,"slug":"repo","project":{"key":"PRJ"}}],"isLastPage":true}`)
+		case "/rest/api/1.0/projects/PRJ/repos/repo/permissions/users":
+			if denyACL {
+				http.Error(w, "repository admin required", http.StatusForbidden)
+				return
+			}
+			io.WriteString(w, `{"values":[],"isLastPage":true}`)
+		case "/rest/api/1.0/projects/PRJ/repos/repo/permissions/groups",
+			"/rest/api/1.0/projects/PRJ/permissions/users",
+			"/rest/api/1.0/projects/PRJ/permissions/groups":
+			io.WriteString(w, `{"values":[],"isLastPage":true}`)
+		case "/rest/api/1.0/admin/permissions/users", "/rest/api/1.0/admin/permissions/groups":
+			http.Error(w, "global admin required", http.StatusForbidden)
+		case "/rest/api/1.0/projects/PRJ/permissions/PROJECT_READ/all",
+			"/rest/api/1.0/projects/PRJ/permissions/PROJECT_WRITE/all",
+			"/rest/api/1.0/projects/PRJ/permissions/PROJECT_ADMIN/all":
+			io.WriteString(w, `{"permitted":false}`)
+		case "/rest/api/1.0/projects/PRJ/repos/repo/branches":
+			io.WriteString(w, `{"values":[{"displayId":"main","latestCommit":"abc","isDefault":true}],"isLastPage":true}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:bitbucket-setting-test?mode=memory&cache=shared&_foreign_keys=on&_busy_timeout=5000",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	test := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/settings/bitbucket/test", strings.NewReader(fmt.Sprintf(`{"baseUrl":%q,"apiPrefix":"/rest/api/1.0","pat":"token"}`, server.URL)))
+		req.Header.Set("Authorization", "Bearer bootstrap")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := test(); rec.Code != http.StatusOK {
+		t.Fatalf("complete connection test=%d body=%s", rec.Code, rec.Body.String())
+	}
+	denyACL = true
+	if rec := test(); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "ACL synchronization") {
+		t.Fatalf("insufficient ACL permission status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

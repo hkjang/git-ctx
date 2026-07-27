@@ -32,6 +32,25 @@ func TestBitbucket69EndpointsAndPagination(t *testing.T) {
 		case "/rest/api/1.0/projects/KCB/repos/demo/raw/docs/guide.md":
 			w.Header().Set("Content-Type", "text/plain")
 			w.Write([]byte("# Guide"))
+		case "/rest/api/1.0/projects/KCB/repos/demo/permissions/users":
+			w.Write([]byte(`{"values":[{"user":{"name":"repo-user","slug":"repo-user"},"permission":"REPO_READ"}],"isLastPage":true}`))
+		case "/rest/api/1.0/projects/KCB/repos/demo/permissions/groups":
+			w.Write([]byte(`{"values":[{"group":{"name":"repo-group"},"permission":"REPO_WRITE"}],"isLastPage":true}`))
+		case "/rest/api/1.0/projects/KCB/permissions/users":
+			w.Write([]byte(`{"values":[{"user":{"name":"project-user","slug":"project-user"},"permission":"PROJECT_READ"}],"isLastPage":true}`))
+		case "/rest/api/1.0/projects/KCB/permissions/groups":
+			w.Write([]byte(`{"values":[{"group":{"name":"project-group"},"permission":"PROJECT_ADMIN"}],"isLastPage":true}`))
+		case "/rest/api/1.0/admin/permissions/users":
+			w.Write([]byte(`{"values":[{"user":{"name":"global-admin","slug":"global-admin"},"permission":"ADMIN"},{"user":{"name":"licensed","slug":"licensed"},"permission":"LICENSED_USER"}],"isLastPage":true}`))
+		case "/rest/api/1.0/admin/permissions/groups":
+			w.Write([]byte(`{"values":[{"group":{"name":"sysadmins"},"permission":"SYS_ADMIN"}],"isLastPage":true}`))
+		case "/rest/api/1.0/projects/KCB/permissions/PROJECT_READ/all":
+			w.Write([]byte(`{"permitted":false}`))
+		case "/rest/api/1.0/projects/KCB/permissions/PROJECT_WRITE/all":
+			w.Write([]byte(`{"permitted":true}`))
+		case "/rest/api/1.0/projects/KCB/permissions/PROJECT_ADMIN/all":
+			t.Error("default permission lookup should stop after a match")
+			w.Write([]byte(`{"permitted":false}`))
 		case "/rest/search/latest/search":
 			if r.Method != http.MethodPost {
 				t.Error("search must use POST")
@@ -72,5 +91,21 @@ func TestBitbucket69EndpointsAndPagination(t *testing.T) {
 	hits, err := c.SearchQuery(context.Background(), ref, "main", "gpu usage", 5)
 	if err != nil || len(hits) != 1 || hits[0].Path != "docs/gpu.md" || hits[0].LineStart != 7 || hits[0].Snippet != "GPU usage" {
 		t.Fatalf("hits=%#v err=%v", hits, err)
+	}
+	permissions, err := c.GetPermissions(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, permission := range permissions {
+		got[permission.Kind+":"+permission.Principal] = true
+	}
+	for _, want := range []string{"user:repo-user", "group:repo-group", "user:project-user", "group:project-group", "user:global-admin", "group:sysadmins", "all:bitbucket:licensed"} {
+		if !got[want] {
+			t.Fatalf("missing inherited permission %q in %#v", want, permissions)
+		}
+	}
+	if got["user:licensed"] {
+		t.Fatalf("LICENSED_USER must not imply repository access: %#v", permissions)
 	}
 }

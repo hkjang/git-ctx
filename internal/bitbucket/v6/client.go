@@ -58,6 +58,16 @@ type page[T any] struct {
 	NextPageStart int  `json:"nextPageStart"`
 }
 
+type HTTPError struct {
+	StatusCode int
+	Status     string
+	Body       string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("bitbucket API %s: %s", e.Status, e.Body)
+}
+
 func pageAll[T any](ctx context.Context, c *Client, endpoint string) ([]T, error) {
 	start := 0
 	var all []T
@@ -267,25 +277,86 @@ func (c *Client) GetPermissions(ctx context.Context, r source.RepositoryRef) ([]
 		Permission string
 		User       struct{ Name, Slug string }
 	}
-	users, e := pageAll[userItem](ctx, c, c.repo(r)+"/permissions/users")
-	if e != nil {
-		return nil, e
+	type groupItem struct {
+		Permission string
+		Group      struct{ Name string }
 	}
-	type groupItem struct{ Permission, Group string }
-	groups, e := pageAll[groupItem](ctx, c, c.repo(r)+"/permissions/groups")
-	if e != nil {
-		return nil, e
+	type permissionSet struct {
+		users  []userItem
+		groups []groupItem
 	}
-	out := make([]source.Permission, 0, len(users)+len(groups))
-	for _, x := range users {
-		p := x.User.Slug
-		if p == "" {
-			p = x.User.Name
+	load := func(prefix string, optional bool) (permissionSet, error) {
+		users, err := pageAll[userItem](ctx, c, prefix+"/permissions/users")
+		if err != nil {
+			var statusErr *HTTPError
+			if optional && errors.As(err, &statusErr) && (statusErr.StatusCode == http.StatusUnauthorized || statusErr.StatusCode == http.StatusForbidden) {
+				return permissionSet{}, nil
+			}
+			return permissionSet{}, err
 		}
-		out = append(out, source.Permission{Principal: p, Kind: "user", Permission: x.Permission})
+		groups, err := pageAll[groupItem](ctx, c, prefix+"/permissions/groups")
+		if err != nil {
+			var statusErr *HTTPError
+			if optional && errors.As(err, &statusErr) && (statusErr.StatusCode == http.StatusUnauthorized || statusErr.StatusCode == http.StatusForbidden) {
+				return permissionSet{users: users}, nil
+			}
+			return permissionSet{}, err
+		}
+		return permissionSet{users: users, groups: groups}, nil
 	}
-	for _, x := range groups {
-		out = append(out, source.Permission{Principal: x.Group, Kind: "group", Permission: x.Permission})
+	sets := make([]permissionSet, 0, 3)
+	for _, item := range []struct {
+		prefix   string
+		optional bool
+	}{
+		{c.repo(r), false},
+		{"/projects/" + escape(r.ProjectKey), false},
+		{"/admin", true},
+	} {
+		set, err := load(item.prefix, item.optional)
+		if err != nil {
+			return nil, err
+		}
+		sets = append(sets, set)
+	}
+	permissions := map[string]source.Permission{}
+	for index, set := range sets {
+		for _, item := range set.users {
+			if index == 2 && item.Permission != "ADMIN" && item.Permission != "SYS_ADMIN" {
+				continue
+			}
+			principal := item.User.Slug
+			if principal == "" {
+				principal = item.User.Name
+			}
+			if principal != "" {
+				permissions["user:"+principal] = source.Permission{Principal: principal, Kind: "user", Permission: item.Permission}
+			}
+		}
+		for _, item := range set.groups {
+			if index == 2 && item.Permission != "ADMIN" && item.Permission != "SYS_ADMIN" {
+				continue
+			}
+			if item.Group.Name != "" {
+				permissions["group:"+item.Group.Name] = source.Permission{Principal: item.Group.Name, Kind: "group", Permission: item.Permission}
+			}
+		}
+	}
+	for _, permission := range []string{"PROJECT_READ", "PROJECT_WRITE", "PROJECT_ADMIN"} {
+		var result struct {
+			Permitted bool `json:"permitted"`
+		}
+		if err := c.json(ctx, http.MethodGet, "/projects/"+escape(r.ProjectKey)+"/permissions/"+permission+"/all", nil, nil, &result); err != nil {
+			return nil, err
+		}
+		if result.Permitted {
+			permissions["all:bitbucket:licensed"] = source.Permission{Principal: "bitbucket:licensed", Kind: "all", Permission: permission}
+			break
+		}
+	}
+	out := make([]source.Permission, 0, len(permissions))
+	for _, permission := range permissions {
+		out = append(out, permission)
 	}
 	return out, nil
 }
@@ -327,7 +398,7 @@ func (c *Client) request(ctx context.Context, method, endpoint string, q url.Val
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer resp.Body.Close()
 		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("bitbucket API %s: %s", resp.Status, string(limited))
+		return nil, &HTTPError{StatusCode: resp.StatusCode, Status: resp.Status, Body: string(limited)}
 	}
 	return resp, nil
 }

@@ -28,6 +28,19 @@ func TestSanitizeBlocksPrivateKeysAndRedactsCredentials(t *testing.T) {
 		t.Fatalf("secret remained: %q", safe)
 	}
 }
+
+func TestReadableIncludesInheritedBitbucketPermissionLevels(t *testing.T) {
+	for _, permission := range []string{"READ", "WRITE", "ADMIN", "REPO_ADMIN", "PROJECT_WRITE", "SYS_ADMIN"} {
+		if !readable(permission) {
+			t.Errorf("%s should imply repository read access", permission)
+		}
+	}
+	for _, permission := range []string{"NONE", "LICENSED_USER", "GUEST"} {
+		if readable(permission) {
+			t.Errorf("%s must not imply repository read access", permission)
+		}
+	}
+}
 func (fakeSource) ListBranches(context.Context, source.RepositoryRef) ([]source.Reference, error) {
 	return nil, nil
 }

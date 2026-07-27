@@ -344,13 +344,17 @@ func (a *App) authenticate(next http.Handler) http.Handler {
 				return
 			}
 			uid, kid, prefix := info.UserID, info.KeyID, info.Prefix
-			var subject, username, aclPrincipal, aclGroupText string
-			if err := a.store.DB.QueryRowContext(r.Context(), a.store.Rebind(`SELECT u.subject,u.username,COALESCE(i.bitbucket_user_slug,''),COALESCE(i.bitbucket_groups,'') FROM users u LEFT JOIN user_identities i ON i.user_id=u.id WHERE u.id=? AND u.status='active'`), uid).Scan(&subject, &username, &aclPrincipal, &aclGroupText); err != nil {
+			var subject, username, bitbucketSlug, gitlabID, aclGroupText string
+			if err := a.store.DB.QueryRowContext(r.Context(), a.store.Rebind(`SELECT u.subject,u.username,COALESCE(i.bitbucket_user_slug,''),COALESCE(i.gitlab_user_id,''),COALESCE(i.bitbucket_groups,'') FROM users u LEFT JOIN user_identities i ON i.user_id=u.id WHERE u.id=? AND u.status='active'`), uid).Scan(&subject, &username, &bitbucketSlug, &gitlabID, &aclGroupText); err != nil {
 				problem(w, 401, "invalid_token", "User is inactive")
 				return
 			}
 			roles, _ := a.userRoles(r.Context(), uid)
-			next.ServeHTTP(w, r.WithContext(auth.WithPrincipal(r.Context(), auth.Principal{UserID: uid, Subject: subject, Username: username, ACLPrincipal: aclPrincipal, ACLPrincipals: aclPrincipals(aclPrincipal, splitCSV(aclGroupText)), Roles: roles, KeyID: kid, KeyPrefix: prefix, Scopes: info.Scopes, AllowedRepositories: info.Restrictions.AllowedRepositories})))
+			aclPrincipal := bitbucketSlug
+			if aclPrincipal == "" && gitlabID != "" {
+				aclPrincipal = "gitlab:" + gitlabID
+			}
+			next.ServeHTTP(w, r.WithContext(auth.WithPrincipal(r.Context(), auth.Principal{UserID: uid, Subject: subject, Username: username, ACLPrincipal: aclPrincipal, ACLPrincipals: sourceACLPrincipals(bitbucketSlug, gitlabID, splitCSV(aclGroupText)), Roles: roles, KeyID: kid, KeyPrefix: prefix, Scopes: info.Scopes, AllowedRepositories: info.Restrictions.AllowedRepositories})))
 			return
 		}
 		if cookie, err := r.Cookie("git_ctx_session"); err == nil {
@@ -384,7 +388,7 @@ func (a *App) authenticate(next http.Handler) http.Handler {
 			}
 			next.ServeHTTP(w, r.WithContext(auth.WithPrincipal(r.Context(), auth.Principal{
 				UserID: userID, Subject: identity.Subject, Username: identity.Username,
-				ACLPrincipal: aclPrincipal, ACLPrincipals: aclPrincipals(aclPrincipal, identity.ACLGroups), Roles: identity.Roles, Groups: identity.Groups,
+				ACLPrincipal: aclPrincipal, ACLPrincipals: sourceACLPrincipals(identity.BitbucketUserSlug, identity.GitLabUserID, identity.ACLGroups), Roles: identity.Roles, Groups: identity.Groups,
 			})))
 			return
 		}
@@ -618,7 +622,7 @@ func (a *App) sessionPrincipal(ctx context.Context, raw string) (auth.Principal,
 		roles = []string{"platform-admin"}
 	}
 	_, _ = a.store.DB.ExecContext(ctx, a.store.Rebind(`UPDATE user_sessions SET last_seen_at=? WHERE id_hash=?`), time.Now().UTC(), sessionHash(raw))
-	return auth.Principal{UserID: userID, Subject: subject, Username: username, ACLPrincipal: acl, ACLPrincipals: aclPrincipals(acl, splitCSV(bitbucketGroups)), Roles: roles}, true
+	return auth.Principal{UserID: userID, Subject: subject, Username: username, ACLPrincipal: acl, ACLPrincipals: sourceACLPrincipals(bitbucketSlug, gitlabID, splitCSV(bitbucketGroups)), Roles: roles}, true
 }
 func randomToken(size int) (string, error) {
 	raw := make([]byte, size)
@@ -1422,9 +1426,26 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 		if err != nil {
 			return err
 		}
-		_, err = adapter.ListProjects(ctx)
+		projects, err := adapter.ListProjects(ctx)
 		if err != nil {
 			return fmt.Errorf("%s connection test: %w", category, err)
+		}
+		if len(projects) == 0 {
+			return nil
+		}
+		repositories, err := adapter.ListRepositories(ctx, projects[0].Key)
+		if err != nil {
+			return fmt.Errorf("%s repository discovery test: %w", category, err)
+		}
+		if len(repositories) == 0 {
+			return nil
+		}
+		repository := source.RepositoryRef{ProjectKey: repositories[0].ProjectKey, Slug: repositories[0].Slug}
+		if _, err = adapter.GetPermissions(ctx, repository); err != nil {
+			return fmt.Errorf("%s ACL synchronization test: %w", category, err)
+		}
+		if _, err = adapter.ListBranches(ctx, repository); err != nil {
+			return fmt.Errorf("%s branch discovery test: %w", category, err)
 		}
 	case "ui":
 		if value, ok := value["publicUrl"].(string); ok && value != "" {
@@ -2629,6 +2650,21 @@ func aclPrincipals(primary string, groups []string) []string {
 	var out []string
 	if primary != "" {
 		out = append(out, primary)
+	}
+	for _, group := range groups {
+		if group != "" && !stringContains(out, group) {
+			out = append(out, group)
+		}
+	}
+	return out
+}
+func sourceACLPrincipals(bitbucketSlug, gitlabID string, groups []string) []string {
+	var out []string
+	if bitbucketSlug != "" {
+		out = append(out, bitbucketSlug, "bitbucket:licensed")
+	}
+	if gitlabID != "" {
+		out = append(out, "gitlab:"+gitlabID, "gitlab:authenticated")
 	}
 	for _, group := range groups {
 		if group != "" && !stringContains(out, group) {

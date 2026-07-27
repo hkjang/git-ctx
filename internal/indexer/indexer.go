@@ -264,7 +264,15 @@ func normalize(s string) string {
 }
 func readable(p string) bool {
 	p = strings.ToLower(p)
-	return p == "read" || p == "repo_read" || p == "reporter" || p == "developer" || p == "maintainer" || p == "owner" || strings.Contains(p, "read")
+	switch p {
+	case "read", "write", "admin",
+		"repo_read", "repo_write", "repo_admin",
+		"project_read", "project_write", "project_admin",
+		"sys_admin", "reporter", "developer", "maintainer", "owner":
+		return true
+	default:
+		return strings.Contains(p, "read")
+	}
 }
 func contentType(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
