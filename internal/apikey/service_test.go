@@ -1,0 +1,128 @@
+package apikey
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"git-ctx/internal/store"
+)
+
+func TestCreateAuthenticateAndRevoke(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file::memory:?cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+	_, err = s.DB.Exec(`INSERT INTO users(id,subject,username,email) VALUES('u1','alice','alice','alice@example.test')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := New(s, strings.Repeat("p", 32))
+	key, raw, err := svc.Create(ctx, "u1", "codex", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(raw, "bctx_live_"+key.Prefix+"_") {
+		t.Fatalf("unexpected key format: %q", raw)
+	}
+
+	var stored string
+	if err := s.DB.QueryRow(`SELECT hex(key_hash) FROM api_keys WHERE id=?`, key.ID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(stored, raw) {
+		t.Fatal("plaintext key was stored")
+	}
+	userID, _, prefix, scopes, err := svc.Authenticate(ctx, raw)
+	if err != nil || userID != "u1" || prefix != key.Prefix || len(scopes) != 2 {
+		t.Fatalf("authentication failed: %v", err)
+	}
+	if err := svc.SetStatus(ctx, "u1", key.ID, "revoked"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, err := svc.Authenticate(ctx, raw); err == nil {
+		t.Fatal("revoked key authenticated")
+	}
+}
+
+func TestRestrictionsRateLimitRotationAndPause(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file::memory:?cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+	_, err = s.DB.Exec(`INSERT INTO users(id,subject,username,email) VALUES('u2','bob','bob','')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := New(s, strings.Repeat("q", 32))
+	restrictions := Restrictions{AllowedCIDRs: []string{"10.0.0.0/8"}, AllowedRepositories: []string{"/kcb/demo"}, RatePerMinute: 1}
+	key, raw, err := svc.CreateWithRestrictions(ctx, "u2", "restricted", []string{"query-docs"}, nil, restrictions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.AuthenticateRequest(ctx, raw, "192.168.1.1"); err == nil {
+		t.Fatal("disallowed IP authenticated")
+	}
+	info, err := svc.AuthenticateRequest(ctx, raw, "10.20.30.40")
+	if err != nil || len(info.Restrictions.AllowedRepositories) != 1 {
+		t.Fatalf("authentication=%#v err=%v", info, err)
+	}
+	if _, err = svc.AuthenticateRequest(ctx, raw, "10.20.30.40"); err == nil {
+		t.Fatal("rate limit was not enforced")
+	} else {
+		var limited *RateLimitError
+		if !errors.As(err, &limited) {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	var notices int
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id='u2' AND notification_type='api_key_rate_limit'`).Scan(&notices)
+	if notices != 1 {
+		t.Fatalf("rate notifications=%d", notices)
+	}
+	if err = svc.SetStatus(ctx, "u2", key.ID, "disabled"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = svc.AuthenticateRequest(ctx, raw, "10.20.30.40"); err == nil {
+		t.Fatal("disabled key authenticated")
+	}
+	if err = svc.SetStatus(ctx, "u2", key.ID, "enabled"); err != nil {
+		t.Fatal(err)
+	}
+
+	replacement, replacementRaw, err := svc.Rotate(ctx, "u2", key.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement.ID == key.ID || replacementRaw == raw {
+		t.Fatal("rotation did not issue a new key")
+	}
+	if _, err = svc.AuthenticateRequest(ctx, raw, "10.20.30.40"); err == nil {
+		t.Fatal("zero-overlap old key authenticated")
+	}
+	if _, err = svc.AuthenticateRequest(ctx, replacementRaw, "10.20.30.40"); err != nil {
+		t.Fatalf("replacement failed: %v", err)
+	}
+}
+
+func TestRejectsInvalidRestrictions(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file::memory:?cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+	_, _ = s.DB.Exec(`INSERT INTO users(id,subject,username,email) VALUES('u3','carol','carol','')`)
+	svc := New(s, strings.Repeat("x", 32))
+	if _, _, err := svc.CreateWithRestrictions(ctx, "u3", "bad", nil, nil, Restrictions{AllowedCIDRs: []string{"not-cidr"}}); err == nil {
+		t.Fatal("invalid CIDR accepted")
+	}
+	if _, _, err := svc.CreateWithRestrictions(ctx, "u3", "bad", nil, nil, Restrictions{AllowedRepositories: []string{"repo"}}); err == nil {
+		t.Fatal("invalid repository accepted")
+	}
+}

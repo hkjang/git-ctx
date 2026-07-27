@@ -1,0 +1,122 @@
+openapi: 3.1.0
+info:
+  title: git-ctx REST API
+  version: 0.1.0
+  description: User and administrative API for the Context7-compatible internal repository knowledge platform.
+servers:
+  - url: https://git-ctx.company.local
+security:
+  - keycloakBearer: []
+paths:
+  /api/v1/public/config:
+    get: {summary: Public non-secret UI branding, security: [], responses: {"200": {description: Branding configuration}}}
+  /api/v1/me:
+    get: {summary: Current Keycloak user, responses: {"200": {description: User principal}}}
+  /api/v1/me/repositories:
+    get: {summary: ACL-filtered source repositories, responses: {"200": {description: Repository list}}}
+  /api/v1/me/api-keys:
+    get: {summary: List personal MCP keys without secrets, responses: {"200": {description: Key list}}}
+    post:
+      summary: Create a personal MCP key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/CreateAPIKey"}
+      responses:
+        "201": {description: Key and one-time plaintext secret}
+  /api/v1/me/api-keys/{id}/rotate:
+    post:
+      summary: Rotate a key with an overlap period
+      parameters: [{$ref: "#/components/parameters/Id"}]
+      responses: {"201": {description: Replacement key and one-time secret}}
+  /api/v1/me/api-keys/{id}/disable:
+    post: {summary: Pause a key, parameters: [{$ref: "#/components/parameters/Id"}], responses: {"204": {description: Disabled}}}
+  /api/v1/me/api-keys/{id}/enable:
+    post: {summary: Reactivate a paused key, parameters: [{$ref: "#/components/parameters/Id"}], responses: {"204": {description: Enabled}}}
+  /api/v1/me/api-keys/{id}:
+    delete: {summary: Permanently revoke a key, parameters: [{$ref: "#/components/parameters/Id"}], responses: {"204": {description: Revoked}}}
+  /api/v1/me/usage:
+    get: {summary: Personal MCP usage aggregates, responses: {"200": {description: Usage}}}
+  /api/v1/me/calls:
+    get: {summary: Recent personal MCP calls, responses: {"200": {description: Calls}}}
+  /api/v1/me/notifications:
+    get: {summary: Key expiry and abnormal-usage notifications, responses: {"200": {description: Notifications}}}
+  /api/v1/me/notifications/{id}/read:
+    post: {summary: Mark a notification read, parameters: [{$ref: "#/components/parameters/Id"}], responses: {"204": {description: Read}}}
+  /api/v1/tools/resolve/test:
+    post: {summary: Test resolve-library-id with current ACL, responses: {"200": {description: Candidates}}}
+  /api/v1/tools/query/test:
+    post: {summary: Test query-docs with current ACL, responses: {"200": {description: Text content}}}
+  /api/v1/admin/settings:
+    get: {summary: Setting categories and versions, responses: {"200": {description: Settings}}}
+  /api/v1/admin/settings/{category}:
+    get: {summary: Read masked setting, parameters: [{$ref: "#/components/parameters/Category"}], responses: {"200": {description: Masked setting}}}
+    put: {summary: Validate and atomically version a setting, parameters: [{$ref: "#/components/parameters/Category"}], responses: {"200": {description: New version}}}
+  /api/v1/admin/settings/{category}/rollback:
+    post: {summary: Restore a historical value as a new version, parameters: [{$ref: "#/components/parameters/Category"}], responses: {"200": {description: Restored version}}}
+  /api/v1/admin/settings/keycloak/test:
+    post: {summary: Test OIDC Discovery and configuration, responses: {"200": {description: Connected}}}
+  /api/v1/admin/settings/keycloak/preview:
+    post: {summary: Verify a short-lived test token and preview claims and role mappings, responses: {"200": {description: Mapped identity}}}
+  /api/v1/admin/settings/bitbucket/test:
+    post: {summary: Test Bitbucket Server connection, responses: {"200": {description: Connected}}}
+  /api/v1/admin/settings/gitlab/test:
+    post: {summary: Test GitLab connection, responses: {"200": {description: Connected}}}
+  /api/v1/admin/sources/{source}/discover:
+    post:
+      summary: Discover projects or repositories
+      parameters:
+        - {name: source, in: path, required: true, schema: {type: string, enum: [bitbucket, gitlab]}}
+      responses: {"200": {description: Discovery results}}
+  /api/v1/admin/repositories:
+    get: {summary: Registered repositories, responses: {"200": {description: Repositories}}}
+    post: {summary: Register and enqueue initial index, responses: {"201": {description: Registered}}}
+  /api/v1/admin/repositories/{id}/index:
+    post: {summary: Enqueue a ref index, parameters: [{$ref: "#/components/parameters/Id"}], responses: {"202": {description: Queued}}}
+  /api/v1/admin/repositories/{id}/refs:
+    get: {summary: List available branches and tags from the source, parameters: [{$ref: "#/components/parameters/Id"}], responses: {"200": {description: References}}}
+  /api/v1/admin/repositories/{id}/policy:
+    get: {summary: Read the repository index policy, parameters: [{$ref: "#/components/parameters/Id"}], responses: {"200": {description: Index policy}}}
+    put: {summary: Replace the repository index policy, parameters: [{$ref: "#/components/parameters/Id"}], responses: {"200": {description: Updated policy}}}
+  /api/v1/admin/index-jobs:
+    get: {summary: Recent index jobs, responses: {"200": {description: Jobs}}}
+  /api/v1/admin/index-jobs/{id}/retry:
+    post: {summary: Retry a failed job, parameters: [{$ref: "#/components/parameters/Id"}], responses: {"202": {description: Queued}}}
+  /api/v1/admin/api-keys:
+    get: {summary: List all key metadata, responses: {"200": {description: Keys}}}
+  /api/v1/admin/api-keys/{id}/revoke:
+    post: {summary: Security administrator key revocation, parameters: [{$ref: "#/components/parameters/Id"}], responses: {"204": {description: Revoked}}}
+  /api/v1/admin/audit-logs:
+    get: {summary: Immutable audit records, responses: {"200": {description: Audit records}}}
+  /api/v1/admin/security-events:
+    get: {summary: Index-time secret detections and actions, responses: {"200": {description: Security events}}}
+  /api/v1/admin/health:
+    get: {summary: Administrative service status, responses: {"200": {description: Health}}}
+  /api/v1/admin/mcp/tools:
+    get: {summary: MCP tool schemas and runtime policies, responses: {"200": {description: Tool catalog}}}
+  /api/v1/admin/mcp/tools/{id}:
+    put: {summary: Change tool enabled state timeout and cache, parameters: [{$ref: "#/components/parameters/Id"}], responses: {"200": {description: Updated policy}}}
+components:
+  securitySchemes:
+    keycloakBearer: {type: http, scheme: bearer, bearerFormat: JWT}
+    context7Key: {type: apiKey, in: header, name: CONTEXT7_API_KEY}
+  parameters:
+    Id: {name: id, in: path, required: true, schema: {type: string}}
+    Category: {name: category, in: path, required: true, schema: {type: string}}
+  schemas:
+    CreateAPIKey:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string, maxLength: 100}
+        scopes: {type: array, items: {type: string, enum: [resolve-library-id, query-docs]}}
+        expiresAt: {type: [string, "null"], format: date-time}
+        restrictions:
+          type: object
+          properties:
+            allowedCidrs: {type: array, items: {type: string}}
+            allowedRepositories: {type: array, items: {type: string, pattern: "^/[^/]+/[^/]+$"}}
+            ratePerMinute: {type: integer, minimum: 0}
+            ratePerHour: {type: integer, minimum: 0}
+            ratePerDay: {type: integer, minimum: 0}

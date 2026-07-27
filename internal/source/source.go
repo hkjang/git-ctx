@@ -1,0 +1,33 @@
+package source
+
+import "context"
+
+type Project struct{ Key, Name, Description string }
+type Repository struct {
+	ID                                                 int64
+	ProjectKey, Slug, Name, Description, DefaultBranch string
+	Archived                                           bool
+}
+type RepositoryRef struct{ ProjectKey, Slug string }
+type Reference struct {
+	ID, Name, LatestCommit string
+	Default                bool
+}
+type Commit struct{ ID, DisplayID, Message, Author string }
+type File struct {
+	Path string
+	Size int64
+}
+type Permission struct{ Principal, Kind, Permission string }
+
+type RepositorySource interface {
+	ListProjects(context.Context) ([]Project, error)
+	ListRepositories(context.Context, string) ([]Repository, error)
+	ListBranches(context.Context, RepositoryRef) ([]Reference, error)
+	ListTags(context.Context, RepositoryRef) ([]Reference, error)
+	GetCommit(context.Context, RepositoryRef, string) (Commit, error)
+	ListFiles(context.Context, RepositoryRef, string) ([]File, error)
+	GetFile(context.Context, RepositoryRef, string, string) ([]byte, error)
+	GetPermissions(context.Context, RepositoryRef) ([]Permission, error)
+	RegisterWebhook(context.Context, RepositoryRef, string, string) error
+}

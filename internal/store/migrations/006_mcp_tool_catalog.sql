@@ -1,0 +1,9 @@
+CREATE TABLE IF NOT EXISTS mcp_tools (
+  name TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1,
+  timeout_ms INTEGER NOT NULL DEFAULT 30000,
+  cache_seconds INTEGER NOT NULL DEFAULT 0,
+  updated_by TEXT NOT NULL DEFAULT '',
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO mcp_tools(name) VALUES('resolve-library-id') ON CONFLICT(name) DO NOTHING;
+INSERT INTO mcp_tools(name) VALUES('query-docs') ON CONFLICT(name) DO NOTHING;

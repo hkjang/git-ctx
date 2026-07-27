@@ -1,0 +1,28 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: gitctx
+      POSTGRES_USER: gitctx
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gitctx"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  git-ctx:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports: ["4747:4747"]
+    environment:
+      GIT_CTX_DB_DRIVER: postgres
+      GIT_CTX_DB_DSN: postgres://gitctx:${POSTGRES_PASSWORD}@postgres:5432/gitctx?sslmode=disable
+      GIT_CTX_API_KEY_PEPPER: ${GIT_CTX_API_KEY_PEPPER:?set GIT_CTX_API_KEY_PEPPER}
+      GIT_CTX_MASTER_KEY: ${GIT_CTX_MASTER_KEY:?set 32-byte GIT_CTX_MASTER_KEY}
+      GIT_CTX_BOOTSTRAP_ADMIN: ${GIT_CTX_BOOTSTRAP_ADMIN:-}
+volumes:
+  postgres-data:

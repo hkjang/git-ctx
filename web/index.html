@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#13213c" />
+    <title>git-ctx</title>
+    <link id="favicon" rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <header>
+      <img src="/logo.svg" alt="git-ctx" class="header-logo" />
+      <span id="brand-tagline">사내 개발 지식 MCP</span>
+      <nav>
+        <button id="login">Keycloak 로그인</button
+        ><button id="logout" hidden>로그아웃</button>
+      </nav>
+    </header>
+    <main>
+      <section>
+        <h1>Context7 호환 사내 문서 검색</h1>
+        <p>
+          Bitbucket과 GitLab 문서를 저장소 권한에 맞게 검색하고 AI 개발 도구에
+          연결합니다.
+        </p>
+        <div id="status" class="notice">서버 상태 확인 중…</div>
+        <div id="service-notice" class="notice" hidden></div>
+      </section>
+      <section id="account" hidden>
+        <h2>내 계정</h2>
+        <p id="identity"></p>
+      </section>
+      <section class="grid">
+        <article>
+          <h2>내 MCP 연결</h2>
+          <pre>{
+  "mcpServers": {
+    "git-ctx": {
+      "url": "<span id="endpoint"></span>/mcp",
+      "headers": {
+        "CONTEXT7_API_KEY": "${GIT_CTX_API_KEY}"
+      }
+    }
+  }
+}</pre>
+          <p>키 원문은 환경변수에 저장하고 설정 파일에는 넣지 마세요.</p>
+        </article>
+        <article>
+          <h2>지원 도구</h2>
+          <dl>
+            <dt>resolve-library-id</dt>
+            <dd>접근 가능한 라이브러리 ID 후보 검색</dd>
+            <dt>query-docs</dt>
+            <dd>버전별 문서와 코드 예제를 출처와 함께 검색</dd>
+          </dl>
+        </article>
+      </section>
+      <section id="keys" hidden>
+        <div class="section-title">
+          <div>
+            <h2>내 MCP API 키</h2>
+            <p>전체 키는 생성 직후 한 번만 표시됩니다.</p>
+          </div>
+          <button id="new-key">새 키 만들기</button>
+        </div>
+        <form id="key-form" class="form-row" hidden>
+          <label
+            >이름<input
+              name="name"
+              required
+              maxlength="100"
+              placeholder="Codex 노트북" /></label
+          ><label>만료일<input name="expiresAt" type="date" /></label>
+          <fieldset>
+            <legend>허용 도구</legend>
+            <label
+              ><input
+                type="checkbox"
+                name="scope"
+                value="resolve-library-id"
+                checked
+              />
+              resolve-library-id</label
+            ><label
+              ><input type="checkbox" name="scope" value="query-docs" checked />
+              query-docs</label
+            >
+          </fieldset>
+          <label
+            >허용 CIDR<input
+              name="cidrs"
+              placeholder="10.0.0.0/8, 192.168.1.0/24" /></label
+          ><label
+            >허용 저장소 Library ID<input
+              name="repositories"
+              placeholder="/kcb/clustara, /ops/agent" /></label
+          ><label
+            >분당 제한<input
+              name="rateMinute"
+              type="number"
+              min="0"
+              value="0" /></label
+          ><label
+            >시간당 제한<input
+              name="rateHour"
+              type="number"
+              min="0"
+              value="0" /></label
+          ><label
+            >일일 제한<input
+              name="rateDay"
+              type="number"
+              min="0"
+              value="0" /></label
+          ><button type="submit">생성</button>
+        </form>
+        <div id="secret" class="secret" hidden></div>
+        <div id="key-list" class="table-wrap"></div>
+      </section>
+      <section id="activity" hidden>
+        <h2>내 저장소와 MCP 사용량</h2>
+        <h3>알림</h3>
+        <div id="my-notifications" class="table-wrap"></div>
+        <h3>접근 가능한 저장소</h3>
+        <div id="my-repositories" class="table-wrap"></div>
+        <h3>사용량</h3>
+        <div id="my-usage" class="table-wrap"></div>
+        <h3>최근 호출</h3>
+        <div id="my-calls" class="table-wrap"></div>
+      </section>
+      <section id="admin" hidden>
+        <div id="settings-admin" hidden>
+          <h2>관리자 설정</h2>
+          <p>
+            설정은 암호화되어 버전별 저장됩니다. Secret, PAT, Token은 재조회 시
+            마스킹됩니다.
+          </p>
+          <div class="admin-editor">
+            <label>설정 영역<select id="category"></select></label
+            ><label
+              >변경 사유<input id="reason" placeholder="변경 사유" /></label
+            ><label class="wide"
+              >JSON 설정<textarea
+                id="setting-json"
+                rows="16"
+                spellcheck="false"
+              >
+{}</textarea>
+            </label>
+            <div>
+              <button id="load-setting">불러오기</button>
+              <button id="test-keycloak">Keycloak 연결 시험</button>
+              <button id="preview-keycloak">Claim·역할 미리보기</button>
+              <button id="save-setting">저장</button>
+              <button id="rollback-setting" class="danger">
+                이전 버전 복구
+              </button>
+            </div>
+          </div>
+        </div>
+        <div id="admin-result" class="notice"></div>
+        <div id="mcp-admin-section" hidden>
+          <hr />
+          <h2>MCP 도구 운영</h2>
+          <div id="mcp-tools" class="table-wrap"></div>
+        </div>
+        <div id="source-admin-section" hidden>
+          <hr />
+          <h2>소스와 색인 운영</h2>
+          <div class="form-row">
+            <label
+              >소스<select id="source-type">
+                <option>bitbucket</option>
+                <option>gitlab</option>
+              </select></label
+            ><label
+              >프로젝트 Key / Group ID<input
+                id="project-key"
+                placeholder="비우면 프로젝트 목록 조회"
+            /></label>
+            <div>
+              <button id="discover">소스 탐색</button>
+              <button id="refresh-ops">현황 새로고침</button>
+            </div>
+          </div>
+          <div id="discovery" class="table-wrap"></div>
+          <h3>등록 저장소</h3>
+          <div id="repositories" class="table-wrap"></div>
+          <h3>최근 색인 작업</h3>
+          <div id="jobs" class="table-wrap"></div>
+        </div>
+        <div id="status-admin-section" hidden>
+          <hr />
+          <h2>운영 상태</h2>
+          <div id="system-health" class="notice"></div>
+        </div>
+        <div id="security-admin-section" hidden>
+          <h2>보안</h2>
+          <div id="security-keys-section">
+            <h3>전체 API 키</h3>
+            <div id="admin-keys" class="table-wrap"></div>
+          </div>
+          <div id="security-events-section">
+            <h3>색인 보안 이벤트</h3>
+            <div id="security-events" class="table-wrap"></div>
+          </div>
+        </div>
+        <div id="audit-admin-section" hidden>
+          <h2>감사</h2>
+          <h3>최근 감사 로그</h3>
+          <div id="audit-logs" class="table-wrap"></div>
+        </div>
+      </section>
+    </main>
+    <script src="/roles.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
