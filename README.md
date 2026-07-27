@@ -87,3 +87,6 @@ REST 계약은 [docs/openapi.yaml](docs/openapi.yaml), 동적 설정 예시는
 
 Kubernetes 배포는 [deploy/kubernetes/README.md](deploy/kubernetes/README.md)를
 참고하십시오.
+
+인터넷이 차단된 환경의 이미지 반입과 실행 절차는
+[docs/offline-deployment.md](docs/offline-deployment.md)를 참고하십시오.
