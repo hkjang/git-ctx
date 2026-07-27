@@ -8,6 +8,12 @@ DSN에서 도메인 분리해 결정한다. Keycloak 미설정 시 `backups/boot
 메모리와 파일에서 폐기된다. 운영에서는 TLS 종단 뒤에 배치하고 프록시가 신뢰할 수
 없는 전달 헤더를 제거해야 한다.
 
+화면의 최초 관리자 설정은 원문 토큰을 한 번만 `POST /api/v1/bootstrap/login`으로
+검증한 뒤 30분 HttpOnly·SameSite=Strict 세션으로 교환한다. 따라서 역방향 프록시는
+일반 API의 Authorization 헤더 전달 여부와 무관하게 초기 설정을 수행할 수 있다.
+Keycloak 설정을 저장하면 모든 Bootstrap 세션과 Bootstrap identity에서 생성된 API
+키를 즉시 폐기한다.
+
 ## 비밀 회전
 
 DSN 문자열은 설정 암호문과 API 키 검증 재료에 포함되므로 임의로 정규화하거나

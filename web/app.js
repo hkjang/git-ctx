@@ -135,6 +135,9 @@ async function loadBranding() {
     $(".header-logo").alt = config.serviceName || "git-ctx";
     $("#favicon").href = config.faviconUrl || "/favicon.svg";
     $("#brand-tagline").textContent = config.tagline || "사내 개발 지식 MCP";
+    const versionText = `v${config.version || "unknown"}`;
+    $("#service-version").textContent = versionText;
+    $("#login-version").textContent = `서비스 버전 ${versionText}`;
     bootstrapInfo = {
       required: Boolean(config.bootstrapRequired),
       tokenFile: config.bootstrapTokenFile || "backups/bootstrap-admin.token",
@@ -154,8 +157,18 @@ $("#login").onclick = () => {
     `서버의 ${bootstrapInfo.tokenFile} 파일에 생성된 일회용 토큰을 입력하세요.`,
   );
   if (!token) return;
-  sessionStorage.setItem("git_ctx_bootstrap_token", token.trim());
-  boot();
+  api("/api/v1/bootstrap/login", {
+    method: "POST",
+    body: JSON.stringify({ token: token.trim() }),
+  })
+    .then(() => {
+      sessionStorage.removeItem("git_ctx_bootstrap_token");
+      boot();
+    })
+    .catch((e) => {
+      $("#status").textContent = e.message;
+      $("#status").classList.remove("ok");
+    });
 };
 $("#logout").onclick = async () => {
   const result = await api("/auth/logout", { method: "POST" });
@@ -177,6 +190,7 @@ async function boot() {
     $("#activity").hidden = false;
     $("#identity").textContent =
       `${me.Username} · 역할: ${(me.Roles || []).join(", ")} · ACL: ${me.ACLPrincipal || "매핑되지 않음(Fail Closed)"}`;
+    $("#profile-version").textContent = `서비스 버전 v${me.Version || "unknown"}`;
     const roles = new Set(me.Roles || []);
     const capabilities = GitCtxRoles.capabilitiesFor(me.Roles || []);
     if (Object.values(capabilities).some(Boolean)) {

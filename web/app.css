@@ -55,6 +55,19 @@ header .header-logo {
 header span {
   color: #a9bad7;
 }
+.version-badge {
+  display: inline-block;
+  padding: 3px 8px;
+  border: 1px solid #476080;
+  border-radius: 999px;
+  color: #dbeafe;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.version-text {
+  color: #667085;
+  font-size: 13px;
+}
 header nav {
   margin-left: auto;
 }

@@ -23,6 +23,8 @@
 | 검색 품질 평가 | 완료 | ACL 적용 정답 사례, Recall@K·MRR·nDCG@K, 임계값 회귀 판정, 이력·상세 UI/API |
 | 관리자 연동 설정 | 완료 | Keycloak·Bitbucket·GitLab·Embedding·Reranker 전용 필드, 실제 호출 시험, 마스킹·암호화·버전·rollback |
 | OpenSearch | 완료(계약 시험) | 관리자 연결·index mapping 시험, ref별 delete/bulk projection, repository·ref·principal 선필터, DB 청크 hydration, Worker 재시도 |
+| 최초 관리자 세션 | 완료 | 일회용 토큰을 30분 HttpOnly·SameSite 세션으로 교환, Origin 검증, Keycloak 저장 시 세션·키 전역 폐기 |
+| 버전 표시 | 완료 | 공개 설정과 `/api/v1/me` 버전 제공, 로그인 전 상단·안내와 로그인 후 프로필 표시 |
 
 2026-07-27 로컬 검증 결과:
 

@@ -43,7 +43,8 @@ go run ./cmd/git-ctx
 실제 Bootstrap 입력은 `GIT_CTX_DB_DSN` 하나뿐이며 driver는 DSN에서 자동 판별됩니다.
 Keycloak이 설정되지 않은 최초 기동에는 `backups/bootstrap-admin.token`이 권한 0600으로
 한 번 생성됩니다. 화면의 `최초 관리자 설정`에서 입력하면 되고 Keycloak 설정 저장
-직후 서버가 토큰과 파일을 폐기합니다.
+직후 서버가 토큰, 30분 HttpOnly 초기 설정 세션과 파일을 폐기합니다. 서비스 버전은
+로그인 전 상단과 로그인 후 내 계정 화면에 표시됩니다.
 
 ```bash
 curl -H "Authorization: Bearer $(cat backups/bootstrap-admin.token)" \

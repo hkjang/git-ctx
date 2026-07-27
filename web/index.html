@@ -12,6 +12,7 @@
     <header>
       <img src="/logo.svg" alt="git-ctx" class="header-logo" />
       <span id="brand-tagline">사내 개발 지식 MCP</span>
+      <span id="service-version" class="version-badge">v-</span>
       <nav>
         <button id="login">Keycloak 로그인</button
         ><button id="logout" hidden>로그아웃</button>
@@ -24,12 +25,14 @@
           Bitbucket과 GitLab 문서를 저장소 권한에 맞게 검색하고 AI 개발 도구에
           연결합니다.
         </p>
+        <p id="login-version" class="version-text">서비스 버전 확인 중…</p>
         <div id="status" class="notice">서버 상태 확인 중…</div>
         <div id="service-notice" class="notice" hidden></div>
       </section>
       <section id="account" hidden>
         <h2>내 계정</h2>
         <p id="identity"></p>
+        <p id="profile-version" class="version-text"></p>
       </section>
       <section class="grid">
         <article>

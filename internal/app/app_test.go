@@ -18,6 +18,7 @@ import (
 	"git-ctx/internal/auth"
 	"git-ctx/internal/config"
 	"git-ctx/internal/observability"
+	"git-ctx/internal/version"
 )
 
 func TestHTTPTraceContextPropagation(t *testing.T) {
@@ -151,6 +152,59 @@ func TestAdministrativeBackupRestoreFlow(t *testing.T) {
 }
 
 func magicForTest() string { return "GCTXBACKUP1\n" }
+
+func TestBootstrapLoginCreatesHttpOnlySessionForMeAndRevokesIt(t *testing.T) {
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "bootstrap-login.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(t.TempDir(), "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	request := func(token, origin string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/bootstrap/login", strings.NewReader(`{"token":"`+token+`"}`))
+		req.Host = "localhost:4747"
+		req.Header.Set("Content-Type", "application/json")
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := request("bootstrap", "https://evil.example"); rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := request("wrong", "http://localhost:4747"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid token status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	login := request("bootstrap", "http://localhost:4747")
+	if login.Code != http.StatusOK || login.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("login status=%d headers=%v body=%s", login.Code, login.Header(), login.Body.String())
+	}
+	cookies := login.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != "git_ctx_session" || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
+		t.Fatalf("unexpected bootstrap cookie: %#v", cookies)
+	}
+	meRequest := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+	meRequest.AddCookie(cookies[0])
+	me := httptest.NewRecorder()
+	a.Handler().ServeHTTP(me, meRequest)
+	if me.Code != http.StatusOK || !strings.Contains(me.Body.String(), `"Roles":["platform-admin"]`) || !strings.Contains(me.Body.String(), `"Version":"`+version.Version+`"`) {
+		t.Fatalf("me status=%d body=%s", me.Code, me.Body.String())
+	}
+
+	a.disableBootstrapAdmin()
+	revokedRequest := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+	revokedRequest.AddCookie(cookies[0])
+	revoked := httptest.NewRecorder()
+	a.Handler().ServeHTTP(revoked, revokedRequest)
+	if revoked.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked bootstrap session status=%d body=%s", revoked.Code, revoked.Body.String())
+	}
+}
 
 func TestAdministrativeSearchQualityBenchmarkFlow(t *testing.T) {
 	a, err := New(context.Background(), config.Config{
@@ -310,7 +364,7 @@ func TestPublicUIConfigExposesOnlyBranding(t *testing.T) {
 		t.Fatalf("unsafe public config status=%d body=%s", getResult.Code, getResult.Body.String())
 	}
 	var got map[string]any
-	if err = json.Unmarshal(getResult.Body.Bytes(), &got); err != nil || got["serviceName"] != "Internal Context" || got["notice"] != "점검 공지" {
+	if err = json.Unmarshal(getResult.Body.Bytes(), &got); err != nil || got["serviceName"] != "Internal Context" || got["notice"] != "점검 공지" || got["version"] != version.Version {
 		t.Fatalf("public config=%#v err=%v", got, err)
 	}
 	if validatePublicAssetURL("//evil.example/logo.svg") == nil || validatePublicAssetURL("http://evil.example/logo.svg") == nil {

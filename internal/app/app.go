@@ -205,6 +205,7 @@ func (a *App) routes() {
 	a.mux.HandleFunc("GET /readyz", a.readiness)
 	a.mux.HandleFunc("GET /metrics", a.metrics)
 	a.mux.HandleFunc("GET /api/v1/public/config", a.publicUIConfig)
+	a.mux.HandleFunc("POST /api/v1/bootstrap/login", a.bootstrapLogin)
 	a.mux.HandleFunc("GET /auth/login", a.login)
 	a.mux.HandleFunc("GET /auth/callback", a.callback)
 	a.mux.HandleFunc("POST /auth/logout", a.logout)
@@ -325,6 +326,43 @@ func (a *App) authenticate(next http.Handler) http.Handler {
 		}
 		problem(w, http.StatusUnauthorized, "authentication_required", "Use a Keycloak bearer token or MCP API key")
 	})
+}
+
+func (a *App) bootstrapLogin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if origin := r.Header.Get("Origin"); origin != "" {
+		requestOrigin, err := url.Parse(origin)
+		if err != nil || (requestOrigin.Scheme != "http" && requestOrigin.Scheme != "https") || !strings.EqualFold(requestOrigin.Host, r.Host) {
+			problem(w, http.StatusForbidden, "origin_not_allowed", "Bootstrap login Origin is not allowed")
+			return
+		}
+	}
+	var in struct {
+		Token string `json:"token"`
+	}
+	if decode(r, &in) != nil || !a.validBootstrapToken(r.Context(), strings.TrimSpace(in.Token)) {
+		a.audit(r, auth.Principal{UserID: "anonymous"}, "bootstrap.login", "session", "bootstrap", "failure", nil)
+		problem(w, http.StatusUnauthorized, "invalid_bootstrap_token", "Bootstrap token is invalid or has been revoked")
+		return
+	}
+	const id = "bootstrap-admin"
+	if _, err := a.store.DB.ExecContext(r.Context(), a.store.Rebind(`INSERT INTO users(id,subject,username,email) VALUES(?,?,?,?) ON CONFLICT(id) DO NOTHING`), id, id, id, ""); err != nil {
+		problem(w, http.StatusInternalServerError, "bootstrap_login_failed", "Unable to create bootstrap identity")
+		return
+	}
+	rawSession, err := randomToken(32)
+	if err != nil {
+		problem(w, http.StatusInternalServerError, "bootstrap_login_failed", "Unable to create bootstrap session")
+		return
+	}
+	expires := time.Now().UTC().Add(30 * time.Minute)
+	if _, err = a.store.DB.ExecContext(r.Context(), a.store.Rebind(`INSERT INTO user_sessions(id_hash,user_id,expires_at,last_seen_at) VALUES(?,?,?,?)`), sessionHash(rawSession), id, expires, time.Now().UTC()); err != nil {
+		problem(w, http.StatusInternalServerError, "bootstrap_login_failed", "Unable to persist bootstrap session")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "git_ctx_session", Value: rawSession, Path: "/", HttpOnly: true, Secure: strings.HasPrefix(a.publicURL(r.Context()), "https://"), SameSite: http.SameSiteStrictMode, Expires: expires})
+	a.audit(r, auth.Principal{UserID: id}, "bootstrap.login", "session", "bootstrap", "success", nil)
+	jsonOut(w, http.StatusOK, map[string]any{"status": "authenticated", "expiresAt": expires})
 }
 func (a *App) mcpAccess(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -494,6 +532,12 @@ func (a *App) sessionPrincipal(ctx context.Context, raw string) (auth.Principal,
 	if err != nil {
 		return auth.Principal{}, false
 	}
+	if userID == "bootstrap-admin" {
+		if !a.bootstrapAvailable(ctx) {
+			return auth.Principal{}, false
+		}
+		roles = []string{"platform-admin"}
+	}
 	_, _ = a.store.DB.ExecContext(ctx, a.store.Rebind(`UPDATE user_sessions SET last_seen_at=? WHERE id_hash=?`), time.Now().UTC(), sessionHash(raw))
 	return auth.Principal{UserID: userID, Subject: subject, Username: username, ACLPrincipal: acl, ACLPrincipals: aclPrincipals(acl, splitCSV(bitbucketGroups)), Roles: roles}, true
 }
@@ -601,7 +645,10 @@ func settingRoleAllowed(p auth.Principal, category string) bool {
 }
 func (a *App) me(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	jsonOut(w, 200, p)
+	jsonOut(w, 200, struct {
+		auth.Principal
+		Version string `json:"Version"`
+	}{Principal: p, Version: version.Version})
 }
 func (a *App) meRepositories(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
@@ -1346,6 +1393,7 @@ func (a *App) publicUIConfig(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{
 		"serviceName": "git-ctx", "tagline": "사내 개발 지식 MCP",
 		"logoUrl": "/logo.svg", "faviconUrl": "/favicon.svg", "notice": "",
+		"version":            version.Version,
 		"bootstrapRequired":  bootstrapRequired,
 		"bootstrapTokenFile": bootstrapPath,
 	}
@@ -1368,6 +1416,19 @@ func (a *App) validBootstrapToken(ctx context.Context, candidate string) bool {
 	expected, persisted := a.cfg.BootstrapAdmin, a.bootstrapPersisted
 	a.bootstrapMu.RUnlock()
 	if expected == "" || !hmac.Equal([]byte(candidate), []byte(expected)) {
+		return false
+	}
+	if !persisted {
+		return true
+	}
+	var count int
+	return a.store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM platform_bootstrap WHERE id='initial-admin'`).Scan(&count) == nil && count == 1
+}
+func (a *App) bootstrapAvailable(ctx context.Context) bool {
+	a.bootstrapMu.RLock()
+	expected, persisted := a.cfg.BootstrapAdmin, a.bootstrapPersisted
+	a.bootstrapMu.RUnlock()
+	if expected == "" {
 		return false
 	}
 	if !persisted {
@@ -1439,6 +1500,8 @@ func (a *App) disableBootstrapAdmin() {
 	a.bootstrapPath = ""
 	a.bootstrapMu.Unlock()
 	_, _ = a.store.DB.Exec(`DELETE FROM platform_bootstrap WHERE id='initial-admin'`)
+	_, _ = a.store.DB.Exec(a.store.Rebind(`DELETE FROM user_sessions WHERE user_id=?`), "bootstrap-admin")
+	_, _ = a.store.DB.Exec(a.store.Rebind(`UPDATE api_keys SET revoked_at=CURRENT_TIMESTAMP WHERE user_id=? AND revoked_at IS NULL`), "bootstrap-admin")
 	if path != "" {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			slog.Warn("one-time bootstrap token file could not be removed", "path", path, "error", err)
