@@ -39,6 +39,7 @@ import (
 	"git-ctx/internal/indexer"
 	runtimelogging "git-ctx/internal/logging"
 	"git-ctx/internal/mcp"
+	outboundnotification "git-ctx/internal/notification"
 	"git-ctx/internal/observability"
 	"git-ctx/internal/opensearch"
 	"git-ctx/internal/quality"
@@ -73,6 +74,7 @@ type App struct {
 	backup             *backup.Service
 	quality            *quality.Service
 	secrets            *secretstore.Service
+	notifier           *outboundnotification.Service
 	rootCtx            context.Context
 	requestGate        sync.RWMutex
 	backgroundMu       sync.Mutex
@@ -157,6 +159,7 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 	a := &App{cfg: c, store: s, keys: apikey.New(s, c.KeyPepper), aead: aead, mux: http.NewServeMux(), traces: observability.New(), rootCtx: ctx, bootstrapPath: bootstrapPath, bootstrapPersisted: bootstrapPersisted, recoveryMode: recoveryMode, databaseStartupErr: startupDBError, recoveryDatabase: recoveryPath}
 	a.keys.SetRateLimitAlertLoader(a.rateLimitAlertsEnabled)
 	a.secrets = secretstore.New(s, a.seal, a.open, a.vaultClient)
+	a.notifier = outboundnotification.New(s, a.notificationDeliveryConfig)
 	a.backup = backup.New(s, aead, a.backupConfig)
 	if settings, loadErr := a.loadSettingMap(ctx, "logging"); loadErr == nil {
 		if applyErr := runtimelogging.Apply(stringValue(settings, "level")); applyErr != nil {
@@ -206,7 +209,7 @@ func (a *App) startBackground() {
 	backgroundScheduler := scheduler.New(a.store, a.pollingInterval)
 	backgroundScheduler.SetRetentionLoader(a.retentionPolicy)
 	backgroundScheduler.SetNotificationLoader(a.notificationPolicy)
-	a.wg.Add(3)
+	a.wg.Add(4)
 	go func() {
 		defer a.wg.Done()
 		backgroundWorker.Run(workerCtx)
@@ -218,6 +221,10 @@ func (a *App) startBackground() {
 	go func() {
 		defer a.wg.Done()
 		a.backup.Run(workerCtx)
+	}()
+	go func() {
+		defer a.wg.Done()
+		a.notifier.Run(workerCtx)
 	}()
 }
 func (a *App) stopBackground() {
@@ -367,6 +374,8 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/admin/secrets/{name}/rotate", a.authorize(http.HandlerFunc(a.putManagedSecret), "security-admin"))
 	a.mux.Handle("POST /api/v1/admin/secrets/{name}/disable", a.authorize(http.HandlerFunc(a.disableManagedSecret), "security-admin"))
 	a.mux.Handle("GET /api/v1/admin/security-events", a.authorize(http.HandlerFunc(a.securityEvents), "security-admin", "readonly-operator"))
+	a.mux.Handle("GET /api/v1/admin/notification-deliveries", a.authorize(http.HandlerFunc(a.notificationDeliveries), "security-admin", "readonly-operator"))
+	a.mux.Handle("POST /api/v1/admin/notification-deliveries/{id}/retry", a.authorize(http.HandlerFunc(a.retryNotificationDelivery), "security-admin"))
 	a.mux.Handle("POST /api/v1/admin/sources/{source}/discover", a.authorize(http.HandlerFunc(a.discoverSource), "source-admin"))
 	a.mux.Handle("GET /api/v1/admin/repositories", a.authorize(http.HandlerFunc(a.adminRepositories), "source-admin", "readonly-operator"))
 	a.mux.Handle("POST /api/v1/admin/repositories", a.authorize(http.HandlerFunc(a.registerRepository), "source-admin"))
@@ -1264,7 +1273,7 @@ func (a *App) deleteSetting(w http.ResponseWriter, r *http.Request) {
 func (a *App) testIntegrationSetting(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
 	category := r.PathValue("category")
-	allowed := map[string]bool{"keycloak": true, "bitbucket": true, "gitlab": true, "model": true, "opensearch": true, "vault": true, "observability": true, "backup": true}
+	allowed := map[string]bool{"keycloak": true, "bitbucket": true, "gitlab": true, "model": true, "opensearch": true, "vault": true, "observability": true, "backup": true, "notifications": true}
 	if !allowed[category] {
 		problem(w, 400, "setting_test_unsupported", "This setting category has no external or storage connection test")
 		return
@@ -1287,6 +1296,18 @@ func (a *App) testIntegrationSetting(w http.ResponseWriter, r *http.Request) {
 		a.audit(r, p, "settings.test", category, category, "failure", map[string]any{"error": truncateText(err.Error(), 500)})
 		problem(w, 400, "setting_connection_test_failed", err.Error())
 		return
+	}
+	if category == "notifications" {
+		cfg, cfgErr := notificationDeliveryConfigFromMap(value, time.Now().UTC())
+		if cfgErr != nil {
+			problem(w, 400, "setting_connection_test_failed", cfgErr.Error())
+			return
+		}
+		if cfgErr = outboundnotification.Validate(ctx, cfg); cfgErr != nil {
+			a.audit(r, p, "settings.test", category, category, "failure", map[string]any{"error": truncateText(cfgErr.Error(), 500)})
+			problem(w, 400, "setting_connection_test_failed", cfgErr.Error())
+			return
+		}
 	}
 	a.audit(r, p, "settings.test", category, category, "success", nil)
 	jsonOut(w, http.StatusOK, map[string]any{"category": category, "status": "verified", "testedAt": time.Now().UTC()})
@@ -1711,6 +1732,11 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 		if days, ok := value["apiKeyExpiryWarningDays"].(float64); ok && (days < 0 || days > 365 || days != float64(int(days))) {
 			return errors.New("notifications.apiKeyExpiryWarningDays must be a whole number from 0 (disabled) to 365")
 		}
+		cfg, err := notificationDeliveryConfigFromMap(value, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		return outboundnotification.ValidateConfig(cfg)
 	}
 	return nil
 }
@@ -1946,6 +1972,64 @@ func (a *App) notificationPolicy(ctx context.Context) scheduler.NotificationPoli
 		days = int(value)
 	}
 	return scheduler.NotificationPolicy{Enabled: enabled, APIKeyExpiryWarningDays: days}
+}
+
+func (a *App) notificationDeliveryConfig(ctx context.Context) (outboundnotification.Config, error) {
+	settings, err := a.loadSettingMap(ctx, "notifications")
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return notificationDeliveryConfigFromMap(map[string]any{}, time.Now().UTC())
+		}
+		return outboundnotification.Config{}, err
+	}
+	if a.secrets != nil {
+		settings, err = a.secrets.Resolve(ctx, settings)
+		if err != nil {
+			return outboundnotification.Config{}, err
+		}
+	}
+	activeSince := time.Now().UTC()
+	_ = a.store.DB.QueryRowContext(ctx, a.store.Rebind(`SELECT updated_at FROM system_settings WHERE category=?`), "notifications").Scan(&activeSince)
+	return notificationDeliveryConfigFromMap(settings, activeSince)
+}
+
+func notificationDeliveryConfigFromMap(settings map[string]any, activeSince time.Time) (outboundnotification.Config, error) {
+	cfg := outboundnotification.Config{
+		ActiveSince: activeSince,
+		SMTPPort:    587,
+		SMTPTLSMode: "starttls",
+		Timeout:     15 * time.Second,
+		MaxAttempts: 5,
+	}
+	cfg.Enabled, _ = settings["externalEnabled"].(bool)
+	cfg.WebhookURL, _ = settings["webhookUrl"].(string)
+	cfg.WebhookAuthorization, _ = settings["webhookAuthorization"].(string)
+	cfg.MessengerWebhookURL, _ = settings["messengerWebhookUrl"].(string)
+	cfg.MessengerAuthorization, _ = settings["messengerAuthorization"].(string)
+	cfg.SMTPEnabled, _ = settings["smtpEnabled"].(bool)
+	cfg.SMTPHost, _ = settings["smtpHost"].(string)
+	cfg.SMTPUsername, _ = settings["smtpUsername"].(string)
+	cfg.SMTPPassword, _ = settings["smtpPassword"].(string)
+	cfg.SMTPFrom, _ = settings["smtpFrom"].(string)
+	cfg.TestRecipient, _ = settings["testRecipient"].(string)
+	if value, ok := settings["smtpPort"].(float64); ok {
+		cfg.SMTPPort = int(value)
+	}
+	if value, ok := settings["smtpTlsMode"].(string); ok && value != "" {
+		cfg.SMTPTLSMode = value
+	}
+	if value, ok := settings["timeoutSeconds"].(float64); ok {
+		cfg.Timeout = time.Duration(value * float64(time.Second))
+	}
+	if value, ok := settings["maxAttempts"].(float64); ok {
+		cfg.MaxAttempts = int(value)
+	}
+	if value, ok := settings["tlsVerify"].(bool); ok {
+		cfg.TLSVerify = &value
+	}
+	cfg.CACertificate, _ = settings["caCertificate"].(string)
+	cfg.ProxyURL, _ = settings["proxyUrl"].(string)
+	return cfg, nil
 }
 
 func (a *App) rateLimitAlertsEnabled(ctx context.Context) bool {
@@ -2537,6 +2621,55 @@ func (a *App) securityEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOut(w, 200, out)
 }
+func (a *App) notificationDeliveries(w http.ResponseWriter, r *http.Request) {
+	rows, err := a.store.DB.QueryContext(r.Context(), `SELECT d.id,d.channel,d.status,d.attempts,d.next_attempt_at,d.last_error,d.delivered_at,d.created_at,n.notification_type,n.title,u.username
+FROM notification_deliveries d
+JOIN notifications n ON n.id=d.notification_id
+JOIN users u ON u.id=n.user_id
+ORDER BY d.created_at DESC LIMIT 500`)
+	if err != nil {
+		problem(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	defer rows.Close()
+	var out []map[string]any
+	for rows.Next() {
+		var id, channel, status, lastError, notificationType, title, username string
+		var attempts int
+		var nextAttempt, createdAt time.Time
+		var deliveredAt sql.NullTime
+		if err = rows.Scan(&id, &channel, &status, &attempts, &nextAttempt, &lastError, &deliveredAt, &createdAt, &notificationType, &title, &username); err != nil {
+			problem(w, http.StatusInternalServerError, "internal_error", err.Error())
+			return
+		}
+		item := map[string]any{
+			"id": id, "channel": channel, "status": status, "attempts": attempts,
+			"nextAttemptAt": nextAttempt, "lastError": lastError, "createdAt": createdAt,
+			"notificationType": notificationType, "title": title, "username": username,
+		}
+		if deliveredAt.Valid {
+			item["deliveredAt"] = deliveredAt.Time
+		}
+		out = append(out, item)
+	}
+	jsonOut(w, http.StatusOK, out)
+}
+func (a *App) retryNotificationDelivery(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	id := r.PathValue("id")
+	result, err := a.store.DB.ExecContext(r.Context(), a.store.Rebind(`UPDATE notification_deliveries SET status='pending',next_attempt_at=?,last_error='',delivered_at=NULL,updated_at=? WHERE id=? AND status IN ('failed','dead')`), time.Now().UTC(), time.Now().UTC(), id)
+	if err != nil {
+		problem(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		problem(w, http.StatusConflict, "delivery_not_retryable", "Only failed or dead notification deliveries can be retried")
+		return
+	}
+	a.audit(r, p, "notification_delivery.retry", "notification_delivery", id, "success", nil)
+	w.WriteHeader(http.StatusAccepted)
+}
 func (a *App) discoverSource(w http.ResponseWriter, r *http.Request) {
 	sourceType := r.PathValue("source")
 	adapter, err := a.sourceAdapter(r.Context(), sourceType)
@@ -3043,16 +3176,19 @@ func safeDatabaseError(err error, dsn string) string {
 	return truncateText(message, 500)
 }
 func (a *App) adminHealth(w http.ResponseWriter, r *http.Request) {
-	var repositories, chunks, pending, failed, activeKeys, activeSecrets int64
+	var repositories, chunks, pending, failed, activeKeys, activeSecrets, notificationPending, notificationFailed, notificationDead int64
 	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM repositories WHERE enabled=1`).Scan(&repositories)
 	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM document_chunks`).Scan(&chunks)
 	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM index_jobs WHERE status='pending'`).Scan(&pending)
 	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM index_jobs WHERE status='failed'`).Scan(&failed)
 	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM api_keys WHERE revoked_at IS NULL AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at>CURRENT_TIMESTAMP)`).Scan(&activeKeys)
 	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM managed_secrets WHERE status='active'`).Scan(&activeSecrets)
+	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM notification_deliveries WHERE status='pending'`).Scan(&notificationPending)
+	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM notification_deliveries WHERE status='failed'`).Scan(&notificationFailed)
+	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM notification_deliveries WHERE status='dead'`).Scan(&notificationDead)
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
-	jsonOut(w, 200, map[string]any{"status": "ok", "version": version.Version, "database": "ok", "repositories": repositories, "chunks": chunks, "indexJobs": map[string]int64{"pending": pending, "failed": failed}, "activeApiKeys": activeKeys, "activeManagedSecrets": activeSecrets, "observability": map[string]bool{"tracingEnabled": a.traces.Enabled()}, "go": map[string]any{"goroutines": runtime.NumGoroutine(), "allocatedBytes": memory.Alloc}})
+	jsonOut(w, 200, map[string]any{"status": "ok", "version": version.Version, "database": "ok", "repositories": repositories, "chunks": chunks, "indexJobs": map[string]int64{"pending": pending, "failed": failed}, "notificationDeliveries": map[string]int64{"pending": notificationPending, "failed": notificationFailed, "dead": notificationDead}, "activeApiKeys": activeKeys, "activeManagedSecrets": activeSecrets, "observability": map[string]bool{"tracingEnabled": a.traces.Enabled()}, "go": map[string]any{"goroutines": runtime.NumGoroutine(), "allocatedBytes": memory.Alloc}})
 }
 func (a *App) listBackups(w http.ResponseWriter, r *http.Request) {
 	records, err := a.backup.List(r.Context())

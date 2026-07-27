@@ -159,6 +159,24 @@ const integrationSettingFields = {
     ["inAppEnabled", "인앱 보안·만료 알림", "boolean", true],
     ["apiKeyExpiryWarningDays", "API 키 만료 사전 알림일 (0=해제)", "number", 7],
     ["rateLimitAlertsEnabled", "API 키 호출량 초과 알림", "boolean", true],
+    ["externalEnabled", "외부 알림 전송", "boolean", false],
+    ["webhookUrl", "운영 Webhook URL", "url", ""],
+    ["webhookAuthorization", "Webhook Authorization", "password", ""],
+    ["messengerWebhookUrl", "사내 메신저 Webhook URL", "url", ""],
+    ["messengerAuthorization", "메신저 Authorization", "password", ""],
+    ["smtpEnabled", "SMTP 이메일 전송", "boolean", false],
+    ["smtpHost", "SMTP Host", "text", ""],
+    ["smtpPort", "SMTP Port", "number", 587],
+    ["smtpUsername", "SMTP Username", "text", ""],
+    ["smtpPassword", "SMTP Password", "password", ""],
+    ["smtpFrom", "발신 주소", "text", ""],
+    ["smtpTlsMode", "SMTP TLS", "select:starttls|tls|none", "starttls"],
+    ["testRecipient", "연결 시험 수신 이메일", "email", ""],
+    ["timeoutSeconds", "전송 Timeout(초)", "number", 15],
+    ["maxAttempts", "최대 재시도", "number", 5],
+    ["tlsVerify", "외부 알림 TLS 인증서 검증", "boolean", true],
+    ["caCertificate", "외부 알림 사내 CA PEM", "textarea", ""],
+    ["proxyUrl", "Webhook Proxy URL", "url", ""],
   ],
   ui: [
     ["publicUrl", "서비스 Public URL", "url", "http://localhost:4747"],
@@ -180,7 +198,7 @@ const settingCategoryMeta = {
   index: ["색인", "Polling과 기본 색인 정책"],
   security: ["보안", "신뢰 프록시와 키 정책"],
   vault: ["Vault", "KV v2 Secret backend"],
-  notifications: ["알림", "API 키 만료와 이상 호출 인앱 알림 정책"],
+  notifications: ["알림", "인앱·Webhook·사내 메신저·SMTP와 재시도 정책"],
   logging: ["로깅", "재기동 없이 적용하는 구조화 로그 레벨"],
   observability: ["관측성", "OpenTelemetry Export"],
   backup: ["백업", "주기·경로·보존"],
@@ -638,6 +656,7 @@ function renderSettingFields(category, value) {
     "observability",
     "backup",
     "vault",
+    "notifications",
   ].includes(category);
   $("#preview-keycloak").hidden = category !== "keycloak";
   $("#setting-fields").innerHTML = fields
@@ -1336,12 +1355,15 @@ async function refreshOps(capabilities = activeCapabilities) {
 }
 async function refreshSecurity(capabilities = activeCapabilities) {
   try {
-    const [health, keys, events, audits, secrets] = await Promise.all([
+    const [health, keys, events, audits, secrets, deliveries] = await Promise.all([
       capabilities.status ? api("/api/v1/admin/health") : null,
       capabilities.security ? api("/api/v1/admin/api-keys") : [],
       capabilities.securityEvents ? api("/api/v1/admin/security-events") : [],
       capabilities.audit ? api("/api/v1/admin/audit-logs") : [],
       capabilities.security ? api("/api/v1/admin/secrets") : [],
+      capabilities.security || capabilities.securityEvents
+        ? api("/api/v1/admin/notification-deliveries")
+        : [],
     ]);
     if (health) {
       $("#system-health").textContent =
@@ -1374,6 +1396,18 @@ async function refreshSecurity(capabilities = activeCapabilities) {
     );
     $("#security-events").innerHTML =
       `<table><thead><tr><th>시간</th><th>저장소/ref</th><th>파일</th><th>탐지/조치</th></tr></thead><tbody>${events.map((x) => `<tr><td>${date(x.occurredAt)}</td><td>${esc(x.repositoryId)} / ${esc(x.refName)}</td><td>${esc(x.filePath)}</td><td>${esc(x.findingType)} / ${esc(x.action)}</td></tr>`).join("")}</tbody></table>`;
+    $("#notification-deliveries").innerHTML =
+      `<table><thead><tr><th>시간</th><th>사용자/알림</th><th>채널</th><th>상태</th><th>시도</th><th>오류/다음 시도</th><th></th></tr></thead><tbody>${deliveries.map((x) => `<tr><td>${date(x.createdAt)}</td><td>${esc(x.username)}<br>${esc(x.title)}</td><td>${esc(x.channel)}</td><td><span class="state ${esc(x.status)}">${esc(x.status)}</span></td><td>${x.attempts}</td><td>${esc(x.lastError)}${x.status === "failed" ? `<br>${date(x.nextAttemptAt)}` : ""}</td><td>${["failed", "dead"].includes(x.status) && capabilities.security ? `<button data-delivery-retry="${esc(x.id)}">재시도</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+    document.querySelectorAll("[data-delivery-retry]").forEach(
+      (button) =>
+        (button.onclick = async () => {
+          await api(
+            `/api/v1/admin/notification-deliveries/${encodeURIComponent(button.dataset.deliveryRetry)}/retry`,
+            { method: "POST" },
+          );
+          refreshSecurity(capabilities);
+        }),
+    );
     $("#audit-logs").innerHTML =
       `<table><thead><tr><th>시간</th><th>수행자</th><th>행위</th><th>대상</th><th>결과</th></tr></thead><tbody>${audits.map((x) => `<tr><td>${date(x.at)}</td><td>${esc(x.actor)}</td><td>${esc(x.action)}</td><td>${esc(x.resourceType)} / ${esc(x.resourceId)}</td><td>${esc(x.outcome)}</td></tr>`).join("")}</tbody></table>`;
   } catch (e) {

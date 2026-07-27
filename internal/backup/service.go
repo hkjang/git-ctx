@@ -32,7 +32,7 @@ var tables = []string{
 	"repositories", "repository_permissions", "repository_index_policies", "document_chunks",
 	"quality_benchmark_cases", "quality_benchmark_runs", "quality_benchmark_results",
 	"system_settings", "setting_versions", "audit_logs", "mcp_calls", "index_jobs",
-	"webhook_events", "index_security_events", "mcp_tools", "notifications",
+	"webhook_events", "index_security_events", "mcp_tools", "notifications", "notification_deliveries",
 	"managed_secrets", "managed_secret_versions",
 }
 

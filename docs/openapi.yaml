@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.9.0
+  version: 0.10.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -156,6 +156,19 @@ paths:
       {
         summary: Verify the currently stored and dynamically applied Keycloak OIDC discovery metadata,
         responses: { "200": { description: Active OIDC version and endpoints }, "503": { description: Stored OIDC setting cannot be applied } },
+      }
+  /api/v1/admin/notification-deliveries:
+    get:
+      {
+        summary: List external notification delivery status without destination or credential disclosure,
+        responses: { "200": { description: Delivery history } },
+      }
+  /api/v1/admin/notification-deliveries/{id}/retry:
+    post:
+      {
+        summary: Retry a failed or dead external notification delivery,
+        parameters: [{ $ref: "#/components/parameters/Id" }],
+        responses: { "202": { description: Retry queued }, "409": { description: Delivery is not retryable } },
       }
   /api/v1/admin/database/status:
     get:

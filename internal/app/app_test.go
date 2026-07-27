@@ -78,6 +78,92 @@ func TestOperationalSettingsValidation(t *testing.T) {
 	}
 }
 
+func TestNotificationWebhookConnectionTestAndSecretMasking(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Header.Get("Authorization") != "Bearer notification-secret" {
+			t.Errorf("authorization=%q", r.Header.Get("Authorization"))
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:notification-setting?mode=memory&cache=shared&_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	body := fmt.Sprintf(`{"inAppEnabled":true,"externalEnabled":true,"webhookUrl":%q,"webhookAuthorization":"Bearer notification-secret","timeoutSeconds":5,"maxAttempts":3}`, server.URL)
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer bootstrap")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	tested := request(http.MethodPost, "/api/v1/admin/settings/notifications/test", body)
+	if tested.Code != http.StatusOK || calls != 1 {
+		t.Fatalf("test status=%d calls=%d body=%s", tested.Code, calls, tested.Body.String())
+	}
+	saved := request(http.MethodPut, "/api/v1/admin/settings/notifications", body)
+	if saved.Code != http.StatusOK {
+		t.Fatalf("save status=%d body=%s", saved.Code, saved.Body.String())
+	}
+	loaded := request(http.MethodGet, "/api/v1/admin/settings/notifications", "")
+	if loaded.Code != http.StatusOK || !strings.Contains(loaded.Body.String(), `"webhookAuthorization":"********"`) || strings.Contains(loaded.Body.String(), "notification-secret") {
+		t.Fatalf("loaded status=%d body=%s", loaded.Code, loaded.Body.String())
+	}
+}
+
+func TestAdminCanInspectAndRetryNotificationDelivery(t *testing.T) {
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:notification-delivery-admin?mode=memory&cache=shared&_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	_, err = a.store.DB.Exec(`INSERT INTO users(id,subject,username,email,status) VALUES('notify-user','kc-notify','notify-user','notify@example.test','active')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = a.store.DB.Exec(`INSERT INTO notifications(id,user_id,notification_type,title,message) VALUES('notify-1','notify-user','test','Test notification','safe message')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = a.store.DB.Exec(`INSERT INTO notification_deliveries(id,notification_id,channel,destination_hash,status,attempts,last_error) VALUES('delivery-1','notify-1','webhook','hash-only','dead',3,'connection refused')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(method, path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		req.Header.Set("Authorization", "Bearer bootstrap")
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	listed := request(http.MethodGet, "/api/v1/admin/notification-deliveries")
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"id":"delivery-1"`) || strings.Contains(listed.Body.String(), "hash-only") {
+		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	retried := request(http.MethodPost, "/api/v1/admin/notification-deliveries/delivery-1/retry")
+	if retried.Code != http.StatusAccepted {
+		t.Fatalf("retry status=%d body=%s", retried.Code, retried.Body.String())
+	}
+	var status, lastError string
+	if err = a.store.DB.QueryRow(`SELECT status,last_error FROM notification_deliveries WHERE id='delivery-1'`).Scan(&status, &lastError); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" || lastError != "" {
+		t.Fatalf("status=%q lastError=%q", status, lastError)
+	}
+}
+
 func TestOperationsAndLoggingSettingsApply(t *testing.T) {
 	runtimelogging.Reset()
 	t.Cleanup(runtimelogging.Reset)
@@ -631,7 +717,7 @@ func TestPublicAndAdminDatabaseStatus(t *testing.T) {
 	adminRequest.Header.Set("Authorization", "Bearer bootstrap")
 	admin := httptest.NewRecorder()
 	a.Handler().ServeHTTP(admin, adminRequest)
-	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"latest":"015_extended_mcp_tools.sql"`) || !strings.Contains(admin.Body.String(), `"pool"`) {
+	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"latest":"016_notification_deliveries.sql"`) || !strings.Contains(admin.Body.String(), `"pool"`) {
 		t.Fatalf("admin status=%d body=%s", admin.Code, admin.Body.String())
 	}
 }

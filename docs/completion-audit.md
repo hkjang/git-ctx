@@ -17,7 +17,7 @@
 | 모델 미설정 검색 | 완료 | ACL 검증 뒤 Bitbucket/GitLab source query API, Context7 출력 조립과 안전한 BM25 fallback 계약 시험 |
 | 사용자 기능 | 완료 | 우측 상단 프로필 메뉴와 Ctrl/Cmd+K 빠른 이동, 관리자와 분리된 내 공간, 저장소·키·제한·사용량·호출·알림·MCP 설정 UI/API |
 | 관리자 기능 | 완료(구현 범위) | 설정 자동 조회·시험·저장·삭제 CRUD, 저장소·정책·작업, MCP 도구, 키·감사·보안·상태 UI/API와 역할별 메뉴·쓰기 통제 |
-| 데이터베이스 | 완료 | SQLite 회귀 시험 및 빈 PostgreSQL 16에서 001~015 migration/readiness와 암호화 백업·복원 실검증 |
+| 데이터베이스 | 완료 | SQLite 회귀 시험 및 빈 PostgreSQL 16에서 001~016 migration/readiness와 암호화 백업·복원 실검증 |
 | 배포 | 완료 | 비루트 Docker 이미지 실행, Compose, Kubernetes Kustomize와 기본 NetworkPolicy 렌더링 |
 | 관측성 | 완료 | JSON 요청 로그, 동적 로그 레벨, request ID, health/readiness, Prometheus와 동적 OTLP HTTP tracing |
 | 백업·복구 | 완료(애플리케이션 범위) | SQLite/PostgreSQL 공통 암호화 아카이브, 주기·보존, 무결성 검증, 트랜잭션 복원, 세션 무효화와 관리자 UI/API |
@@ -30,7 +30,7 @@
 | 관리자 UI 구조 | 완료 | 개인화 영역과 분리된 권한 기반 관리자 진입, 역할별 대메뉴, 설정 종류별 탭, 저장 진행·오류 상태 |
 | Keycloak 설정 안정성 | 완료 | 4개 필드 UI, 자동 Issuer·Redirect·표준 Scope/Claim·동일 이름 역할/그룹, 저장값 자동 재조회, Discovery/JWKS/token exchange, PKCE callback·세션 E2E, Access Token 역할 병합, 실제 platform-admin 로그인 뒤 Bootstrap 폐기 |
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
-| 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림 정책, 감사·호출·알림·작업·설정 이력 보존 정리 |
+| 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
 2026-07-27 로컬 검증 결과:
 
@@ -64,7 +64,6 @@ Claude Code 2.1.218 resolve-library-id       PASS
 |---|---|---|
 | 레거시 MCP SSE endpoint | 미구현(선택) | 승인 대상 구형 클라이언트가 요구할 때 추가 |
 | Confluence/PDF 등 확장 소스 | 미구현(3단계) | SourceRepository 플러그인과 파서 구현 |
-| 외부 알림 전송 | 미구현(후속) | 이메일·운영 Webhook·사내 메신저 delivery outbox, 재시도와 관리자 연결 시험 |
 
 ## 사내 배포 환경 승인 게이트
 

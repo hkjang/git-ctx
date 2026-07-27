@@ -136,11 +136,32 @@ IP에 사용한다. 등록되지 않은 클라이언트의 `X-Forwarded-For`는 
 {
   "inAppEnabled": true,
   "apiKeyExpiryWarningDays": 7,
-  "rateLimitAlertsEnabled": true
+  "rateLimitAlertsEnabled": true,
+  "externalEnabled": true,
+  "webhookUrl": "https://ops.company.local/git-ctx",
+  "webhookAuthorization": "secret://notification-webhook-token",
+  "messengerWebhookUrl": "https://messenger.company.local/hooks/git-ctx",
+  "messengerAuthorization": "secret://messenger-webhook-token",
+  "smtpEnabled": true,
+  "smtpHost": "smtp.company.local",
+  "smtpPort": 587,
+  "smtpUsername": "git-ctx",
+  "smtpPassword": "secret://smtp-password",
+  "smtpFrom": "git-ctx@company.local",
+  "smtpTlsMode": "starttls",
+  "testRecipient": "operator@company.local",
+  "timeoutSeconds": 10,
+  "maxAttempts": 5
 }
 ```
 
-알림 정책은 API 키 만료와 호출량 초과 인앱 알림 생성에 동적으로 적용된다.
+알림 정책은 API 키 만료와 호출량 초과 인앱 알림 생성에 동적으로 적용된다. 외부 전달을
+켜면 저장 시점 이후의 알림을 Webhook, 사내 메신저 Webhook 및 사용자 이메일로 전송한다.
+전달 이력은 멱등 Outbox에 저장되며 지수 Backoff 후 Dead Letter로 전환된다. 보안
+관리자는 목적지나 인증정보가 노출되지 않는 전달 이력을 조회하고 실패 건을 수동
+재시도할 수 있다. 설정 탭의 `연결 시험`은 저장 전에 설정된 모든 채널에 실제 시험
+메시지를 보낸다. 운영망 SMTP는 `tls` 또는 `starttls`를 사용해야 하며 `none`은
+localhost 시험 서버에만 허용된다.
 
 ```json
 {

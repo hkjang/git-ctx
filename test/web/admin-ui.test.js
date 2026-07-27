@@ -32,6 +32,7 @@ for (const id of [
   "admin-user-form",
   "admin-users",
   "admin-key-scopes",
+  "notification-deliveries",
 ]) {
   assert.match(html, new RegExp(`id=["']${id}["']`), `missing ${id}`);
 }
