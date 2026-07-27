@@ -36,10 +36,14 @@ func fixture(t *testing.T) *Server {
 }
 
 func call(t *testing.T, s *Server, body string) map[string]any {
+	return callAs(t, s, auth.Principal{UserID: "u1", Subject: "alice", ACLPrincipal: "alice"}, body)
+}
+
+func callAs(t *testing.T, s *Server, principal auth.Principal, body string) map[string]any {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(auth.WithPrincipal(req.Context(), auth.Principal{UserID: "u1", Subject: "alice", ACLPrincipal: "alice"}))
+	req = req.WithContext(auth.WithPrincipal(req.Context(), principal))
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, req)
 	if rec.Code != 200 {
@@ -52,14 +56,59 @@ func call(t *testing.T, s *Server, body string) map[string]any {
 	return out
 }
 
-func TestToolsListIsContext7Compatible(t *testing.T) {
-	out := call(t, fixture(t), `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+func TestRepositorySearchAndAdministratorTools(t *testing.T) {
+	s := fixture(t)
+	found := call(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search-repositories","arguments":{"query":"GPU","sourceType":"bitbucket"}}}`)
+	text := found["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "/kcb/clustara") {
+		t.Fatalf("repository search=%s", text)
+	}
+	admin := auth.Principal{
+		UserID: "u1", Subject: "alice", ACLPrincipal: "alice", KeyID: "admin-key", KeyPrefix: "ADMIN1",
+		Roles: []string{"source-admin"}, Scopes: []string{"get-platform-status", "list-index-jobs", "reindex-repository"},
+	}
+	list := callAs(t, s, admin, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+	tools := list["result"].(map[string]any)["tools"].([]any)
+	if len(tools) != 3 {
+		t.Fatalf("administrator tools=%#v", tools)
+	}
+	status := callAs(t, s, admin, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get-platform-status","arguments":{}}}`)
+	text = status["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "Metadata Database: connected") {
+		t.Fatalf("platform status=%s", text)
+	}
+	queued := callAs(t, s, admin, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"reindex-repository","arguments":{"libraryId":"/kcb/clustara"}}}`)
+	text = queued["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "Reindex queued") {
+		t.Fatalf("reindex=%s", text)
+	}
+	var jobs int
+	if err := s.store.DB.QueryRow(`SELECT COUNT(*) FROM index_jobs WHERE repository_id='r1' AND kind='manual' AND status='pending'`).Scan(&jobs); err != nil || jobs != 1 {
+		t.Fatalf("jobs=%d err=%v", jobs, err)
+	}
+	developer := admin
+	developer.Roles = []string{"developer"}
+	hidden := callAs(t, s, developer, `{"jsonrpc":"2.0","id":5,"method":"tools/list"}`)
+	if got := len(hidden["result"].(map[string]any)["tools"].([]any)); got != 0 {
+		t.Fatalf("developer saw %d management tools", got)
+	}
+}
+
+func TestToolsListExtendedAndStrictCompatibility(t *testing.T) {
+	s := fixture(t)
+	out := call(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
 	tools := out["result"].(map[string]any)["tools"].([]any)
-	if len(tools) != 2 {
+	if len(tools) != 4 {
 		t.Fatalf("got %d tools", len(tools))
 	}
 	if tools[0].(map[string]any)["name"] != "resolve-library-id" || tools[1].(map[string]any)["name"] != "query-docs" {
 		t.Fatalf("unexpected tools: %#v", tools)
+	}
+	s.SetStrictCompatibilityLoader(func(context.Context) bool { return true })
+	out = call(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+	tools = out["result"].(map[string]any)["tools"].([]any)
+	if len(tools) != 2 {
+		t.Fatalf("strict mode got %d tools", len(tools))
 	}
 }
 
@@ -181,7 +230,7 @@ func TestAPIKeyToolAndRepositoryRestrictions(t *testing.T) {
 	req = req.WithContext(auth.WithPrincipal(req.Context(), auth.Principal{UserID: "u1", Subject: "alice", ACLPrincipal: "alice", KeyID: "key", Scopes: []string{"resolve-library-id"}, AllowedRepositories: []string{"/kcb/clustara"}}))
 	rec := httptest.NewRecorder()
 	s.ServeHTTP(rec, req)
-	if !bytes.Contains(rec.Body.Bytes(), []byte("not allowed to call")) {
+	if !bytes.Contains(rec.Body.Bytes(), []byte("unavailable for this credential")) {
 		t.Fatalf("tool restriction not enforced: %s", rec.Body.String())
 	}
 

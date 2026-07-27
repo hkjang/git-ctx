@@ -37,6 +37,7 @@ import (
 	"git-ctx/internal/embedding"
 	gitlabsource "git-ctx/internal/gitlab"
 	"git-ctx/internal/indexer"
+	runtimelogging "git-ctx/internal/logging"
 	"git-ctx/internal/mcp"
 	"git-ctx/internal/observability"
 	"git-ctx/internal/opensearch"
@@ -154,8 +155,14 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 		}
 	}
 	a := &App{cfg: c, store: s, keys: apikey.New(s, c.KeyPepper), aead: aead, mux: http.NewServeMux(), traces: observability.New(), rootCtx: ctx, bootstrapPath: bootstrapPath, bootstrapPersisted: bootstrapPersisted, recoveryMode: recoveryMode, databaseStartupErr: startupDBError, recoveryDatabase: recoveryPath}
+	a.keys.SetRateLimitAlertLoader(a.rateLimitAlertsEnabled)
 	a.secrets = secretstore.New(s, a.seal, a.open, a.vaultClient)
 	a.backup = backup.New(s, aead, a.backupConfig)
+	if settings, loadErr := a.loadSettingMap(ctx, "logging"); loadErr == nil {
+		if applyErr := runtimelogging.Apply(stringValue(settings, "level")); applyErr != nil {
+			slog.Warn("stored logging setting could not be applied", "error", applyErr)
+		}
+	}
 	if settings, loadErr := a.loadSettingMap(ctx, "observability"); loadErr == nil {
 		if applyErr := a.traces.Apply(ctx, observabilityConfigFromMap(settings)); applyErr != nil {
 			slog.Warn("stored observability setting could not be applied", "error", applyErr)
@@ -183,6 +190,7 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 	a.search.SetKeywordLoader(a.openSearchCandidates)
 	a.quality = quality.New(s, a.search)
 	a.mcp = mcp.New(a.search, s)
+	a.mcp.SetStrictCompatibilityLoader(a.strictMCPCompatibility)
 	a.routes()
 	a.startBackground()
 	return a, nil
@@ -196,6 +204,8 @@ func (a *App) startBackground() {
 	backgroundWorker.SetEmbeddingFactory(a.embeddingProvider)
 	backgroundWorker.SetProjection(a.projectOpenSearch)
 	backgroundScheduler := scheduler.New(a.store, a.pollingInterval)
+	backgroundScheduler.SetRetentionLoader(a.retentionPolicy)
+	backgroundScheduler.SetNotificationLoader(a.notificationPolicy)
 	a.wg.Add(3)
 	go func() {
 		defer a.wg.Done()
@@ -228,10 +238,58 @@ func (a *App) Close() {
 	_ = a.store.DB.Close()
 }
 func (a *App) Handler() http.Handler { return tracing(requestLogging(a.gate(securityHeaders(a.mux)))) }
+
+type HTTPServerConfig struct {
+	ListenAddress     string
+	ReadHeaderTimeout time.Duration
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
+	ShutdownTimeout   time.Duration
+}
+
+func (a *App) HTTPServerConfig(ctx context.Context) HTTPServerConfig {
+	cfg := HTTPServerConfig{
+		ListenAddress:     a.cfg.ListenAddress,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       90 * time.Second,
+		ShutdownTimeout:   15 * time.Second,
+	}
+	settings, err := a.loadSettingMap(ctx, "operations")
+	if err != nil {
+		return cfg
+	}
+	if value := strings.TrimSpace(stringValue(settings, "listenAddress")); value != "" {
+		cfg.ListenAddress = value
+	}
+	duration := func(key string, current time.Duration) time.Duration {
+		if seconds, ok := settings[key].(float64); ok && seconds > 0 {
+			return time.Duration(seconds * float64(time.Second))
+		}
+		return current
+	}
+	cfg.ReadHeaderTimeout = duration("readHeaderTimeoutSeconds", cfg.ReadHeaderTimeout)
+	cfg.ReadTimeout = duration("readTimeoutSeconds", cfg.ReadTimeout)
+	cfg.WriteTimeout = duration("writeTimeoutSeconds", cfg.WriteTimeout)
+	cfg.IdleTimeout = duration("idleTimeoutSeconds", cfg.IdleTimeout)
+	cfg.ShutdownTimeout = duration("shutdownTimeoutSeconds", cfg.ShutdownTimeout)
+	return cfg
+}
+
 func (a *App) gate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if a.databaseRestart.Load() && r.URL.Path != "/healthz" && r.URL.Path != "/readyz" && r.URL.Path != "/api/v1/public/status" && r.URL.Path != "/api/v1/admin/database/status" {
 			problem(w, http.StatusServiceUnavailable, "database_restart_required", "PostgreSQL migration completed; restart the service to activate it")
+			return
+		}
+		if enabled, message := a.maintenanceMode(r.Context()); enabled && !maintenanceAllowedPath(r.URL.Path) {
+			w.Header().Set("Retry-After", "60")
+			if message == "" {
+				message = "The service is temporarily in maintenance mode"
+			}
+			problem(w, http.StatusServiceUnavailable, "maintenance_mode", message)
 			return
 		}
 		if (r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/admin/backups/") && strings.HasSuffix(r.URL.Path, "/restore")) || r.URL.Path == "/api/v1/admin/database/migrate" {
@@ -242,6 +300,24 @@ func (a *App) gate(next http.Handler) http.Handler {
 		defer a.requestGate.RUnlock()
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (a *App) maintenanceMode(ctx context.Context) (bool, string) {
+	settings, err := a.loadSettingMap(ctx, "operations")
+	if err != nil {
+		return false, ""
+	}
+	enabled, _ := settings["maintenanceMode"].(bool)
+	return enabled, strings.TrimSpace(stringValue(settings, "maintenanceMessage"))
+}
+
+func maintenanceAllowedPath(path string) bool {
+	return path == "/healthz" || path == "/readyz" || path == "/metrics" ||
+		path == "/api/v1/public/config" || path == "/api/v1/public/status" ||
+		path == "/api/v1/bootstrap/login" || strings.HasPrefix(path, "/auth/") ||
+		path == "/admin" || strings.HasPrefix(path, "/admin/") ||
+		strings.HasPrefix(path, "/api/v1/admin/") ||
+		(!strings.HasPrefix(path, "/api/") && path != "/mcp")
 }
 func (a *App) routes() {
 	a.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -350,6 +426,13 @@ func (a *App) authenticate(next http.Handler) http.Handler {
 				return
 			}
 			roles, _ := a.userRoles(r.Context(), uid)
+			if uid == "bootstrap-admin" {
+				if !a.bootstrapAvailable(r.Context()) {
+					problem(w, 401, "invalid_token", "Bootstrap administrator is no longer available")
+					return
+				}
+				roles = []string{"platform-admin"}
+			}
 			aclPrincipal := bitbucketSlug
 			if aclPrincipal == "" && gitlabID != "" {
 				aclPrincipal = "gitlab:" + gitlabID
@@ -722,7 +805,7 @@ func settingRoleAllowed(p auth.Principal, category string) bool {
 	required := map[string][]string{
 		"bitbucket": {"source-admin"}, "gitlab": {"source-admin"}, "index": {"source-admin"},
 		"mcp": {"mcp-admin"}, "search": {"search-admin"}, "model": {"search-admin"}, "opensearch": {"search-admin"},
-		"security": {"security-admin"}, "permissions": {"security-admin"}, "vault": {"security-admin"},
+		"security": {"security-admin"}, "vault": {"security-admin"},
 	}
 	return roleAllowed(p, required[category]...)
 }
@@ -801,6 +884,21 @@ func (a *App) createKey(w http.ResponseWriter, r *http.Request) {
 	if decode(r, &in) != nil {
 		problem(w, 400, "invalid_request", "Invalid JSON")
 		return
+	}
+	for _, scope := range in.Scopes {
+		allowed := true
+		switch scope {
+		case "get-platform-status":
+			allowed = roleAllowed(p, "readonly-operator", "source-admin", "mcp-admin", "search-admin", "security-admin", "auditor")
+		case "list-index-jobs":
+			allowed = roleAllowed(p, "source-admin", "readonly-operator")
+		case "reindex-repository":
+			allowed = roleAllowed(p, "source-admin")
+		}
+		if !allowed {
+			problem(w, http.StatusForbidden, "forbidden_scope", "The current administrator role cannot grant the requested MCP management tool")
+			return
+		}
 	}
 	k, plain, e := a.keys.CreateWithRestrictions(r.Context(), p.UserID, in.Name, in.Scopes, in.ExpiresAt, in.Restrictions)
 	if e != nil {
@@ -1120,8 +1218,18 @@ func (a *App) putSetting(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if category == "logging" {
+		if e = runtimelogging.Apply(stringValue(value, "level")); e != nil {
+			problem(w, 500, "setting_apply_failed", "Logging setting was saved but could not be applied")
+			return
+		}
+	}
 	a.audit(r, p, "settings.update", category, category, "success", map[string]any{"version": version})
 	result := map[string]any{"category": category, "version": version, "secretFields": "encrypted and masked", "applied": true, "appliedAt": time.Now().UTC()}
+	if category == "operations" {
+		result["restartRequired"] = true
+		result["dynamicFields"] = []string{"maintenanceMode", "maintenanceMessage"}
+	}
 	if category == "keycloak" {
 		result["issuerUrl"] = value["issuerUrl"]
 		result["redirectUrl"] = value["redirectUrl"]
@@ -1146,6 +1254,9 @@ func (a *App) deleteSetting(w http.ResponseWriter, r *http.Request) {
 	if rows == 0 {
 		problem(w, http.StatusNotFound, "not_found", "Setting category not configured")
 		return
+	}
+	if category == "logging" {
+		runtimelogging.Reset()
 	}
 	a.audit(r, p, "settings.delete", category, category, "success", nil)
 	w.WriteHeader(http.StatusNoContent)
@@ -1564,6 +1675,42 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 		return observability.Validate(ctx, observabilityConfigFromMap(value))
 	case "backup":
 		return backup.ValidateStorage(backupConfigFromMap(value, a.cfg.BackupDirectory))
+	case "logging":
+		_, err := runtimelogging.Parse(stringValue(value, "level"))
+		return err
+	case "operations":
+		address := strings.TrimSpace(stringValue(value, "listenAddress"))
+		if address != "" {
+			host, port, err := net.SplitHostPort(address)
+			if err != nil || port == "" {
+				return errors.New("operations.listenAddress must be a host:port address such as :4747")
+			}
+			if host != "" && net.ParseIP(host) == nil && host != "localhost" {
+				return errors.New("operations.listenAddress host must be an IP address, localhost, or empty")
+			}
+			portNumber, err := strconv.Atoi(port)
+			if err != nil || portNumber < 1 || portNumber > 65535 {
+				return errors.New("operations.listenAddress port must be 1..65535")
+			}
+		}
+		for _, key := range []string{"readHeaderTimeoutSeconds", "readTimeoutSeconds", "writeTimeoutSeconds", "idleTimeoutSeconds", "shutdownTimeoutSeconds"} {
+			if seconds, ok := value[key].(float64); ok && (seconds < 1 || seconds > 600) {
+				return fmt.Errorf("operations.%s must be 1..600", key)
+			}
+		}
+		if message := stringValue(value, "maintenanceMessage"); len(message) > 500 {
+			return errors.New("operations.maintenanceMessage must be at most 500 characters")
+		}
+	case "retention":
+		for _, key := range []string{"auditLogDays", "mcpCallDays", "notificationDays", "webhookEventDays", "indexJobDays", "securityEventDays", "settingVersionDays"} {
+			if days, ok := value[key].(float64); ok && (days < 0 || days > 3650 || days != float64(int(days))) {
+				return fmt.Errorf("retention.%s must be a whole number from 0 (keep indefinitely) to 3650", key)
+			}
+		}
+	case "notifications":
+		if days, ok := value["apiKeyExpiryWarningDays"].(float64); ok && (days < 0 || days > 365 || days != float64(int(days))) {
+			return errors.New("notifications.apiKeyExpiryWarningDays must be a whole number from 0 (disabled) to 365")
+		}
 	}
 	return nil
 }
@@ -1762,6 +1909,58 @@ func (a *App) pollingInterval(ctx context.Context) time.Duration {
 	}
 	return 30 * time.Minute
 }
+
+func (a *App) retentionPolicy(ctx context.Context) scheduler.RetentionPolicy {
+	settings, err := a.loadSettingMap(ctx, "retention")
+	if err != nil {
+		settings = map[string]any{}
+	}
+	days := func(key string, fallback int) int {
+		if value, ok := settings[key].(float64); ok {
+			return int(value)
+		}
+		return fallback
+	}
+	return scheduler.RetentionPolicy{
+		AuditLogDays:       days("auditLogDays", 365),
+		MCPCallDays:        days("mcpCallDays", 90),
+		NotificationDays:   days("notificationDays", 90),
+		WebhookEventDays:   days("webhookEventDays", 30),
+		IndexJobDays:       days("indexJobDays", 30),
+		SecurityEventDays:  days("securityEventDays", 180),
+		SettingVersionDays: days("settingVersionDays", 365),
+	}
+}
+
+func (a *App) notificationPolicy(ctx context.Context) scheduler.NotificationPolicy {
+	settings, err := a.loadSettingMap(ctx, "notifications")
+	if err != nil {
+		return scheduler.NotificationPolicy{Enabled: true, APIKeyExpiryWarningDays: 7}
+	}
+	enabled := true
+	if value, ok := settings["inAppEnabled"].(bool); ok {
+		enabled = value
+	}
+	days := 7
+	if value, ok := settings["apiKeyExpiryWarningDays"].(float64); ok {
+		days = int(value)
+	}
+	return scheduler.NotificationPolicy{Enabled: enabled, APIKeyExpiryWarningDays: days}
+}
+
+func (a *App) rateLimitAlertsEnabled(ctx context.Context) bool {
+	settings, err := a.loadSettingMap(ctx, "notifications")
+	if err != nil {
+		return true
+	}
+	if enabled, ok := settings["inAppEnabled"].(bool); ok && !enabled {
+		return false
+	}
+	if enabled, ok := settings["rateLimitAlertsEnabled"].(bool); ok {
+		return enabled
+	}
+	return true
+}
 func (a *App) searchConfig(ctx context.Context) search.Config {
 	cfg := search.Config{KeywordWeight: 1, VectorWeight: .35, FinalK: 8, CandidateLimit: 5000}
 	modelSettings, modelErr := a.loadSettingMap(ctx, "model")
@@ -1795,6 +1994,15 @@ func (a *App) searchConfig(ctx context.Context) search.Config {
 		cfg.SourceQuerySearch = true
 	}
 	return cfg
+}
+
+func (a *App) strictMCPCompatibility(ctx context.Context) bool {
+	settings, err := a.loadSettingMap(ctx, "mcp")
+	if err != nil {
+		return false
+	}
+	strict, _ := settings["strictCompatibility"].(bool)
+	return strict
 }
 func (a *App) rerankerProvider(ctx context.Context) (rerank.Provider, error) {
 	settings, err := a.loadSettingMap(ctx, "model")
@@ -1967,11 +2175,10 @@ func embeddingProviderFromMap(settings map[string]any) (embedding.Provider, erro
 func settingCategories() map[string]bool {
 	return map[string]bool{
 		"keycloak": true, "bitbucket": true, "gitlab": true, "mcp": true,
-		"search": true, "model": true, "opensearch": true, "index": true, "permissions": true,
+		"search": true, "model": true, "opensearch": true, "index": true,
 		"security": true, "notifications": true, "logging": true,
 		"operations": true, "ui": true,
 		"observability": true, "backup": true, "retention": true, "vault": true,
-		"database": true,
 	}
 }
 func maskSecrets(value map[string]any) {

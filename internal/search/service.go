@@ -77,6 +77,181 @@ type Library struct {
 	Versions                          []string
 }
 
+type RepositoryResult struct {
+	ID, ProjectKey, Slug, Name, Description, LibraryID, DefaultBranch, SourceType string
+	IndexedAt                                                                     sql.NullTime
+}
+
+type SourceResult struct {
+	LibraryID, SourceType, ProjectKey, RepositorySlug, Ref string
+	source.QueryResult
+}
+
+func (s *Service) SearchRepositories(ctx context.Context, principals []string, query, sourceType string, limit int) ([]RepositoryResult, error) {
+	query, sourceType = strings.TrimSpace(query), strings.ToLower(strings.TrimSpace(sourceType))
+	if query == "" {
+		return nil, errors.New("query is required")
+	}
+	if sourceType != "" && sourceType != "bitbucket" && sourceType != "gitlab" {
+		return nil, errors.New("sourceType must be bitbucket, gitlab, or empty")
+	}
+	if len(principals) == 0 {
+		return []RepositoryResult{}, nil
+	}
+	if limit < 1 || limit > 50 {
+		limit = 20
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(principals)), ",")
+	args := make([]any, 0, len(principals)+1)
+	for _, principal := range principals {
+		args = append(args, principal)
+	}
+	statement := `SELECT DISTINCT r.id,r.project_key,r.slug,r.name,r.description,r.library_id,r.default_branch,r.source_type,r.indexed_at
+FROM repositories r JOIN repository_permissions p ON p.repository_id=r.id
+WHERE r.enabled=1 AND (p.principal IN (` + placeholders + `) OR p.principal='*')`
+	if sourceType != "" {
+		statement += ` AND r.source_type=?`
+		args = append(args, sourceType)
+	}
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type scored struct {
+		RepositoryResult
+		score int
+	}
+	terms := strings.Fields(strings.ToLower(query))
+	var matches []scored
+	for rows.Next() {
+		var item scored
+		if err = rows.Scan(&item.ID, &item.ProjectKey, &item.Slug, &item.Name, &item.Description, &item.LibraryID, &item.DefaultBranch, &item.SourceType, &item.IndexedAt); err != nil {
+			return nil, err
+		}
+		haystack := strings.ToLower(item.ProjectKey + " " + item.Slug + " " + item.Name + " " + item.Description + " " + item.LibraryID)
+		for _, term := range terms {
+			if strings.Contains(haystack, term) {
+				item.score++
+			}
+		}
+		if strings.EqualFold(query, item.Name) || strings.EqualFold(query, item.Slug) {
+			item.score += 10
+		}
+		if item.score > 0 {
+			matches = append(matches, item)
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].score == matches[j].score {
+			return matches[i].LibraryID < matches[j].LibraryID
+		}
+		return matches[i].score > matches[j].score
+	})
+	if len(matches) > limit {
+		matches = matches[:limit]
+	}
+	out := make([]RepositoryResult, len(matches))
+	for i := range matches {
+		out[i] = matches[i].RepositoryResult
+	}
+	return out, nil
+}
+
+func (s *Service) SearchSource(ctx context.Context, principals []string, query, sourceType, project, repository, ref string, limit int) ([]SourceResult, error) {
+	query, sourceType = strings.TrimSpace(query), strings.ToLower(strings.TrimSpace(sourceType))
+	project, repository, ref = strings.TrimSpace(project), strings.TrimSpace(repository), strings.TrimSpace(ref)
+	if query == "" {
+		return nil, errors.New("query is required")
+	}
+	if sourceType != "" && sourceType != "bitbucket" && sourceType != "gitlab" {
+		return nil, errors.New("sourceType must be bitbucket, gitlab, or empty")
+	}
+	if len(principals) == 0 {
+		return []SourceResult{}, nil
+	}
+	if limit < 1 || limit > 50 {
+		limit = 20
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(principals)), ",")
+	args := make([]any, 0, len(principals)+3)
+	for _, principal := range principals {
+		args = append(args, principal)
+	}
+	statement := `SELECT DISTINCT r.id,r.project_key,r.slug,r.library_id,r.default_branch,r.source_type
+FROM repositories r JOIN repository_permissions p ON p.repository_id=r.id
+WHERE r.enabled=1 AND (p.principal IN (` + placeholders + `) OR p.principal='*')`
+	if sourceType != "" {
+		statement += ` AND r.source_type=?`
+		args = append(args, sourceType)
+	}
+	if project != "" {
+		statement += ` AND LOWER(r.project_key)=LOWER(?)`
+		args = append(args, project)
+	}
+	if repository != "" {
+		statement += ` AND (LOWER(r.slug)=LOWER(?) OR LOWER(r.library_id)=LOWER(?))`
+		args = append(args, repository, repository)
+	}
+	statement += ` ORDER BY r.library_id LIMIT 25`
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
+	if err != nil {
+		return nil, err
+	}
+	type candidate struct{ id, project, slug, libraryID, defaultRef, sourceType string }
+	var candidates []candidate
+	for rows.Next() {
+		var item candidate
+		if err = rows.Scan(&item.id, &item.project, &item.slug, &item.libraryID, &item.defaultRef, &item.sourceType); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		candidates = append(candidates, item)
+	}
+	if err = rows.Close(); err != nil {
+		return nil, err
+	}
+	var out []SourceResult
+	var lastErr error
+	for _, item := range candidates {
+		selectedRef := ref
+		if selectedRef == "" {
+			selectedRef = item.defaultRef
+		}
+		if s.sources == nil {
+			continue
+		}
+		adapter, loadErr := s.sources(ctx, item.sourceType)
+		if loadErr != nil {
+			lastErr = loadErr
+			continue
+		}
+		searcher, ok := adapter.(source.QuerySearcher)
+		if !ok {
+			continue
+		}
+		hits, searchErr := searcher.SearchQuery(ctx, source.RepositoryRef{ProjectKey: item.project, Slug: item.slug}, selectedRef, query, limit-len(out))
+		if searchErr != nil {
+			lastErr = searchErr
+			continue
+		}
+		hits = s.indexedSourceHits(ctx, item.id, selectedRef, hits, limit-len(out))
+		for _, hit := range hits {
+			out = append(out, SourceResult{LibraryID: item.libraryID, SourceType: item.sourceType, ProjectKey: item.project, RepositorySlug: item.slug, Ref: selectedRef, QueryResult: hit})
+		}
+		if len(out) >= limit {
+			break
+		}
+	}
+	if len(out) == 0 && lastErr != nil {
+		return nil, lastErr
+	}
+	return out, nil
+}
+
 func (s *Service) Resolve(ctx context.Context, principals []string, name, query string) (libraries []Library, err error) {
 	ctx, span := otel.Tracer("git-ctx/search").Start(ctx, "search.resolve-library",
 		oteltrace.WithAttributes(attribute.Int("git_ctx.acl.principal_count", len(principals))))

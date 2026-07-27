@@ -8,7 +8,6 @@ const categories = [
   "model",
   "opensearch",
   "index",
-  "permissions",
   "security",
   "vault",
   "notifications",
@@ -48,6 +47,7 @@ const integrationSettingFields = {
     ["timeoutSeconds", "Timeout(초)", "number", 30],
   ],
   mcp: [
+    ["strictCompatibility", "Context7 Strict Compatibility (2개 도구만 노출)", "boolean", false],
     ["allowedOrigins", "허용 Origin (쉼표 구분)", "array", ""],
     ["maxRequestBytes", "최대 요청 크기(Byte)", "number", 1048576],
   ],
@@ -133,6 +133,33 @@ const integrationSettingFields = {
     ["retentionCount", "보존 개수", "number", 7],
     ["maxBytes", "백업 최대 크기(Byte)", "number", 536870912],
   ],
+  logging: [
+    ["level", "로그 레벨", "select:debug|info|warn|error", "info"],
+  ],
+  operations: [
+    ["listenAddress", "서비스 수신 주소", "text", ":4747"],
+    ["readHeaderTimeoutSeconds", "요청 헤더 Timeout(초)", "number", 10],
+    ["readTimeoutSeconds", "요청 읽기 Timeout(초)", "number", 30],
+    ["writeTimeoutSeconds", "응답 쓰기 Timeout(초)", "number", 60],
+    ["idleTimeoutSeconds", "유휴 연결 Timeout(초)", "number", 90],
+    ["shutdownTimeoutSeconds", "종료 대기 Timeout(초)", "number", 15],
+    ["maintenanceMode", "점검 모드", "boolean", false],
+    ["maintenanceMessage", "점검 안내", "textarea", ""],
+  ],
+  retention: [
+    ["auditLogDays", "감사 로그 보존일 (0=영구)", "number", 365],
+    ["mcpCallDays", "MCP 호출 기록 보존일 (0=영구)", "number", 90],
+    ["notificationDays", "사용자 알림 보존일 (0=영구)", "number", 90],
+    ["webhookEventDays", "Webhook 이벤트 보존일 (0=영구)", "number", 30],
+    ["indexJobDays", "완료·실패 색인 작업 보존일 (0=영구)", "number", 30],
+    ["securityEventDays", "색인 보안 이벤트 보존일 (0=영구)", "number", 180],
+    ["settingVersionDays", "과거 설정 버전 보존일 (0=영구)", "number", 365],
+  ],
+  notifications: [
+    ["inAppEnabled", "인앱 보안·만료 알림", "boolean", true],
+    ["apiKeyExpiryWarningDays", "API 키 만료 사전 알림일 (0=해제)", "number", 7],
+    ["rateLimitAlertsEnabled", "API 키 호출량 초과 알림", "boolean", true],
+  ],
   ui: [
     ["publicUrl", "서비스 Public URL", "url", "http://localhost:4747"],
     ["serviceName", "서비스 이름", "text", "git-ctx"],
@@ -151,15 +178,14 @@ const settingCategoryMeta = {
   model: ["모델", "Embedding과 Reranker"],
   opensearch: ["OpenSearch", "BM25 projection과 인증"],
   index: ["색인", "Polling과 기본 색인 정책"],
-  permissions: ["권한", "역할과 저장소 정책"],
   security: ["보안", "신뢰 프록시와 키 정책"],
   vault: ["Vault", "KV v2 Secret backend"],
-  notifications: ["알림", "이메일·Webhook·메신저"],
-  logging: ["로깅", "레벨·마스킹·보존"],
+  notifications: ["알림", "API 키 만료와 이상 호출 인앱 알림 정책"],
+  logging: ["로깅", "재기동 없이 적용하는 구조화 로그 레벨"],
   observability: ["관측성", "OpenTelemetry Export"],
   backup: ["백업", "주기·경로·보존"],
-  retention: ["보존", "문서·감사 데이터 보존"],
-  operations: ["운영", "점검 모드·재시도"],
+  retention: ["보존", "감사·호출·알림·색인 운영 데이터 수명주기"],
+  operations: ["운영", "수신 주소·Timeout·동적 점검 모드"],
   ui: ["UI", "서비스명·로고·공지"],
 };
 const settingDefaults = (category) => {
@@ -294,6 +320,7 @@ async function boot() {
       `${me.Username} · 역할: ${(me.Roles || []).join(", ")} · ACL: ${me.ACLPrincipal || "매핑되지 않음(Fail Closed)"}`;
     $("#profile-version").textContent = `서비스 버전 v${me.Version || "unknown"}`;
     const roles = new Set(me.Roles || []);
+    configureMCPKeyScopes(roles);
     const capabilities = GitCtxRoles.capabilitiesFor(me.Roles || []);
     const hasAdmin = Object.values(capabilities).some(Boolean);
     if (hasAdmin) {
@@ -313,6 +340,23 @@ async function boot() {
       location.href = `/auth/login?return_to=${encodeURIComponent("/admin")}`;
     }
   }
+}
+function configureMCPKeyScopes(roles) {
+  const platform = roles.has("platform-admin");
+  const source = platform || roles.has("source-admin");
+  const operator = source || roles.has("readonly-operator");
+  const anyAdmin =
+    platform ||
+    [...roles].some((role) =>
+      ["source-admin", "mcp-admin", "search-admin", "security-admin", "auditor", "readonly-operator"].includes(role),
+    );
+  const fieldset = $("#admin-key-scopes");
+  fieldset.hidden = !anyAdmin;
+  const access = { "get-platform-status": anyAdmin, "list-index-jobs": operator, "reindex-repository": source };
+  fieldset.querySelectorAll('[name="scope"]').forEach((input) => {
+    input.disabled = !access[input.value];
+    if (input.disabled) input.checked = false;
+  });
 }
 let openWorkspaceView = () => {};
 let openPersonalView = () => {};
@@ -813,7 +857,12 @@ function setupAdmin(roles, capabilities) {
           `버전 ${x.version} 저장 완료. 이제 “Keycloak 로그인 시험”으로 platform-admin 로그인을 완료하세요. 성공할 때까지 최초 관리자 복구 세션은 유지됩니다.`,
           true,
         );
-      } else showAdmin(`버전 ${x.version} 저장 완료`, true);
+      } else {
+        const restart = x.restartRequired
+          ? " 점검 모드는 즉시 반영되며 수신 주소와 Timeout은 서비스 재기동 후 반영됩니다."
+          : "";
+        showAdmin(`버전 ${x.version} 저장 완료.${restart}`, true);
+      }
       await loadCurrentSetting($("#category").value);
     } catch (e) {
       showAdmin(`저장하지 못했습니다: ${e.message}`, false);

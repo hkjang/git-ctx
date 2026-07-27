@@ -113,6 +113,35 @@ func TestSourceQueryAPIUsedWithoutRemoteModelsAfterACL(t *testing.T) {
 	}
 }
 
+func TestRepositoryAndSourceSearchWithoutLibraryID(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:source-discovery?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch) VALUES('r','core','demo','GPU Demo','Kubernetes GPU metrics','gitlab','1','/core/demo','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r','alice','read')`)
+	_, _ = db.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('c','r','main','indexed-commit','docs/source-api.md',4,8,'Source API','document','safe indexed source API result','hash')`)
+	remote := &querySource{}
+	service := New(db)
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) { return remote, nil })
+	repositories, err := service.SearchRepositories(ctx, []string{"alice"}, "GPU", "gitlab", 10)
+	if err != nil || len(repositories) != 1 || repositories[0].LibraryID != "/core/demo" {
+		t.Fatalf("repositories=%#v err=%v", repositories, err)
+	}
+	if hidden, err := service.SearchRepositories(ctx, []string{"mallory"}, "GPU", "", 10); err != nil || len(hidden) != 0 {
+		t.Fatalf("ACL repository leak=%#v err=%v", hidden, err)
+	}
+	hits, err := service.SearchSource(ctx, []string{"alice"}, "GPU usage", "gitlab", "", "", "", 10)
+	if err != nil || len(hits) != 1 || hits[0].LibraryID != "/core/demo" || hits[0].CommitID != "indexed-commit" || hits[0].Snippet != "safe indexed source API result" {
+		t.Fatalf("hits=%#v err=%v", hits, err)
+	}
+	if hidden, err := service.SearchSource(ctx, []string{"mallory"}, "GPU usage", "", "", "", "", 10); err != nil || len(hidden) != 0 || remote.calls != 1 {
+		t.Fatalf("ACL source leak=%#v calls=%d err=%v", hidden, remote.calls, err)
+	}
+}
+
 func TestOpenSearchCandidatesAreHydratedFromIndexedDatabase(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, "sqlite", "file:keyword-candidate?mode=memory&cache=shared&_foreign_keys=on")

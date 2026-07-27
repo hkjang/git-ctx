@@ -79,10 +79,17 @@ PAT 대신 `username`과 `password`를 설정할 수 있다. 연결 시험은 �
 
 ```json
 {
+  "strictCompatibility": false,
   "allowedOrigins": ["https://git-ctx.company"],
   "maxRequestBytes": 1048576
 }
 ```
+
+Strict Compatibility를 켜면 `resolve-library-id`, `query-docs`만 노출한다. 기본 확장
+모드에서는 `search-repositories`, `search-source`가 추가되며 관리자 역할의 개인 MCP
+키에는 선택한 Scope에 따라 `get-platform-status`, `list-index-jobs`,
+`reindex-repository`가 추가된다. 관리자 도구는 역할과 API 키 Scope를 동시에 검사하며
+일반 사용자 키나 브라우저 세션에는 노출하지 않는다.
 
 `security.trustedProxyCidrs`에 등록된 reverse proxy의 전달 헤더만 CIDR 제한과 감사
 IP에 사용한다. 등록되지 않은 클라이언트의 `X-Forwarded-For`는 제거된다.
@@ -98,6 +105,57 @@ IP에 사용한다. 등록되지 않은 클라이언트의 `X-Forwarded-For`는 
   "pollingMinutes": 30
 }
 ```
+
+## 운영·로그·알림·보존
+
+`operations`의 점검 모드와 안내 문구는 즉시 적용된다. 수신 주소와 HTTP Timeout은
+다음 재기동부터 적용되며 저장 응답과 관리자 UI가 `restartRequired`를 표시한다.
+
+```json
+{
+  "listenAddress": ":4747",
+  "readHeaderTimeoutSeconds": 10,
+  "readTimeoutSeconds": 30,
+  "writeTimeoutSeconds": 60,
+  "idleTimeoutSeconds": 90,
+  "shutdownTimeoutSeconds": 15,
+  "maintenanceMode": false,
+  "maintenanceMessage": ""
+}
+```
+
+```json
+{ "level": "info" }
+```
+
+`logging.level`은 `debug`, `info`, `warn`, `error` 중 하나이며 재기동 없이 프로세스의
+구조화 JSON 로그 레벨에 적용된다. Secret과 문서 원문은 로그 레벨과 무관하게 기록하지
+않는다.
+
+```json
+{
+  "inAppEnabled": true,
+  "apiKeyExpiryWarningDays": 7,
+  "rateLimitAlertsEnabled": true
+}
+```
+
+알림 정책은 API 키 만료와 호출량 초과 인앱 알림 생성에 동적으로 적용된다.
+
+```json
+{
+  "auditLogDays": 365,
+  "mcpCallDays": 90,
+  "notificationDays": 90,
+  "webhookEventDays": 30,
+  "indexJobDays": 30,
+  "securityEventDays": 180,
+  "settingVersionDays": 365
+}
+```
+
+보존일 `0`은 영구 보존이다. 현재 활성 설정 버전과 실행 대기·실행 중 색인 작업은 보존
+정리에서 제외한다.
 
 ## 검색과 임베딩
 
@@ -194,9 +252,9 @@ attribute에 기록하지 않는다.
 ## 관리자 연동 설정과 검증
 
 관리자 설정 탭은 Keycloak, Bitbucket, GitLab, MCP, 검색, 모델, OpenSearch,
-색인, 보안, Vault, 관측성, 백업, UI의 실제 런타임 필드를 전용 폼으로 제공한다.
-그 밖의 확장 정책은 같은 탭의 고급 JSON에서 편집하며, 전용 폼과 JSON은 양방향으로
-동기화된다. Bootstrap 환경변수는 `GIT_CTX_DB_DSN` 하나뿐이다.
+색인, 보안, Vault, 알림, 로깅, 관측성, 백업, 보존, 운영, UI의 실제 런타임 필드를
+전용 폼으로 제공한다. 그 밖의 확장 정책은 같은 탭의 고급 JSON에서 편집하며, 전용
+폼과 JSON은 양방향으로 동기화된다. Bootstrap 환경변수는 `GIT_CTX_DB_DSN` 하나뿐이다.
 
 DB DSN을 제외한 운영 설정은 관리자 화면에서 자동 조회·시험·저장·삭제한다. Keycloak,
 Bitbucket, GitLab과 모델 영역은 URL, Client/Token/API Key, 모델, TLS, 사내 CA,

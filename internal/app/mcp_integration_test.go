@@ -139,3 +139,52 @@ func TestMCPHTTPContractAndConcurrentCalls(t *testing.T) {
 		t.Fatalf("recorded=%d want=%d", recorded, calls+1)
 	}
 }
+
+func TestAdministratorAPIKeyExposesManagementTools(t *testing.T) {
+	a, _ := mcpFixture(t)
+	if _, err := a.store.DB.Exec(`INSERT INTO user_roles(user_id,role_code) VALUES('u1','source-admin')`); err != nil {
+		t.Fatal(err)
+	}
+	_, key, err := a.keys.Create(context.Background(), "u1", "source administration", []string{"get-platform-status", "list-index-jobs", "reindex-repository"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := mcpRequest(a, key, "", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, "")
+	for _, name := range []string{"get-platform-status", "list-index-jobs", "reindex-repository"} {
+		if !strings.Contains(list.Body.String(), `"name":"`+name+`"`) {
+			t.Fatalf("missing %s in %s", name, list.Body.String())
+		}
+	}
+	status := mcpRequest(a, key, "", `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get-platform-status","arguments":{}}}`, "")
+	if !strings.Contains(status.Body.String(), "Metadata Database: connected") {
+		t.Fatalf("status=%s", status.Body.String())
+	}
+	reindex := mcpRequest(a, key, "", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"reindex-repository","arguments":{"libraryId":"/kcb/demo"}}}`, "")
+	if !strings.Contains(reindex.Body.String(), "Reindex queued") && !strings.Contains(reindex.Body.String(), "already queued or running") {
+		t.Fatalf("reindex=%s", reindex.Body.String())
+	}
+}
+
+func TestBootstrapAdministratorMCPKeyExpiresWithBootstrap(t *testing.T) {
+	a, _ := mcpFixture(t)
+	create := httptest.NewRequest(http.MethodPost, "/api/v1/me/api-keys", bytes.NewBufferString(`{"name":"bootstrap operations","scopes":["get-platform-status"]}`))
+	create.Header.Set("Authorization", "Bearer bootstrap")
+	create.Header.Set("Content-Type", "application/json")
+	created := httptest.NewRecorder()
+	a.Handler().ServeHTTP(created, create)
+	var payload struct {
+		Secret string `json:"secret"`
+	}
+	if created.Code != http.StatusCreated || json.Unmarshal(created.Body.Bytes(), &payload) != nil || payload.Secret == "" {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	status := mcpRequest(a, payload.Secret, "", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get-platform-status","arguments":{}}}`, "")
+	if !strings.Contains(status.Body.String(), "Metadata Database: connected") {
+		t.Fatalf("bootstrap status=%s", status.Body.String())
+	}
+	a.disableBootstrapAdmin()
+	expired := mcpRequest(a, payload.Secret, "", `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`, "")
+	if expired.Code != http.StatusUnauthorized {
+		t.Fatalf("expired bootstrap key status=%d body=%s", expired.Code, expired.Body.String())
+	}
+}

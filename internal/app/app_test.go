@@ -18,6 +18,7 @@ import (
 
 	"git-ctx/internal/auth"
 	"git-ctx/internal/config"
+	runtimelogging "git-ctx/internal/logging"
 	"git-ctx/internal/observability"
 	"git-ctx/internal/version"
 )
@@ -51,6 +52,8 @@ func TestOperationalSettingsValidation(t *testing.T) {
 		{"mcp", map[string]any{"allowedOrigins": []any{"https://git-ctx.company"}, "maxRequestBytes": float64(1 << 20)}},
 		{"index", map[string]any{"pollingMinutes": float64(30)}},
 		{"security", map[string]any{"trustedProxyCidrs": []any{"10.20.0.0/16"}}},
+		{"logging", map[string]any{"level": "debug"}},
+		{"operations", map[string]any{"listenAddress": ":4747", "readTimeoutSeconds": float64(30), "maintenanceMode": true}},
 	}
 	for _, test := range valid {
 		if err := a.validateSetting(context.Background(), test.category, test.value); err != nil {
@@ -65,11 +68,61 @@ func TestOperationalSettingsValidation(t *testing.T) {
 		{"mcp", map[string]any{"maxRequestBytes": float64(17 << 20)}},
 		{"index", map[string]any{"pollingMinutes": float64(0)}},
 		{"security", map[string]any{"trustedProxyCidrs": []any{"not-a-cidr"}}},
+		{"logging", map[string]any{"level": "verbose"}},
+		{"operations", map[string]any{"listenAddress": "all-interfaces", "readTimeoutSeconds": float64(0)}},
 	}
 	for _, test := range invalid {
 		if err := a.validateSetting(context.Background(), test.category, test.value); err == nil {
 			t.Fatalf("invalid %s setting was accepted: %#v", test.category, test.value)
 		}
+	}
+}
+
+func TestOperationsAndLoggingSettingsApply(t *testing.T) {
+	runtimelogging.Reset()
+	t.Cleanup(runtimelogging.Reset)
+	a, err := New(context.Background(), config.Config{
+		ListenAddress: ":4747", DatabaseDriver: "sqlite", DatabaseDSN: "file:runtime-operations?mode=memory&cache=shared&_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	request := func(method, path, body string, admin bool) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if admin {
+			req.Header.Set("Authorization", "Bearer bootstrap")
+		}
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	operations := `{"listenAddress":"127.0.0.1:54747","readHeaderTimeoutSeconds":5,"readTimeoutSeconds":20,"writeTimeoutSeconds":40,"idleTimeoutSeconds":50,"shutdownTimeoutSeconds":8,"maintenanceMode":true,"maintenanceMessage":"관리자 점검 중"}`
+	saved := request(http.MethodPut, "/api/v1/admin/settings/operations", operations, true)
+	if saved.Code != http.StatusOK || !strings.Contains(saved.Body.String(), `"restartRequired":true`) {
+		t.Fatalf("operations save status=%d body=%s", saved.Code, saved.Body.String())
+	}
+	server := a.HTTPServerConfig(context.Background())
+	if server.ListenAddress != "127.0.0.1:54747" || server.ReadTimeout != 20*time.Second || server.ShutdownTimeout != 8*time.Second {
+		t.Fatalf("server config=%+v", server)
+	}
+	blocked := request(http.MethodGet, "/api/v1/me", "", false)
+	if blocked.Code != http.StatusServiceUnavailable || !strings.Contains(blocked.Body.String(), "관리자 점검 중") {
+		t.Fatalf("maintenance status=%d body=%s", blocked.Code, blocked.Body.String())
+	}
+	allowed := request(http.MethodGet, "/api/v1/admin/settings/operations", "", true)
+	if allowed.Code != http.StatusOK {
+		t.Fatalf("admin unavailable during maintenance status=%d body=%s", allowed.Code, allowed.Body.String())
+	}
+	logging := request(http.MethodPut, "/api/v1/admin/settings/logging", `{"level":"debug"}`, true)
+	if logging.Code != http.StatusOK || runtimelogging.Level.Level() != -4 {
+		t.Fatalf("logging status=%d level=%v body=%s", logging.Code, runtimelogging.Level.Level(), logging.Body.String())
+	}
+	deleted := request(http.MethodDelete, "/api/v1/admin/settings/logging", "", true)
+	if deleted.Code != http.StatusNoContent || runtimelogging.Level.Level() != 0 {
+		t.Fatalf("logging delete status=%d level=%v", deleted.Code, runtimelogging.Level.Level())
 	}
 }
 
@@ -578,7 +631,7 @@ func TestPublicAndAdminDatabaseStatus(t *testing.T) {
 	adminRequest.Header.Set("Authorization", "Bearer bootstrap")
 	admin := httptest.NewRecorder()
 	a.Handler().ServeHTTP(admin, adminRequest)
-	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"latest":"014_user_role_management.sql"`) || !strings.Contains(admin.Body.String(), `"pool"`) {
+	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"latest":"015_extended_mcp_tools.sql"`) || !strings.Contains(admin.Body.String(), `"pool"`) {
 		t.Fatalf("admin status=%d body=%s", admin.Code, admin.Body.String())
 	}
 }
@@ -717,7 +770,7 @@ func TestAdministrativeRoleMatrix(t *testing.T) {
 	for category, role := range map[string]string{
 		"bitbucket": "source-admin", "gitlab": "source-admin", "index": "source-admin",
 		"mcp": "mcp-admin", "search": "search-admin", "model": "search-admin",
-		"security": "security-admin", "permissions": "security-admin",
+		"security": "security-admin",
 	} {
 		if !settingRoleAllowed(principal(role), category) {
 			t.Errorf("%s denied setting %s", role, category)
@@ -728,6 +781,34 @@ func TestAdministrativeRoleMatrix(t *testing.T) {
 	}
 	if settingRoleAllowed(principal("source-admin"), "keycloak") {
 		t.Fatal("source-admin gained platform-only Keycloak settings")
+	}
+}
+
+func TestAdministratorMCPKeyScopesRequireCurrentRole(t *testing.T) {
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:admin-mcp-scopes?mode=memory&cache=shared&_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	_, _ = a.store.DB.Exec(`INSERT INTO users(id,subject,username,email) VALUES('developer','developer','developer','')`)
+	request := func(principal auth.Principal, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/me/api-keys", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req = req.WithContext(auth.WithPrincipal(req.Context(), principal))
+		rec := httptest.NewRecorder()
+		a.createKey(rec, req)
+		return rec
+	}
+	developer := request(auth.Principal{UserID: "developer", Roles: []string{"developer"}}, `{"name":"bad-admin","scopes":["get-platform-status"]}`)
+	if developer.Code != http.StatusForbidden {
+		t.Fatalf("developer status=%d body=%s", developer.Code, developer.Body.String())
+	}
+	sourceAdmin := request(auth.Principal{UserID: "developer", Roles: []string{"source-admin"}}, `{"name":"source-ops","scopes":["search-repositories","search-source","get-platform-status","list-index-jobs","reindex-repository"]}`)
+	if sourceAdmin.Code != http.StatusCreated || !strings.Contains(sourceAdmin.Body.String(), "reindex-repository") {
+		t.Fatalf("source admin status=%d body=%s", sourceAdmin.Code, sourceAdmin.Body.String())
 	}
 }
 

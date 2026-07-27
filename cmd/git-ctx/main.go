@@ -8,14 +8,14 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"git-ctx/internal/app"
 	"git-ctx/internal/config"
+	runtimelogging "git-ctx/internal/logging"
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: &runtimelogging.Level})))
 	cfg, err := config.FromEnv()
 	if err != nil {
 		slog.Error("invalid bootstrap configuration", "error", err)
@@ -28,16 +28,17 @@ func main() {
 	}
 	defer a.Close()
 
+	httpConfig := a.HTTPServerConfig(context.Background())
 	srv := &http.Server{
-		Addr:              cfg.ListenAddress,
+		Addr:              httpConfig.ListenAddress,
 		Handler:           a.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
-		IdleTimeout:       90 * time.Second,
+		ReadHeaderTimeout: httpConfig.ReadHeaderTimeout,
+		ReadTimeout:       httpConfig.ReadTimeout,
+		WriteTimeout:      httpConfig.WriteTimeout,
+		IdleTimeout:       httpConfig.IdleTimeout,
 	}
 	go func() {
-		slog.Info("git-ctx listening", "address", cfg.ListenAddress)
+		slog.Info("git-ctx listening", "address", httpConfig.ListenAddress)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server stopped", "error", err)
 			os.Exit(1)
@@ -46,7 +47,7 @@ func main() {
 	stop, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	<-stop.Done()
-	ctx, done := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, done := context.WithTimeout(context.Background(), httpConfig.ShutdownTimeout)
 	defer done()
 	_ = srv.Shutdown(ctx)
 }

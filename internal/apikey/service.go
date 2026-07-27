@@ -18,8 +18,9 @@ import (
 )
 
 type Service struct {
-	store  *store.Store
-	pepper []byte
+	store                *store.Store
+	pepper               []byte
+	rateLimitAlertLoader func(context.Context) bool
 }
 type Restrictions struct {
 	AllowedCIDRs        []string `json:"allowedCidrs,omitempty"`
@@ -50,6 +51,10 @@ type RateLimitError struct{ RetryAfter time.Duration }
 func (e *RateLimitError) Error() string { return "API key rate limit exceeded" }
 
 func New(s *store.Store, pepper string) *Service { return &Service{store: s, pepper: []byte(pepper)} }
+
+func (s *Service) SetRateLimitAlertLoader(loader func(context.Context) bool) {
+	s.rateLimitAlertLoader = loader
+}
 func (s *Service) Create(ctx context.Context, userID, name string, scopes []string, expiresAt *time.Time) (Key, string, error) {
 	return s.CreateWithRestrictions(ctx, userID, name, scopes, expiresAt, Restrictions{})
 }
@@ -57,7 +62,11 @@ func (s *Service) CreateWithRestrictions(ctx context.Context, userID, name strin
 	if name == "" || len(name) > 100 {
 		return Key{}, "", errors.New("name is required and must not exceed 100 characters")
 	}
-	allowed := map[string]bool{"resolve-library-id": true, "query-docs": true}
+	allowed := map[string]bool{
+		"resolve-library-id": true, "query-docs": true,
+		"search-repositories": true, "search-source": true,
+		"get-platform-status": true, "list-index-jobs": true, "reindex-repository": true,
+	}
 	for _, scope := range scopes {
 		if !allowed[scope] {
 			return Key{}, "", fmt.Errorf("unsupported scope %q", scope)
@@ -252,7 +261,9 @@ func (s *Service) applyRateLimits(ctx context.Context, keyID string, r Restricti
 			return err
 		}
 		if count > x.limit {
-			s.notifyRateLimit(ctx, keyID, x.kind, x.start)
+			if s.rateLimitAlertLoader == nil || s.rateLimitAlertLoader(ctx) {
+				s.notifyRateLimit(ctx, keyID, x.kind, x.start)
+			}
 			return &RateLimitError{RetryAfter: x.retry}
 		}
 	}

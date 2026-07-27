@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.8.3
+  version: 0.9.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -437,7 +437,16 @@ components:
         scopes:
           {
             type: array,
-            items: { type: string, enum: [resolve-library-id, query-docs] },
+            items:
+              type: string
+              enum:
+                - resolve-library-id
+                - query-docs
+                - search-repositories
+                - search-source
+                - get-platform-status
+                - list-index-jobs
+                - reindex-repository
           }
         expiresAt: { type: [string, "null"], format: date-time }
         restrictions:

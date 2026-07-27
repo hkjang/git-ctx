@@ -23,12 +23,13 @@ import (
 )
 
 type Server struct {
-	search   *search.Service
-	store    *store.Store
-	mu       sync.Mutex
-	sessions map[string]*session
-	cacheMu  sync.Mutex
-	cache    map[string]cacheEntry
+	search     *search.Service
+	store      *store.Store
+	strictMode func(context.Context) bool
+	mu         sync.Mutex
+	sessions   map[string]*session
+	cacheMu    sync.Mutex
+	cache      map[string]cacheEntry
 }
 type session struct {
 	expires time.Time
@@ -41,6 +42,10 @@ type cacheEntry struct {
 
 func New(s *search.Service, db *store.Store) *Server {
 	return &Server{search: s, store: db, sessions: map[string]*session{}, cache: map[string]cacheEntry{}}
+}
+
+func (s *Server) SetStrictCompatibilityLoader(loader func(context.Context) bool) {
+	s.strictMode = loader
 }
 
 type request struct {
@@ -159,23 +164,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "tools/list":
 		available := Catalog()
 		enabled := available[:0]
+		p, _ := auth.FromContext(r.Context())
 		for _, tool := range available {
 			name, _ := tool["name"].(string)
-			if s.toolEnabled(r.Context(), name) {
+			if s.toolVisible(r.Context(), p, name) {
 				enabled = append(enabled, tool)
 			}
 		}
 		available = enabled
-		if p, ok := auth.FromContext(r.Context()); ok && p.KeyID != "" {
-			filtered := available[:0]
-			for _, tool := range available {
-				name, _ := tool["name"].(string)
-				if contains(p.Scopes, name) {
-					filtered = append(filtered, tool)
-				}
-			}
-			available = filtered
-		}
 		write(w, response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"tools": available}})
 	case "tools/call":
 		s.call(w, r, req)
@@ -249,6 +245,29 @@ func Catalog() []map[string]any {
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId", "query"}, "properties": map[string]any{
 				"libraryId": map[string]string{"type": "string", "description": "Context7-compatible /organization/project[/version] ID"},
 				"query":     map[string]string{"type": "string", "description": "Focused documentation question"}}}},
+		{"name": "search-repositories", "description": "Searches accessible Bitbucket and GitLab projects and repositories without requiring a library ID.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
+				"query":      map[string]string{"type": "string", "description": "Project, repository, product, or description search text"},
+				"sourceType": map[string]any{"type": "string", "enum": []string{"bitbucket", "gitlab"}, "description": "Optional source filter"},
+				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 50}}}},
+		{"name": "search-source", "description": "Searches code and files through the connected Bitbucket or GitLab query API across accessible repositories.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
+				"query":      map[string]string{"type": "string", "description": "Code, symbol, API, or text query"},
+				"sourceType": map[string]any{"type": "string", "enum": []string{"bitbucket", "gitlab"}},
+				"project":    map[string]string{"type": "string", "description": "Optional project key or namespace"},
+				"repository": map[string]string{"type": "string", "description": "Optional repository slug or library ID"},
+				"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"},
+				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 50}}}},
+		{"name": "get-platform-status", "description": "Returns administrative MCP, source, index, and database status. Requires an administrator MCP API key.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}}},
+		{"name": "list-index-jobs", "description": "Lists recent indexing jobs for source administrators and operators using an MCP API key.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
+				"status": map[string]any{"type": "string", "enum": []string{"pending", "running", "completed", "failed"}},
+				"limit":  map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}}},
+		{"name": "reindex-repository", "description": "Queues an idempotent repository reindex job. Requires a source administrator MCP API key.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId"}, "properties": map[string]any{
+				"libraryId": map[string]string{"type": "string", "description": "Repository library ID such as /project/repository"},
+				"ref":       map[string]string{"type": "string", "description": "Optional branch or tag; defaults to the repository default branch"}}}},
 	}
 }
 
@@ -263,7 +282,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 		write(w, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32602, Message: "Invalid params"}})
 		return
 	}
-	if params.Name != "resolve-library-id" && params.Name != "query-docs" {
+	if !catalogContains(params.Name) {
 		write(w, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32602, Message: "Unknown tool"}})
 		return
 	}
@@ -271,8 +290,8 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 		oteltrace.WithAttributes(attribute.String("mcp.tool.name", params.Name)))
 	defer span.End()
 	r = r.WithContext(ctx)
-	if !s.toolEnabled(r.Context(), params.Name) {
-		write(w, response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"content": []map[string]string{{"type": "text", "text": "This MCP tool is disabled by the platform administrator."}}, "isError": true}})
+	if !s.toolVisible(r.Context(), p, params.Name) {
+		write(w, response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"content": []map[string]string{{"type": "text", "text": "This MCP tool is unavailable for this credential."}}, "isError": true}})
 		return
 	}
 	timeout := s.toolTimeout(r.Context(), params.Name)
@@ -282,17 +301,8 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 	text := ""
 	var err error
 	libraryID := ""
-	if params.Name == "query-docs" {
+	if params.Name == "query-docs" || params.Name == "reindex-repository" {
 		libraryID = stringArg(params.Arguments, "libraryId")
-	}
-	if p.KeyID != "" && !contains(p.Scopes, params.Name) {
-		err = errors.New("this API key is not allowed to call the requested tool")
-	}
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "MCP authorization failed")
-		s.finishCall(w, r, req, p, params.Name, libraryID, start, "", err)
-		return
 	}
 	cacheKey := s.cacheKey(p, params.Name, params.Arguments)
 	if cached, ok := s.cached(cacheKey); ok {
@@ -317,6 +327,42 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 		} else {
 			text, err = s.search.Query(r.Context(), principalACLs(p), libraryID, stringArg(params.Arguments, "query"))
 		}
+	case "search-repositories":
+		var items []search.RepositoryResult
+		items, err = s.search.SearchRepositories(r.Context(), principalACLs(p), stringArg(params.Arguments, "query"), stringArg(params.Arguments, "sourceType"), intArg(params.Arguments, "limit", 20))
+		if err == nil {
+			if len(p.AllowedRepositories) > 0 {
+				filtered := items[:0]
+				for _, item := range items {
+					if libraryAllowed(item.LibraryID, p.AllowedRepositories) {
+						filtered = append(filtered, item)
+					}
+				}
+				items = filtered
+			}
+			text = formatRepositories(items)
+		}
+	case "search-source":
+		var hits []search.SourceResult
+		hits, err = s.search.SearchSource(r.Context(), principalACLs(p), stringArg(params.Arguments, "query"), stringArg(params.Arguments, "sourceType"), stringArg(params.Arguments, "project"), stringArg(params.Arguments, "repository"), stringArg(params.Arguments, "ref"), intArg(params.Arguments, "limit", 20))
+		if err == nil {
+			if len(p.AllowedRepositories) > 0 {
+				filtered := hits[:0]
+				for _, hit := range hits {
+					if libraryAllowed(hit.LibraryID, p.AllowedRepositories) {
+						filtered = append(filtered, hit)
+					}
+				}
+				hits = filtered
+			}
+			text = formatSourceResults(hits)
+		}
+	case "get-platform-status":
+		text, err = s.platformStatus(r.Context())
+	case "list-index-jobs":
+		text, err = s.indexJobs(r.Context(), p, stringArg(params.Arguments, "status"), intArg(params.Arguments, "limit", 20))
+	case "reindex-repository":
+		text, err = s.reindexRepository(r.Context(), p, libraryID, stringArg(params.Arguments, "ref"))
 	}
 	if err == nil {
 		s.storeCache(r.Context(), params.Name, cacheKey, text)
@@ -326,6 +372,56 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 	}
 	s.finishCall(w, r, req, p, params.Name, libraryID, start, text, err)
 }
+
+func catalogContains(name string) bool {
+	for _, tool := range Catalog() {
+		if tool["name"] == name {
+			return true
+		}
+	}
+	return false
+}
+
+func coreTool(name string) bool {
+	return name == "resolve-library-id" || name == "query-docs"
+}
+
+func adminTool(name string) bool {
+	return name == "get-platform-status" || name == "list-index-jobs" || name == "reindex-repository"
+}
+
+func adminToolAllowed(p auth.Principal, name string) bool {
+	if p.KeyID == "" {
+		return false
+	}
+	switch name {
+	case "get-platform-status":
+		for _, role := range []string{"platform-admin", "readonly-operator", "source-admin", "mcp-admin", "search-admin", "security-admin", "auditor"} {
+			if p.HasRole(role) {
+				return true
+			}
+		}
+	case "list-index-jobs":
+		return p.HasRole("source-admin") || p.HasRole("readonly-operator")
+	case "reindex-repository":
+		return p.HasRole("source-admin")
+	}
+	return false
+}
+
+func (s *Server) toolVisible(ctx context.Context, p auth.Principal, name string) bool {
+	if s.strictMode != nil && s.strictMode(ctx) && !coreTool(name) {
+		return false
+	}
+	if !s.toolEnabled(ctx, name) {
+		return false
+	}
+	if adminTool(name) && !adminToolAllowed(p, name) {
+		return false
+	}
+	return p.KeyID == "" || contains(p.Scopes, name)
+}
+
 func (s *Server) toolEnabled(ctx context.Context, name string) bool {
 	var enabled int
 	if err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT enabled FROM mcp_tools WHERE name=?`), name).Scan(&enabled); err != nil {
@@ -339,6 +435,104 @@ func (s *Server) toolTimeout(ctx context.Context, name string) time.Duration {
 		return 30 * time.Second
 	}
 	return time.Duration(timeout) * time.Millisecond
+}
+
+func (s *Server) platformStatus(ctx context.Context) (string, error) {
+	if err := s.store.DB.PingContext(ctx); err != nil {
+		return "", fmt.Errorf("metadata database unavailable: %w", err)
+	}
+	var repositories, bitbucket, gitlab, pending, running, failed int
+	err := s.store.DB.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(CASE WHEN source_type='bitbucket' THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN source_type='gitlab' THEN 1 ELSE 0 END),0) FROM repositories WHERE enabled=1`).Scan(&repositories, &bitbucket, &gitlab)
+	if err != nil {
+		return "", err
+	}
+	err = s.store.DB.QueryRowContext(ctx, `SELECT COALESCE(SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN status='running' THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),0) FROM index_jobs`).Scan(&pending, &running, &failed)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("## git-ctx Platform Status\n\n- Version: %s\n- Metadata Database: connected\n- Enabled Repositories: %d\n- Bitbucket Repositories: %d\n- GitLab Repositories: %d\n- Index Jobs Pending: %d\n- Index Jobs Running: %d\n- Index Jobs Failed: %d\n", version.Version, repositories, bitbucket, gitlab, pending, running, failed), nil
+}
+
+func (s *Server) indexJobs(ctx context.Context, p auth.Principal, status string, limit int) (string, error) {
+	status = strings.TrimSpace(status)
+	if status != "" && status != "pending" && status != "running" && status != "completed" && status != "failed" {
+		return "", errors.New("status must be pending, running, completed, or failed")
+	}
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	statement := `SELECT j.id,r.library_id,j.ref_name,j.kind,j.status,j.attempts,j.files_processed,j.error_message,j.created_at
+FROM index_jobs j JOIN repositories r ON r.id=j.repository_id`
+	var args []any
+	if status != "" {
+		statement += ` WHERE j.status=?`
+		args = append(args, status)
+	}
+	statement += ` ORDER BY j.created_at DESC LIMIT ?`
+	args = append(args, min(limit*5, 500))
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var b strings.Builder
+	b.WriteString("## Recent Index Jobs\n")
+	count := 0
+	for rows.Next() {
+		var id, libraryID, ref, kind, state, message string
+		var attempts, files int
+		var created time.Time
+		if err = rows.Scan(&id, &libraryID, &ref, &kind, &state, &attempts, &files, &message, &created); err != nil {
+			return "", err
+		}
+		if !libraryAllowed(libraryID, p.AllowedRepositories) {
+			continue
+		}
+		fmt.Fprintf(&b, "\n- Job: %s\n  Library ID: %s\n  Ref: %s\n  Kind: %s\n  Status: %s\n  Attempts: %d\n  Files: %d\n  Created: %s\n", id, libraryID, ref, kind, state, attempts, files, created.UTC().Format(time.RFC3339))
+		if message != "" {
+			fmt.Fprintf(&b, "  Error: %s\n", truncate(message, 300))
+		}
+		count++
+		if count == limit {
+			break
+		}
+	}
+	if count == 0 {
+		return "No index jobs matched the requested scope.", rows.Err()
+	}
+	return b.String(), rows.Err()
+}
+
+func (s *Server) reindexRepository(ctx context.Context, p auth.Principal, libraryID, ref string) (string, error) {
+	if !libraryAllowed(libraryID, p.AllowedRepositories) {
+		return "", errors.New("library is unavailable or access is denied")
+	}
+	base := baseLibraryID(libraryID)
+	if base == "" {
+		return "", errors.New("libraryId must use /organization/project[/version]")
+	}
+	var repositoryID, defaultRef string
+	if err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT id,default_branch FROM repositories WHERE library_id=? AND enabled=1`), base).Scan(&repositoryID, &defaultRef); err != nil {
+		return "", errors.New("library is unavailable or access is denied")
+	}
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		ref = defaultRef
+	}
+	var existing string
+	err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT id FROM index_jobs WHERE repository_id=? AND ref_name=? AND status IN ('pending','running') ORDER BY created_at DESC LIMIT 1`), repositoryID, ref).Scan(&existing)
+	if err == nil {
+		return fmt.Sprintf("Reindex is already queued or running.\n\n- Job: %s\n- Library ID: %s\n- Ref: %s\n", existing, base, ref), nil
+	}
+	raw := make([]byte, 16)
+	if _, err = rand.Read(raw); err != nil {
+		return "", err
+	}
+	jobID := "mcp:" + hex.EncodeToString(raw)
+	if _, err = s.store.DB.ExecContext(ctx, s.store.Rebind(`INSERT INTO index_jobs(id,repository_id,ref_name,kind,status,next_run_at) VALUES(?,?,?,'manual','pending',?)`), jobID, repositoryID, ref, time.Now().UTC()); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Reindex queued.\n\n- Job: %s\n- Library ID: %s\n- Ref: %s\n", jobID, base, ref), nil
 }
 func (s *Server) cacheKey(p auth.Principal, tool string, args map[string]any) string {
 	raw, _ := json.Marshal(args)
@@ -396,7 +590,56 @@ func formatLibraries(items []search.Library) string {
 	}
 	return b.String()
 }
+
+func formatRepositories(items []search.RepositoryResult) string {
+	if len(items) == 0 {
+		return "No accessible Bitbucket or GitLab repositories matched the query."
+	}
+	var b strings.Builder
+	b.WriteString("## Accessible Repositories\n")
+	for _, item := range items {
+		indexed := "not indexed"
+		if item.IndexedAt.Valid {
+			indexed = item.IndexedAt.Time.UTC().Format(time.RFC3339)
+		}
+		fmt.Fprintf(&b, "\n- Name: %s\n  Library ID: %s\n  Source: %s\n  Project: %s\n  Repository: %s\n  Default Branch: %s\n  Indexed At: %s\n  Description: %s\n", item.Name, item.LibraryID, item.SourceType, item.ProjectKey, item.Slug, item.DefaultBranch, indexed, item.Description)
+	}
+	return b.String()
+}
+
+func formatSourceResults(items []search.SourceResult) string {
+	if len(items) == 0 {
+		return "No source matches were found in accessible, safely indexed files. Broaden the query or run an index first."
+	}
+	var b strings.Builder
+	b.WriteString("## Source Search Results\n")
+	for _, item := range items {
+		fmt.Fprintf(&b, "\n### %s · %s\n\n%s\n\nSource: %s://%s/%s@%s/%s#L%d-L%d\n", item.LibraryID, item.Path, item.Snippet, item.SourceType, item.ProjectKey, item.RepositorySlug, item.CommitID, item.Path, item.LineStart, item.LineEnd)
+	}
+	return b.String()
+}
+
 func stringArg(m map[string]any, k string) string { v, _ := m[k].(string); return v }
+func intArg(m map[string]any, k string, fallback int) int {
+	value, ok := m[k].(float64)
+	if !ok || value != float64(int(value)) {
+		return fallback
+	}
+	return int(value)
+}
+func baseLibraryID(id string) string {
+	parts := strings.Split(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(id)), "/"), "/")
+	if len(parts) < 2 {
+		return ""
+	}
+	return "/" + parts[0] + "/" + parts[1]
+}
+func truncate(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "…"
+}
 func write(w http.ResponseWriter, v response) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(v)

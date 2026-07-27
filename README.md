@@ -6,7 +6,9 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 현재 저장소는 실행 가능한 기반 구현을 포함합니다.
 
 - MCP Streamable HTTP `/mcp`: `initialize`, `tools/list`, `tools/call`, 세션 SSE와 종료
-- Context7 호환 `resolve-library-id`, `query-docs`
+- Context7 호환 `resolve-library-id`, `query-docs`와 선택 가능한 Strict 모드
+- Library ID 없이 ACL 범위에서 찾는 `search-repositories`, Bitbucket/GitLab Query API 기반 `search-source`
+- 관리자 MCP 키 전용 `get-platform-status`, `list-index-jobs`, `reindex-repository`
 - 검색 후보 단계의 저장소 ACL 적용과 브랜치·태그별 조회
 - 사용자 API 키 생성·목록·중지·폐기 및 HMAC 기반 비가역 저장
 - SQLite와 PostgreSQL 공통 스키마

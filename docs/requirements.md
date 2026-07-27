@@ -14,6 +14,20 @@ Go 모듈형 모놀리스로 시작하되 API/MCP/indexer/scheduler 프로세스
 | MCP | `/mcp` GET/POST/DELETE, JSON-RPC 2.0, Streamable HTTP |
 | Resolve | `resolve-library-id(libraryName: string, query: string)` |
 | Query | `query-docs(libraryId: string, query: string)` |
+
+확장 모드에서는 Context7의 두 단계 흐름을 깨지 않으면서 다음 도구를 추가한다.
+
+| 도구 | 목적 |
+|---|---|
+| `search-repositories` | Library ID 없이 접근 가능한 Bitbucket/GitLab 프로젝트·저장소 검색 |
+| `search-source` | ACL 확인 후 Bitbucket/GitLab Query Search API로 코드·파일 검색 |
+| `get-platform-status` | 관리자 MCP 키로 플랫폼·DB·색인 상태 조회 |
+| `list-index-jobs` | 관리자 MCP 키로 최근 색인 작업 조회 |
+| `reindex-repository` | `source-admin` MCP 키로 멱등 재색인 작업 등록 |
+
+`mcp.strictCompatibility=true`일 때는 기존 Context7 도구 2개만 노출한다. 확장 및
+관리 도구는 API 키 Scope와 현재 사용자 역할을 모두 만족해야 하며, 관리자 도구는
+브라우저 세션이나 일반 OAuth 사용자 토큰이 아닌 사용자별 MCP API 키에서만 노출한다.
 | 인증 | Keycloak Bearer, `CONTEXT7_API_KEY`, `X-API-Key` |
 | Library ID | `/project/repository[/branch-or-tag]`, 소문자 정규형 |
 | DB | PostgreSQL 운영 기본, SQLite 개발·단일 노드 지원 |

@@ -11,7 +11,6 @@ const categories = [
   "opensearch",
   "vault",
   "index",
-  "permissions",
   "security",
   "ui",
 ];
@@ -27,7 +26,6 @@ assert.deepEqual(categoriesFor(categories, ["search-admin"]), [
 ]);
 assert.deepEqual(categoriesFor(categories, ["security-admin"]), [
   "vault",
-  "permissions",
   "security",
 ]);
 assert.deepEqual(categoriesFor(categories, ["auditor"]), []);

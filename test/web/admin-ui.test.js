@@ -31,6 +31,7 @@ for (const id of [
   "users-admin-section",
   "admin-user-form",
   "admin-users",
+  "admin-key-scopes",
 ]) {
   assert.match(html, new RegExp(`id=["']${id}["']`), `missing ${id}`);
 }
@@ -47,6 +48,9 @@ assert.match(script, /api\/v1\/admin\/database\/\$\{action\}/);
 assert.match(script, /Keycloak Base URL/);
 assert.match(script, /loadCurrentSetting/);
 assert.match(script, /api\/v1\/admin\/users/);
+assert.match(script, /configureMCPKeyScopes/);
+assert.match(html, /search-repositories/);
+assert.match(html, /reindex-repository/);
 assert.match(script, /const isAdminEntry = location\.pathname === "\/admin"/);
 assert.match(script, /!isAdminEntry \|\| !bootstrapInfo\.required/);
 assert.match(script, /return_to=\$\{encodeURIComponent\(returnTo\)\}/);
@@ -70,10 +74,16 @@ for (const category of [
   "vault",
   "observability",
   "backup",
+  "logging",
+  "notifications",
+  "operations",
+  "retention",
   "ui",
 ]) {
   assert.match(script, new RegExp(`\\n\\s{2}${category}: \\[`), `missing dedicated ${category} settings form`);
 }
 assert.match(styles, /\[hidden\]\s*\{[^}]*display:\s*none\s*!important/s);
+assert.match(script, /maintenanceMode/);
+assert.match(script, /서비스 재기동 후 반영/);
 assert.match(html, /class=["']status-row["']/);
 console.log("admin UI structure tests passed");

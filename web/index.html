@@ -87,6 +87,10 @@
             <dd>접근 가능한 라이브러리 ID 후보 검색</dd>
             <dt>query-docs</dt>
             <dd>버전별 문서와 코드 예제를 출처와 함께 검색</dd>
+            <dt>search-repositories</dt>
+            <dd>Library ID 없이 접근 가능한 Bitbucket·GitLab 저장소 검색</dd>
+            <dt>search-source</dt>
+            <dd>Bitbucket·GitLab Query API 기반 소스 검색</dd>
           </dl>
         </article>
       </section>
@@ -119,7 +123,19 @@
             ><label
               ><input type="checkbox" name="scope" value="query-docs" checked />
               query-docs</label
+            ><label
+              ><input type="checkbox" name="scope" value="search-repositories" checked />
+              search-repositories</label
+            ><label
+              ><input type="checkbox" name="scope" value="search-source" checked />
+              search-source</label
             >
+          </fieldset>
+          <fieldset id="admin-key-scopes" hidden>
+            <legend>관리자 MCP 도구</legend>
+            <label><input type="checkbox" name="scope" value="get-platform-status" /> get-platform-status</label>
+            <label><input type="checkbox" name="scope" value="list-index-jobs" /> list-index-jobs</label>
+            <label><input type="checkbox" name="scope" value="reindex-repository" /> reindex-repository</label>
           </fieldset>
           <label
             >허용 CIDR<input
