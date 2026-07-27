@@ -21,34 +21,10 @@ const categories = [
 ];
 const integrationSettingFields = {
   keycloak: [
-    ["issuerMode", "Issuer 구성 방식", "select:auto|custom", "auto"],
     ["baseUrl", "Keycloak Base URL", "url", ""],
     ["realm", "Realm", "text", ""],
-    ["issuerUrl", "OIDC Issuer URL (자동 생성 또는 직접 입력)", "url", ""],
     ["clientId", "Client ID", "text", "git-ctx"],
     ["clientSecret", "Client Secret", "password", ""],
-    ["redirectMode", "Redirect 구성 방식", "select:auto|custom", "auto"],
-    ["redirectUrl", "Redirect URL", "url", ""],
-    ["postLogoutRedirectUrl", "Logout Redirect URL", "url", ""],
-    ["scopes", "Scopes (쉼표 구분)", "array", "openid,profile,email,groups"],
-    ["usernameClaim", "Username Claim", "text", "preferred_username"],
-    ["groupsClaim", "Groups Claim", "text", "groups"],
-    ["emailClaim", "Email Claim", "text", "email"],
-    [
-      "bitbucketUserSlugClaim",
-      "Bitbucket User Slug Claim",
-      "text",
-      "bitbucket_user_slug",
-    ],
-    ["gitlabUserIdClaim", "GitLab User ID Claim", "text", "gitlab_user_id"],
-    ["realmRoleMappings", "Realm Role 매핑 (JSON)", "json", {}],
-    ["clientRoleMappings", "Client Role 매핑 (JSON)", "json", {}],
-    ["bitbucketGroupMappings", "Bitbucket Group 매핑 (JSON)", "json", {}],
-    ["allowedClockSkewSeconds", "Token Clock Skew(초)", "number", 30],
-    ["tlsVerify", "TLS 인증서 검증 사용", "boolean", true],
-    ["caCertificate", "사내 CA PEM", "textarea", ""],
-    ["proxyUrl", "Proxy URL", "url", ""],
-    ["timeoutSeconds", "Timeout(초)", "number", 15],
   ],
   bitbucket: [
     ["baseUrl", "Bitbucket Base URL", "url", ""],
@@ -167,7 +143,7 @@ const integrationSettingFields = {
   ],
 };
 const settingCategoryMeta = {
-  keycloak: ["Keycloak SSO", "OIDC 로그인, Claim과 역할 매핑"],
+  keycloak: ["Keycloak SSO", "4개 항목으로 자동 구성하는 OIDC 로그인"],
   bitbucket: ["Bitbucket", "Bitbucket Server 6.9.1 연결과 Webhook"],
   gitlab: ["GitLab", "GitLab API v4 연결과 Webhook"],
   mcp: ["MCP", "Transport, Origin, 호출 제한"],
@@ -193,10 +169,6 @@ const settingDefaults = (category) => {
       value,
     ]),
   );
-  if (category === "keycloak") {
-    defaults.redirectUrl ||= `${location.origin}/auth/callback`;
-    defaults.postLogoutRedirectUrl ||= `${location.origin}/`;
-  }
   return defaults;
 };
 let bootstrapInfo = { required: false, tokenFile: "" };
@@ -319,6 +291,9 @@ async function boot() {
   } catch (e) {
     $("#status").textContent =
       "Keycloak으로 로그인하면 개인 MCP 키와 관리자 기능을 사용할 수 있습니다.";
+    if (location.pathname.startsWith("/admin") && !bootstrapInfo.required) {
+      location.href = `/auth/login?return_to=${encodeURIComponent("/admin")}`;
+    }
   }
 }
 let openWorkspaceView = () => {};
@@ -343,11 +318,14 @@ function setupWorkspaceNavigation(hasAdmin) {
   openWorkspaceView("personal");
 }
 function applyInitialNavigation(hasAdmin) {
-  if (location.hash === "#admin/keycloak" && hasAdmin) {
+  if ((location.pathname.startsWith("/admin") || location.hash === "#admin/keycloak") && hasAdmin) {
     openWorkspaceView("admin");
     document.querySelector('[data-admin-target="settings-admin"]')?.click();
     document.querySelector('[data-setting-tab="keycloak"]')?.click();
-    history.replaceState(null, "", location.pathname + location.search);
+    if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+  } else if (location.pathname.startsWith("/admin") && !hasAdmin) {
+    $("#status").textContent = "관리자 권한이 없어 관리자 화면에 접근할 수 없습니다.";
+    $("#status").classList.remove("ok");
   }
 }
 function setupPersonalNavigation() {
@@ -612,10 +590,15 @@ function renderSettingFields(category, value) {
         const choices = type.slice(7).split("|");
         return `<label data-field-key="${key}">${esc(label)}<select data-setting-key="${key}" data-setting-type="string">${choices.map((choice) => `<option ${choice === current ? "selected" : ""}>${esc(choice)}</option>`).join("")}</select></label>`;
       }
+      if (type === "password") {
+        const placeholder = current === "********" ? "저장된 Secret 유지" : "";
+        return `<label data-field-key="${key}">${esc(label)}<input data-setting-key="${key}" data-setting-type="password" type="password" value="" placeholder="${placeholder}" autocomplete="new-password" /></label>`;
+      }
       const inputType = type === "array" ? "text" : type;
       const shown = Array.isArray(current) ? current.join(",") : current;
       const numeric = type === "number" ? ' step="any"' : "";
-      return `<label data-field-key="${key}">${esc(label)}<input data-setting-key="${key}" data-setting-type="${type}" type="${inputType}"${numeric} value="${esc(shown)}" /></label>`;
+      const required = category === "keycloak" && ["baseUrl", "realm", "clientId"].includes(key) ? " required" : "";
+      return `<label data-field-key="${key}">${esc(label)}<input data-setting-key="${key}" data-setting-type="${type}" type="${inputType}"${numeric}${required} value="${esc(shown)}" /></label>`;
     })
     .join("");
   document.querySelectorAll("[data-setting-key]").forEach(
@@ -641,18 +624,18 @@ function renderSettingFields(category, value) {
                     .filter(Boolean)
                 : type === "json"
                   ? JSON.parse(field.value || "{}")
+                : type === "password" && !field.value
+                  ? next[field.dataset.settingKey] || ""
                 : field.value;
           $("#setting-json").value = JSON.stringify(next, null, 2);
           field.setCustomValidity("");
           if (field.dataset.settingKey === "tlsVerify") applyTLSFieldState();
-          if (category === "keycloak") applyKeycloakModeState();
         } catch {
           field.setCustomValidity("올바른 JSON을 입력하세요.");
         }
       }),
   );
   applyTLSFieldState();
-  if (category === "keycloak") applyKeycloakModeState();
 }
 function applyTLSFieldState() {
   const toggle = document.querySelector('[data-setting-key="tlsVerify"]');
@@ -666,40 +649,6 @@ function applyTLSFieldState() {
     caField.querySelectorAll("input,textarea").forEach((field) => (field.disabled = !enabled));
   }
 }
-function applyKeycloakModeState() {
-  const issuerMode = document.querySelector('[data-setting-key="issuerMode"]')?.value || "auto";
-  const redirectMode = document.querySelector('[data-setting-key="redirectMode"]')?.value || "auto";
-  const base = document.querySelector('[data-setting-key="baseUrl"]');
-  const realm = document.querySelector('[data-setting-key="realm"]');
-  const issuer = document.querySelector('[data-setting-key="issuerUrl"]');
-  const redirect = document.querySelector('[data-setting-key="redirectUrl"]');
-  const logout = document.querySelector('[data-setting-key="postLogoutRedirectUrl"]');
-  if (issuer) {
-    issuer.readOnly = issuerMode === "auto";
-    if (issuerMode === "auto" && base?.value && realm?.value) {
-      try {
-        issuer.value = `${new URL(base.value).toString().replace(/\/$/, "")}/realms/${encodeURIComponent(realm.value.trim())}`;
-      } catch {}
-    }
-  }
-  if (redirect) {
-    redirect.readOnly = redirectMode === "auto";
-    if (redirectMode === "auto") redirect.value = `${location.origin}/auth/callback`;
-  }
-  if (logout) {
-    logout.readOnly = redirectMode === "auto";
-    if (redirectMode === "auto") logout.value = `${location.origin}/`;
-  }
-  try {
-    const value = JSON.parse($("#setting-json").value || "{}");
-    value.issuerMode = issuerMode;
-    value.redirectMode = redirectMode;
-    if (issuer) value.issuerUrl = issuer.value;
-    if (redirect) value.redirectUrl = redirect.value;
-    if (logout) value.postLogoutRedirectUrl = logout.value;
-    $("#setting-json").value = JSON.stringify(value, null, 2);
-  } catch {}
-}
 function setupAdmin(roles, capabilities) {
   const allowedCategories = GitCtxRoles.categoriesFor(categories, [...roles]);
   $("#settings-admin").hidden = !capabilities.settings;
@@ -710,7 +659,7 @@ function setupAdmin(roles, capabilities) {
   $("#setting-tabs").innerHTML = allowedCategories
     .map((category) => `<button type="button" role="tab" data-setting-tab="${category}">${esc(settingCategoryMeta[category]?.[0] || category)}</button>`)
     .join("");
-  const selectCategory = (category) => {
+  const selectCategory = async (category) => {
     $("#category").value = category;
     document.querySelectorAll("[data-setting-tab]").forEach((tab) => {
       const active = tab.dataset.settingTab === category;
@@ -721,37 +670,32 @@ function setupAdmin(roles, capabilities) {
     $("#setting-context").innerHTML = `<strong>${esc(meta[0])}</strong><span>${esc(meta[1])}</span>`;
     $("#login-keycloak").hidden = category !== "keycloak";
     $("#keycloak-runtime-status").hidden = category !== "keycloak";
-    $("#load-setting").click();
+    $("#advanced-setting-json").hidden = category === "keycloak";
+    await loadCurrentSetting(category);
   };
   document.querySelectorAll("[data-setting-tab]").forEach(
     (tab) => (tab.onclick = () => selectCategory(tab.dataset.settingTab)),
   );
   $("#category").onchange = () => selectCategory($("#category").value);
-  $("#load-setting").onclick = async () => {
+  const loadCurrentSetting = async (category = $("#category").value) => {
     try {
-      const x = await api(`/api/v1/admin/settings/${$("#category").value}`);
+      const x = await api(`/api/v1/admin/settings/${category}`);
+      if ($("#category").value !== category) return;
       $("#setting-json").value = JSON.stringify(x.value, null, 2);
-      renderSettingFields($("#category").value, x.value);
-      refreshSettingVersions($("#category").value);
-      if ($("#category").value === "keycloak") refreshKeycloakStatus();
-      showAdmin(
-        `버전 ${x.version}을 불러왔습니다. 마스킹 값은 새 Secret으로 교체하지 않으면 기존 값이 보존됩니다.`,
-        true,
-      );
+      renderSettingFields(category, x.value);
+      $("#delete-setting").hidden = false;
+      if (category === "keycloak") refreshKeycloakStatus();
     } catch (e) {
-      if (e.status && e.status !== 404) {
+      if ($("#category").value !== category) return;
+      if (e.status !== 404) {
         showAdmin(`설정을 불러오지 못했습니다: ${e.message}`, false);
         return;
       }
-      const defaults = settingDefaults($("#category").value);
+      const defaults = settingDefaults(category);
       $("#setting-json").value = JSON.stringify(defaults, null, 2);
-      renderSettingFields($("#category").value, defaults);
-      refreshSettingVersions($("#category").value);
-      if ($("#category").value === "keycloak") refreshKeycloakStatus();
-      showAdmin(
-        "아직 저장되지 않은 영역입니다. 기본 템플릿을 불러왔습니다.",
-        true,
-      );
+      renderSettingFields(category, defaults);
+      $("#delete-setting").hidden = true;
+      if (category === "keycloak") refreshKeycloakStatus();
     }
   };
   $("#test-connection").onclick = async () => {
@@ -800,7 +744,7 @@ function setupAdmin(roles, capabilities) {
   };
   $("#login-keycloak").onclick = () => {
     if ($("#category").value !== "keycloak") return;
-    location.href = `/auth/login?return_to=${encodeURIComponent("/#admin/keycloak")}`;
+    location.href = `/auth/login?return_to=${encodeURIComponent("/admin")}`;
   };
   $("#save-setting").onclick = async () => {
     const button = $("#save-setting");
@@ -818,7 +762,6 @@ function setupAdmin(roles, capabilities) {
       button.textContent = "저장·검증 중…";
       const x = await api(`/api/v1/admin/settings/${$("#category").value}`, {
         method: "PUT",
-        headers: { "X-Change-Reason": $("#reason").value },
         body: $("#setting-json").value,
       });
       if ($("#category").value === "keycloak" && bootstrapInfo.required) {
@@ -827,8 +770,7 @@ function setupAdmin(roles, capabilities) {
           true,
         );
       } else showAdmin(`버전 ${x.version} 저장 완료`, true);
-      if ($("#category").value === "keycloak") refreshKeycloakStatus();
-      $("#reason").value = "";
+      await loadCurrentSetting($("#category").value);
     } catch (e) {
       showAdmin(`저장하지 못했습니다: ${e.message}`, false);
     } finally {
@@ -836,26 +778,15 @@ function setupAdmin(roles, capabilities) {
       button.textContent = "저장";
     }
   };
-  $("#rollback-setting").onclick = async () => {
-    const target = prompt("복구할 설정 버전 번호");
-    if (target === null) return;
-    const reason = prompt("복구 사유");
-    if (!reason) return;
+  $("#delete-setting").onclick = async () => {
+    const category = $("#category").value;
+    if (!confirm(`${settingCategoryMeta[category]?.[0] || category} 설정을 삭제하시겠습니까?`)) return;
     try {
-      const x = await api(
-        `/api/v1/admin/settings/${$("#category").value}/rollback`,
-        {
-          method: "POST",
-          body: JSON.stringify({ targetVersion: Number(target), reason }),
-        },
-      );
-      showAdmin(
-        `버전 ${x.restoredFrom}의 값으로 새 버전 ${x.version}을 생성했습니다.`,
-        true,
-      );
-      $("#load-setting").click();
-    } catch (e) {
-      showAdmin(e.message, false);
+      await api(`/api/v1/admin/settings/${category}`, { method: "DELETE" });
+      showAdmin("설정을 삭제했습니다.", true);
+      await loadCurrentSetting(category);
+    } catch (error) {
+      showAdmin(`삭제하지 못했습니다: ${error.message}`, false);
     }
   };
 }
@@ -867,42 +798,10 @@ async function refreshKeycloakStatus() {
   try {
     const status = await api("/api/v1/admin/settings/keycloak/status");
     target.className = "notice ok";
-    target.innerHTML = `<strong>OIDC v${status.version} 적용됨</strong><br>${esc(status.issuerUrl)}<br><small>Client ${esc(status.clientId)} · Redirect ${esc(status.redirectUrl)} · TLS 검증 ${status.tlsVerify ? "사용" : "미사용"}<br>Authorization ${esc(status.metadata?.authorizationEndpoint || "-")}<br>Token ${esc(status.metadata?.tokenEndpoint || "-")}<br>JWKS ${esc(status.metadata?.jwksUri || "-")}</small>`;
+    target.innerHTML = `<strong>OIDC v${status.version} 적용됨</strong><br>${esc(status.issuerUrl)}<br><small>Client ${esc(status.clientId)} · Redirect ${esc(status.redirectUrl)}<br>Authorization ${esc(status.metadata?.authorizationEndpoint || "-")}<br>Token ${esc(status.metadata?.tokenEndpoint || "-")}<br>JWKS ${esc(status.metadata?.jwksUri || "-")}</small>`;
   } catch (error) {
     target.className = "notice error";
     target.textContent = error.status === 404 ? "저장된 Keycloak OIDC 설정이 없습니다." : `저장된 OIDC 설정을 적용할 수 없습니다: ${error.message}`;
-  }
-}
-async function refreshSettingVersions(category) {
-  try {
-    const versions = await api(`/api/v1/admin/settings/${category}/versions`);
-    if (!versions.length) {
-      $("#setting-versions").innerHTML = '<div class="empty">저장된 버전이 없습니다.</div>';
-      return;
-    }
-    $("#setting-versions").innerHTML = `<table><thead><tr><th>버전</th><th>변경자</th><th>변경 사유</th><th>변경 시각</th><th></th></tr></thead><tbody>${versions.map((item) => `<tr><td>v${item.version}${item.current ? " · 현재" : ""}</td><td>${esc(item.changedBy)}</td><td>${esc(item.reason || "-")}</td><td>${esc(new Date(item.createdAt).toLocaleString())}</td><td>${item.current ? "" : `<button type="button" data-setting-version="${item.version}">복구</button>`}</td></tr>`).join("")}</tbody></table>`;
-    document.querySelectorAll("[data-setting-version]").forEach((button) => {
-      button.onclick = async () => {
-        const reason = prompt(`v${button.dataset.settingVersion} 값으로 복구하는 사유`);
-        if (!reason) return;
-        try {
-          const restored = await api(`/api/v1/admin/settings/${category}/rollback`, {
-            method: "POST",
-            body: JSON.stringify({ targetVersion: Number(button.dataset.settingVersion), reason }),
-          });
-          showAdmin(`v${restored.restoredFrom} 값으로 새 버전 v${restored.version}을 생성했습니다.`, true);
-          $("#load-setting").click();
-        } catch (error) {
-          showAdmin(error.message, false);
-        }
-      };
-    });
-  } catch (error) {
-    if (error.status === 404) {
-      $("#setting-versions").innerHTML = '<div class="empty">저장된 버전이 없습니다.</div>';
-    } else {
-      $("#setting-versions").innerHTML = `<div class="notice error">${esc(error.message)}</div>`;
-    }
   }
 }
 let discovered = [];
@@ -941,7 +840,6 @@ function setupOps(capabilities) {
             name: form.get("name"),
             backend: form.get("backend"),
             value: form.get("value"),
-            reason: form.get("reason"),
           }),
         });
         event.target.reset();
@@ -1041,7 +939,6 @@ async function runDatabaseAction(action) {
   }
   const body = { dsn };
   if (action === "migrate") {
-    body.reason = $("#database-reason").value.trim();
     body.confirm = $("#database-confirm").value.trim();
   }
   const button = action === "test" ? $("#test-database") : $("#migrate-database");
@@ -1169,8 +1066,6 @@ async function refreshBackups(capabilities = activeCapabilities) {
             `복원하려면 정확히 입력하세요: RESTORE ${id}`,
           );
           if (confirmation !== `RESTORE ${id}`) return;
-          const reason = prompt("복원 사유를 입력하세요.");
-          if (!reason) return;
           try {
             await api(
               `/api/v1/admin/backups/${encodeURIComponent(id)}/restore`,
@@ -1178,7 +1073,6 @@ async function refreshBackups(capabilities = activeCapabilities) {
                 method: "POST",
                 headers: {
                   "X-Restore-Confirmation": confirmation,
-                  "X-Change-Reason": reason,
                 },
               },
             );
@@ -1328,11 +1222,9 @@ async function refreshSecurity(capabilities = activeCapabilities) {
     document.querySelectorAll("[data-admin-revoke]").forEach(
       (b) =>
         (b.onclick = async () => {
-          const reason = prompt("강제 폐기 사유");
-          if (!reason) return;
           await api(
             `/api/v1/admin/api-keys/${encodeURIComponent(b.dataset.adminRevoke)}/revoke`,
-            { method: "POST", headers: { "X-Revoke-Reason": reason } },
+            { method: "POST" },
           );
           refreshSecurity(capabilities);
         }),
@@ -1342,11 +1234,9 @@ async function refreshSecurity(capabilities = activeCapabilities) {
     document.querySelectorAll("[data-secret-disable]").forEach(
       (button) =>
         (button.onclick = async () => {
-          const reason = prompt("비밀정보 중지 사유");
-          if (!reason) return;
           await api(
             `/api/v1/admin/secrets/${encodeURIComponent(button.dataset.secretDisable)}/disable`,
-            { method: "POST", headers: { "X-Change-Reason": reason } },
+            { method: "POST" },
           );
           refreshSecurity(capabilities);
         }),

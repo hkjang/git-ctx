@@ -6,48 +6,25 @@
 
 ## Keycloak
 
-Keycloak 설정은 Issuer와 Redirect 각각 `auto` 또는 `custom` 모드를 사용한다. `auto`
-Issuer는 Base URL과 Realm을 저장할 때마다 다시 계산하므로 Realm을 수정해도 과거
-`issuerUrl`이 남지 않는다. `auto` Redirect는 현재 `ui.publicUrl`에서 callback과 logout
-URI를 다시 계산한다. 별도 프록시 경로나 전용 callback을 쓸 때만 `custom`을 선택한다.
+Keycloak 관리자 화면에는 Base URL, Realm, Client ID, Client Secret 네 항목만 표시한다.
+Issuer는 `{baseUrl}/realms/{realm}`, callback과 logout URL은 현재 `ui.publicUrl`에서
+서버가 자동 계산한다. Scope와 표준 Claim 이름도 서버 기본값을 사용한다. Keycloak의
+Realm 또는 Client Role 이름을 `platform-admin`, `security-admin`, `mcp-admin`,
+`source-admin`, `search-admin`, `auditor`, `developer`, `service-account`,
+`readonly-operator` 중 하나로 만들면 별도 매핑 없이 같은 플랫폼 역할로 적용된다.
 
 저장 전 Discovery, Authorization/Token endpoint와 OAuth client 설정을 검증하며 저장
 응답은 `applied=true`, 적용 버전, 최종 Issuer와 Redirect를 반환한다. 저장 후 관리자
 화면의 “OIDC 적용됨” 상태는 저장된 암호문을 다시 동적 로드해서 Discovery/JWKS/Token
-endpoint를 표시하므로 입력값 시험과 실제 적용 상태를 구분할 수 있다. 사내 CA,
-`tlsVerify`, proxy 설정은 Discovery와 JWKS뿐 아니라 Authorization Code token exchange에도
-동일하게 적용된다.
+endpoint를 표시하므로 입력값 시험과 실제 적용 상태를 구분할 수 있다. TLS 인증서
+검증은 항상 사용하며 OS 또는 컨테이너의 신뢰 저장소를 사용한다.
 
 ```json
 {
-  "issuerMode": "auto",
   "baseUrl": "https://sso.company.local",
   "realm": "company",
   "clientId": "git-ctx",
-  "redirectMode": "auto",
-  "tlsVerify": true
-}
-```
-
-```json
-{
-  "issuerUrl": "https://sso.company/realms/company",
-  "clientId": "git-ctx",
-  "clientSecret": "secret",
-  "redirectUrl": "https://git-ctx.company/auth/callback",
-  "scopes": ["openid", "profile", "email", "groups"],
-  "usernameClaim": "preferred_username",
-  "groupsClaim": "groups",
-  "bitbucketUserSlugClaim": "bitbucket_user_slug",
-  "gitlabUserIdClaim": "gitlab_user_id",
-  "realmRoleMappings": {"git-ctx-admin": "platform-admin"},
-  "clientRoleMappings": {"audit": "auditor"},
-  "bitbucketGroupMappings": {"/engineering": "engineering"},
-  "postLogoutRedirectUrl": "https://git-ctx.company/",
-  "tlsVerify": true,
-  "caCertificate": "-----BEGIN CERTIFICATE-----\n...\n",
-  "proxyUrl": "",
-  "timeoutSeconds": 15
+  "clientSecret": "secret"
 }
 ```
 
@@ -152,7 +129,7 @@ embedding 요청으로 연결을 시험하며 모델 차원 변경 후에는 전
 ```
 
 운영 환경에서 `tlsVerify: false`는 연결 진단 외에는 사용하지 않는다. 설정 변경은
-외부 연결 검사를 통과해야 저장되며, rollback도 대상 버전 연결을 다시 검증한다.
+외부 연결 검사를 통과해야 저장된다.
 
 ## 사용자 화면 브랜드
 
@@ -206,7 +183,7 @@ attribute에 기록하지 않는다.
 그 밖의 확장 정책은 같은 탭의 고급 JSON에서 편집하며, 전용 폼과 JSON은 양방향으로
 동기화된다. Bootstrap 환경변수는 `GIT_CTX_DB_DSN` 하나뿐이다.
 
-DB DSN을 제외한 운영 설정은 관리자 화면에서 입력·시험·저장·버전 복구한다. Keycloak,
+DB DSN을 제외한 운영 설정은 관리자 화면에서 자동 조회·시험·저장·삭제한다. Keycloak,
 Bitbucket, GitLab과 모델 영역은 URL, Client/Token/API Key, 모델, TLS, 사내 CA,
 Proxy와 Timeout 전용 필드를 제공하고 알 수 없는 확장 필드는 고급 JSON 편집기에
 보존한다. Secret/PAT/Token/API Key는 암호화 저장되고 재조회 시 `********`로
@@ -223,20 +200,19 @@ Proxy와 Timeout 전용 필드를 제공하고 알 수 없는 확장 필드는 �
 - OpenTelemetry: 실제 시험 span export
 - Backup: 전용 경로 생성·쓰기와 정책 검증
 
-저장과 rollback도 동일 검증을 다시 통과해야 한다. 시험 결과는 성공·실패 모두 감사
+저장도 동일 검증을 다시 통과해야 한다. 시험 결과는 성공·실패 모두 감사
 로그에 남되 입력 Secret과 응답 원문은 기록하지 않는다.
 
-관리자 화면은 대메뉴(설정, MCP, 소스·색인, 검색 품질, 보안·Secret, 감사,
+관리자 화면은 `/admin`으로 직접 접근할 수 있으며 대메뉴(설정, MCP, 소스·색인, 검색 품질, 보안·Secret, 감사,
 데이터베이스, 운영 상태, 백업·복구)와 설정 종류별 탭으로 구성된다. 각 연동의
-`tlsVerify` 토글이 “사용함”이면 사내 CA 입력을 표시하고, “사용 안 함”이면 CA 필드를
-비활성화한다. 운영 환경에서는 검증 사용이 기본이며 비활성화는 제한된 시험망에서만
-허용한다.
+Keycloak 탭은 고급 JSON과 수동 불러오기를 노출하지 않는다.
+탭 진입과 새로고침 때 저장값을 자동 조회하고 Secret만 빈 입력으로 표시한다.
 
 Keycloak은 `baseUrl`과 `realm`을 입력하면 `issuerUrl`을
 `{baseUrl}/realms/{realm}`으로 생성한다. Redirect가 비어 있으면 현재 공개 URL의
 `/auth/callback`과 `/`를 각각 로그인·로그아웃 기본값으로 저장한다. 저장 전 Discovery뿐
 아니라 브라우저 OAuth 구성까지 검증하므로 Redirect 누락 상태가 저장되는 것을 막는다.
-설정 저장만으로 Bootstrap을 폐기하지 않으며, 역할 매핑으로 `platform-admin`이 된
+설정 저장만으로 Bootstrap을 폐기하지 않으며, Keycloak에서 `platform-admin` 역할을 받은
 사용자가 “Keycloak 로그인 시험”에 성공한 시점에 여러 Pod의 Bootstrap 토큰·세션을
 전역 폐기한다. 로그인 실패나 잘못된 역할 매핑이면 복구 진입이 유지된다.
 
@@ -282,7 +258,7 @@ Keycloak Client Secret, Bitbucket PAT, GitLab Token, 모델 API Key 등 문자�
 Bootstrap PostgreSQL에 연결할 수 없으면 `backups/recovery.db` SQLite로 복구 기동한다.
 관리자 “데이터베이스” 메뉴는 현재 driver, Ping 지연, pool, migration과 복구 모드를
 표시한다. `platform-admin`만 PostgreSQL DSN 연결 시험과 데이터 이전을 실행할 수 있다.
-연결 시험은 대상 DB를 변경하지 않으며 데이터 이전은 정확한 확인문과 변경 사유를
+연결 시험은 대상 DB를 변경하지 않으며 데이터 이전은 정확한 확인문을
 요구한다. 성공한 DSN은 암호화 저장되고 API에서는 원문 대신 `********`로만 보인다.
 
 전환 직후 서비스는 새 요청을 받지 않고 readiness를 실패시켜 재시작을 요구한다. 재시작

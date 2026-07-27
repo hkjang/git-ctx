@@ -13,7 +13,7 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - PostgreSQL 기동 실패 시 SQLite 복구 모드와 관리자 연결 시험·논리 데이터 이전
 - 암호화된 동적 관리자 설정 및 불변 설정 이력·감사 로그
 - 암호화 DB 또는 Vault KV v2 기반 관리 Secret 등록·회전·중지와 `secret://` 설정 참조
-- Keycloak OIDC Discovery/JWKS 검증, 자동·사용자 지정 URL, 적용 상태와 Realm·Client 역할 매핑
+- 네 항목으로 단순화한 Keycloak OIDC 설정, 자동 Issuer·Redirect, Discovery/JWKS 검증과 동일 이름 역할 매핑
 - Keycloak Authorization Code+PKCE 사용자 로그인과 HttpOnly 서버 세션
 - Bitbucket Server 6.9.1 및 GitLab API v4 소스 어댑터
 - 저장소 ACL 동기화, 파일 정책, Markdown 청킹, 버전별 색인 작업

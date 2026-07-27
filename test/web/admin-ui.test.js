@@ -17,7 +17,7 @@ for (const id of [
   "quick-nav-dialog",
   "keycloak-runtime-status",
   "setting-tabs",
-  "setting-versions",
+  "delete-setting",
   "database-status",
   "database-admin-section",
   "admin-database-status",
@@ -29,20 +29,22 @@ for (const id of [
   assert.match(html, new RegExp(`id=["']${id}["']`), `missing ${id}`);
 }
 assert.match(script, /data-setting-tab/);
-assert.match(script, /data-setting-version/);
 assert.match(script, /data-admin-target/);
 assert.match(script, /data-workspace/);
 assert.match(script, /data-personal-target/);
 assert.match(script, /data-profile-target/);
 assert.match(script, /setupQuickNavigation/);
-assert.match(script, /issuerMode/);
-assert.match(script, /redirectMode/);
 assert.match(script, /applyTLSFieldState/);
 assert.match(script, /api\/v1\/public\/status/);
 assert.match(script, /api\/v1\/admin\/database\/status/);
 assert.match(script, /api\/v1\/admin\/database\/\$\{action\}/);
 assert.match(script, /Keycloak Base URL/);
-assert.match(script, /Realm Role 매핑/);
+assert.match(script, /loadCurrentSetting/);
+assert.doesNotMatch(html, /변경 사유|id=["']load-setting["']|id=["']rollback-setting["']/);
+const keycloakFields = script.slice(script.indexOf("keycloak: ["), script.indexOf("bitbucket: ["));
+for (const required of ["baseUrl", "realm", "clientId", "clientSecret"]) assert.match(keycloakFields, new RegExp(`"${required}"`));
+for (const excluded of ["issuerUrl", "redirectUrl", "scopes", "Claim", "Role 매핑", "tlsVerify", "caCertificate", "proxyUrl", "timeoutSeconds"]) assert.doesNotMatch(keycloakFields, new RegExp(excluded));
+assert.match(script, /location\.pathname\.startsWith\("\/admin"\)/);
 for (const category of [
   "keycloak",
   "bitbucket",

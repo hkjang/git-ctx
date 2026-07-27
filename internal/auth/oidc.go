@@ -121,14 +121,9 @@ func validateOIDCFields(cfg OIDCConfig) error {
 	if cfg.AllowedClockSkewSeconds < 0 || cfg.AllowedClockSkewSeconds > 300 {
 		return errors.New("allowedClockSkewSeconds must be between 0 and 300")
 	}
-	validRoles := map[string]bool{
-		"platform-admin": true, "security-admin": true, "mcp-admin": true,
-		"source-admin": true, "search-admin": true, "auditor": true,
-		"developer": true, "service-account": true, "readonly-operator": true,
-	}
 	for _, mappings := range []map[string]string{cfg.RealmRoleMappings, cfg.ClientRoleMappings} {
 		for _, target := range mappings {
-			if !validRoles[target] {
+			if !isPlatformRole(target) {
 				return fmt.Errorf("unsupported platform role mapping %q", target)
 			}
 		}
@@ -268,14 +263,22 @@ func (v *OIDCVerifier) Verify(ctx context.Context, raw string) (Identity, error)
 		realmRoles = stringSliceClaim(access, "roles")
 	}
 	for _, role := range realmRoles {
-		if mapped := cfg.RealmRoleMappings[role]; mapped != "" && !slices.Contains(id.Roles, mapped) {
+		mapped := cfg.RealmRoleMappings[role]
+		if mapped == "" && isPlatformRole(role) {
+			mapped = role
+		}
+		if mapped != "" && !slices.Contains(id.Roles, mapped) {
 			id.Roles = append(id.Roles, mapped)
 		}
 	}
 	if resources, ok := claims["resource_access"].(map[string]any); ok {
 		if client, ok := resources[cfg.ClientID].(map[string]any); ok {
 			for _, role := range stringSliceClaim(client, "roles") {
-				if mapped := cfg.ClientRoleMappings[role]; mapped != "" && !slices.Contains(id.Roles, mapped) {
+				mapped := cfg.ClientRoleMappings[role]
+				if mapped == "" && isPlatformRole(role) {
+					mapped = role
+				}
+				if mapped != "" && !slices.Contains(id.Roles, mapped) {
 					id.Roles = append(id.Roles, mapped)
 				}
 			}
@@ -285,7 +288,11 @@ func (v *OIDCVerifier) Verify(ctx context.Context, raw string) (Identity, error)
 		id.Roles = []string{"developer"}
 	}
 	for _, group := range id.Groups {
-		if mapped := cfg.BitbucketGroupMappings[group]; mapped != "" {
+		mapped := cfg.BitbucketGroupMappings[group]
+		if mapped == "" {
+			mapped = strings.Trim(group, "/")
+		}
+		if mapped != "" {
 			id.ACLGroups = append(id.ACLGroups, "group:"+mapped)
 		}
 	}
@@ -326,6 +333,14 @@ func oidcContext(ctx context.Context, cfg OIDCConfig) (context.Context, error) {
 	return oidc.ClientContext(ctx, client), nil
 }
 func stringClaim(m map[string]any, key string) string { v, _ := m[key].(string); return v }
+func isPlatformRole(role string) bool {
+	switch role {
+	case "platform-admin", "security-admin", "mcp-admin", "source-admin", "search-admin", "auditor", "developer", "service-account", "readonly-operator":
+		return true
+	default:
+		return false
+	}
+}
 func stringSliceClaim(m map[string]any, key string) []string {
 	raw, ok := m[key].([]any)
 	if !ok {

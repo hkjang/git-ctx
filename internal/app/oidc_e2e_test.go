@@ -47,7 +47,7 @@ func TestKeycloakOIDCEndToEndSavePKCECallbackAndSession(t *testing.T) {
 			now := time.Now()
 			raw, signErr := jwt.Signed(signer).Claims(jwt.Claims{Issuer: issuer, Subject: "kc-e2e", Audience: jwt.Audience{"git-ctx"}, Expiry: jwt.NewNumericDate(now.Add(time.Hour)), IssuedAt: jwt.NewNumericDate(now)}).Claims(map[string]any{
 				"preferred_username": "oidc-admin", "email": "admin@example.test", "bitbucket_user_slug": "oidc.bb",
-				"realm_access": map[string]any{"roles": []string{"git-ctx-admin"}},
+				"realm_access": map[string]any{"roles": []string{"platform-admin"}},
 			}).Serialize()
 			if signErr != nil {
 				http.Error(w, signErr.Error(), http.StatusInternalServerError)
@@ -67,18 +67,17 @@ func TestKeycloakOIDCEndToEndSavePKCECallbackAndSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer a.Close()
-	setting := `{"issuerMode":"custom","issuerUrl":` + quoteJSON(issuer) + `,"clientId":"git-ctx","clientSecret":"client-secret","redirectMode":"custom","redirectUrl":"http://localhost:4747/auth/callback","postLogoutRedirectUrl":"http://localhost:4747/","realmRoleMappings":{"git-ctx-admin":"platform-admin"},"tlsVerify":true}`
+	setting := `{"issuerUrl":` + quoteJSON(issuer) + `,"clientId":"git-ctx","clientSecret":"client-secret"}`
 	put := httptest.NewRequest(http.MethodPut, "/api/v1/admin/settings/keycloak", strings.NewReader(setting))
 	put.Header.Set("Authorization", "Bearer bootstrap")
 	put.Header.Set("Content-Type", "application/json")
-	put.Header.Set("X-Change-Reason", "OIDC e2e")
 	putResult := httptest.NewRecorder()
 	a.Handler().ServeHTTP(putResult, put)
 	if putResult.Code != http.StatusOK || !strings.Contains(putResult.Body.String(), `"applied":true`) {
 		t.Fatalf("save=%d body=%s", putResult.Code, putResult.Body.String())
 	}
 
-	login := httptest.NewRequest(http.MethodGet, "/auth/login?return_to=/%23admin/keycloak", nil)
+	login := httptest.NewRequest(http.MethodGet, "/auth/login?return_to=/admin", nil)
 	loginResult := httptest.NewRecorder()
 	a.Handler().ServeHTTP(loginResult, login)
 	if loginResult.Code != http.StatusFound {
@@ -92,7 +91,7 @@ func TestKeycloakOIDCEndToEndSavePKCECallbackAndSession(t *testing.T) {
 	callback := httptest.NewRequest(http.MethodGet, "/auth/callback?state="+url.QueryEscape(state)+"&code=valid-code", nil)
 	callbackResult := httptest.NewRecorder()
 	a.Handler().ServeHTTP(callbackResult, callback)
-	if callbackResult.Code != http.StatusFound || callbackResult.Header().Get("Location") != "/#admin/keycloak" || !sawVerifier {
+	if callbackResult.Code != http.StatusFound || callbackResult.Header().Get("Location") != "/admin" || !sawVerifier {
 		t.Fatalf("callback=%d verifier=%v body=%s", callbackResult.Code, sawVerifier, callbackResult.Body.String())
 	}
 	var session *http.Cookie

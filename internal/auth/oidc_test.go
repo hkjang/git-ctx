@@ -44,9 +44,9 @@ func TestOIDCVerifierMapsKeycloakClaims(t *testing.T) {
 	}
 	now := time.Now()
 	raw, err := jwt.Signed(signer).Claims(jwt.Claims{Issuer: issuer, Subject: "kc-1", Audience: jwt.Audience{"git-ctx"}, Expiry: jwt.NewNumericDate(now.Add(time.Hour)), IssuedAt: jwt.NewNumericDate(now)}).Claims(map[string]any{
-		"preferred_username": "alice", "email": "alice@example.test", "groups": []string{"/engineering"},
+		"preferred_username": "alice", "email": "alice@example.test", "groups": []string{"/engineering", "/readonly"},
 		"bitbucket_user_slug": "alice.bb", "gitlab_user_id": "42",
-		"realm_access":    map[string]any{"roles": []string{"ctx-admin"}},
+		"realm_access":    map[string]any{"roles": []string{"ctx-admin", "readonly-operator"}},
 		"resource_access": map[string]any{"git-ctx": map[string]any{"roles": []string{"ctx-audit"}}},
 	}).Serialize()
 	if err != nil {
@@ -67,11 +67,14 @@ func TestOIDCVerifierMapsKeycloakClaims(t *testing.T) {
 	if id.Subject != "kc-1" || id.BitbucketUserSlug != "alice.bb" || id.GitLabUserID != "42" {
 		t.Fatalf("identity=%#v", id)
 	}
-	if !contains(id.Roles, "platform-admin") || !contains(id.Roles, "auditor") {
+	if !contains(id.Roles, "platform-admin") || !contains(id.Roles, "auditor") || !contains(id.Roles, "readonly-operator") {
 		t.Fatalf("roles=%v", id.Roles)
 	}
 	if !contains(id.ACLGroups, "group:engineering") {
 		t.Fatalf("ACL groups=%v", id.ACLGroups)
+	}
+	if !contains(id.ACLGroups, "group:readonly") {
+		t.Fatalf("automatic ACL groups=%v", id.ACLGroups)
 	}
 	logoutURL, err := EndSessionURL(context.Background(), OIDCConfig{IssuerURL: issuer, ClientID: "git-ctx", PostLogoutRedirectURL: "https://git-ctx.example/"})
 	if err != nil || !strings.Contains(logoutURL, "client_id=git-ctx") || !strings.Contains(logoutURL, "post_logout_redirect_uri=") {

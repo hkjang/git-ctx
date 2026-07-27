@@ -184,7 +184,7 @@ func TestAdministrativeBackupRestoreFlow(t *testing.T) {
 	if denied.Code != http.StatusBadRequest {
 		t.Fatalf("restore without confirmation status=%d", denied.Code)
 	}
-	restored := request(http.MethodPost, "/api/v1/admin/backups/"+record.ID+"/restore", map[string]string{"X-Restore-Confirmation": "RESTORE " + record.ID, "X-Change-Reason": "integration test"})
+	restored := request(http.MethodPost, "/api/v1/admin/backups/"+record.ID+"/restore", map[string]string{"X-Restore-Confirmation": "RESTORE " + record.ID})
 	if restored.Code != http.StatusOK {
 		t.Fatalf("restore status=%d body=%s", restored.Code, restored.Body.String())
 	}
@@ -365,15 +365,22 @@ func TestKeycloakBaseRealmSaveNormalizesAndKeepsBootstrapUntilAdminLogin(t *test
 	request := httptest.NewRequest(http.MethodPut, "/api/v1/admin/settings/keycloak", strings.NewReader(fmt.Sprintf(`{"baseUrl":%q,"realm":"company","clientId":"git-ctx","clientSecret":"client-secret","realmRoleMappings":{"ctx-admin":"platform-admin"},"tlsVerify":false}`, server.URL)))
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Change-Reason", "configure SSO")
 	rec := httptest.NewRecorder()
 	a.Handler().ServeHTTP(rec, request)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	stored, err := a.loadSettingMapRaw(context.Background(), "keycloak")
-	if err != nil || stored["issuerUrl"] != issuer || stored["redirectUrl"] != "https://git-ctx.internal/auth/callback" || stored["tlsVerify"] != false {
+	if err != nil || stored["issuerUrl"] != issuer || stored["redirectUrl"] != "https://git-ctx.internal/auth/callback" || stored["tlsVerify"] != true {
 		t.Fatalf("stored=%#v err=%v", stored, err)
+	}
+	getRequest := httptest.NewRequest(http.MethodGet, "/api/v1/admin/settings/keycloak", nil)
+	getRequest.Header.Set("Authorization", "Bearer "+token)
+	getResult := httptest.NewRecorder()
+	a.Handler().ServeHTTP(getResult, getRequest)
+	body := getResult.Body.String()
+	if getResult.Code != http.StatusOK || !strings.Contains(body, server.URL) || !strings.Contains(body, `"realm":"company"`) || !strings.Contains(body, `"clientId":"git-ctx"`) || !strings.Contains(body, `"clientSecret":"********"`) || strings.Contains(body, "client-secret") {
+		t.Fatalf("reloaded Keycloak setting status=%d body=%s", getResult.Code, body)
 	}
 	if !a.validBootstrapToken(context.Background(), token) {
 		t.Fatal("bootstrap was revoked before a successful Keycloak platform-admin login")
@@ -381,7 +388,6 @@ func TestKeycloakBaseRealmSaveNormalizesAndKeepsBootstrapUntilAdminLogin(t *test
 	request = httptest.NewRequest(http.MethodPut, "/api/v1/admin/settings/keycloak", strings.NewReader(fmt.Sprintf(`{"baseUrl":%q,"realm":"engineering","issuerMode":"auto","issuerUrl":%q,"clientId":"git-ctx","clientSecret":"********","redirectMode":"auto","realmRoleMappings":{"ctx-admin":"platform-admin"},"tlsVerify":false}`, server.URL, issuer)))
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Change-Reason", "change realm")
 	rec = httptest.NewRecorder()
 	a.Handler().ServeHTTP(rec, request)
 	if rec.Code != http.StatusOK {
@@ -401,7 +407,6 @@ func TestKeycloakBaseRealmSaveNormalizesAndKeepsBootstrapUntilAdminLogin(t *test
 	uiRequest := httptest.NewRequest(http.MethodPut, "/api/v1/admin/settings/ui", strings.NewReader(`{"publicUrl":"https://new-git-ctx.internal"}`))
 	uiRequest.Header.Set("Authorization", "Bearer "+token)
 	uiRequest.Header.Set("Content-Type", "application/json")
-	uiRequest.Header.Set("X-Change-Reason", "change public URL")
 	uiResult := httptest.NewRecorder()
 	a.Handler().ServeHTTP(uiResult, uiRequest)
 	if uiResult.Code != http.StatusOK {
@@ -617,7 +622,6 @@ func TestPublicUIConfigExposesOnlyBranding(t *testing.T) {
 	put := httptest.NewRequest(http.MethodPut, "/api/v1/admin/settings/ui", bytes.NewBufferString(`{"serviceName":"Internal Context","tagline":"개발 지식","logoUrl":"/logo.svg","faviconUrl":"https://assets.company/favicon.svg","notice":"점검 공지","apiToken":"must-not-leak"}`))
 	put.Header.Set("Authorization", "Bearer bootstrap")
 	put.Header.Set("Content-Type", "application/json")
-	put.Header.Set("X-Change-Reason", "branding test")
 	putResult := httptest.NewRecorder()
 	a.Handler().ServeHTTP(putResult, put)
 	if putResult.Code != http.StatusOK {
@@ -638,7 +642,7 @@ func TestPublicUIConfigExposesOnlyBranding(t *testing.T) {
 	}
 }
 
-func TestSettingMaskPreservationAndRollback(t *testing.T) {
+func TestSettingCRUDAndMaskPreservation(t *testing.T) {
 	a, err := New(context.Background(), config.Config{
 		ListenAddress: ":0", DatabaseDriver: "sqlite", DatabaseDSN: "file:app-settings?mode=memory&cache=shared&_foreign_keys=on",
 		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost",
@@ -652,7 +656,6 @@ func TestSettingMaskPreservationAndRollback(t *testing.T) {
 		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
 		req.Header.Set("Authorization", "Bearer bootstrap")
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Change-Reason", "test")
 		rec := httptest.NewRecorder()
 		a.Handler().ServeHTTP(rec, req)
 		return rec
@@ -680,27 +683,13 @@ func TestSettingMaskPreservationAndRollback(t *testing.T) {
 	if stored["apiToken"] != "secret-one" {
 		t.Fatalf("masked update replaced secret: %#v", stored)
 	}
-	rec = request(http.MethodGet, "/api/v1/admin/settings/ui/versions", "")
-	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "secret-one") || strings.Contains(rec.Body.String(), "value_encrypted") {
-		t.Fatalf("unsafe versions status=%d body=%s", rec.Code, rec.Body.String())
+	rec = request(http.MethodDelete, "/api/v1/admin/settings/ui", "")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	var versions []struct {
-		Version int  `json:"version"`
-		Current bool `json:"current"`
-	}
-	if err = json.Unmarshal(rec.Body.Bytes(), &versions); err != nil || len(versions) != 2 || versions[0].Version != 2 || !versions[0].Current || versions[1].Current {
-		t.Fatalf("versions=%#v err=%v", versions, err)
-	}
-	rec = request(http.MethodPost, "/api/v1/admin/settings/ui/rollback", `{"targetVersion":1,"reason":"restore test"}`)
-	if rec.Code != 200 {
-		t.Fatalf("rollback status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	stored, err = a.loadSettingMap(context.Background(), "ui")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored["serviceName"] != "A" || stored["apiToken"] != "secret-one" {
-		t.Fatalf("rollback value=%#v", stored)
+	rec = request(http.MethodGet, "/api/v1/admin/settings/ui", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("deleted setting remained status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

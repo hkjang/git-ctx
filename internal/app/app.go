@@ -273,9 +273,8 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/tools/query/test", a.authenticate(http.HandlerFunc(a.testQuery)))
 	a.mux.Handle("GET /api/v1/admin/settings", a.admin(http.HandlerFunc(a.listSettings)))
 	a.mux.Handle("GET /api/v1/admin/settings/{category}", a.settingsAuthorize(http.HandlerFunc(a.getSetting)))
-	a.mux.Handle("GET /api/v1/admin/settings/{category}/versions", a.settingsAuthorize(http.HandlerFunc(a.settingVersions)))
+	a.mux.Handle("DELETE /api/v1/admin/settings/{category}", a.settingsAuthorize(http.HandlerFunc(a.deleteSetting)))
 	a.mux.Handle("PUT /api/v1/admin/settings/{category}", a.settingsAuthorize(http.HandlerFunc(a.putSetting)))
-	a.mux.Handle("POST /api/v1/admin/settings/{category}/rollback", a.settingsAuthorize(http.HandlerFunc(a.rollbackSetting)))
 	a.mux.Handle("POST /api/v1/admin/settings/{category}/test", a.settingsAuthorize(http.HandlerFunc(a.testIntegrationSetting)))
 	a.mux.Handle("POST /api/v1/admin/settings/keycloak/preview", a.settingsAuthorize(http.HandlerFunc(a.previewKeycloak)))
 	a.mux.Handle("GET /api/v1/admin/settings/keycloak/status", a.settingsAuthorize(http.HandlerFunc(a.keycloakStatus)))
@@ -312,7 +311,13 @@ func (a *App) routes() {
 	a.mux.Handle("GET /api/v1/admin/quality/runs/{id}/results", a.authorize(http.HandlerFunc(a.qualityResults), "search-admin", "readonly-operator"))
 	a.mux.Handle("GET /api/v1/admin/mcp/tools", a.authorize(http.HandlerFunc(a.mcpTools), "mcp-admin", "readonly-operator"))
 	a.mux.Handle("PUT /api/v1/admin/mcp/tools/{id}", a.authorize(http.HandlerFunc(a.updateMCPTool), "mcp-admin"))
+	a.mux.HandleFunc("GET /admin", a.serveWebApp)
+	a.mux.HandleFunc("GET /admin/", a.serveWebApp)
 	a.mux.Handle("/", http.FileServer(http.Dir("web")))
+}
+
+func (a *App) serveWebApp(w http.ResponseWriter, r *http.Request) {
+	http.ServeFile(w, r, filepath.Join("web", "index.html"))
 }
 
 func (a *App) authenticate(next http.Handler) http.Handler {
@@ -1071,7 +1076,7 @@ func (a *App) putSetting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	version++
-	_, e = tx.ExecContext(r.Context(), a.store.Rebind(`INSERT INTO setting_versions(category,version,value_encrypted,changed_by,reason) VALUES(?,?,?,?,?)`), category, version, sealed, p.UserID, r.Header.Get("X-Change-Reason"))
+	_, e = tx.ExecContext(r.Context(), a.store.Rebind(`INSERT INTO setting_versions(category,version,value_encrypted,changed_by,reason) VALUES(?,?,?,?,?)`), category, version, sealed, p.UserID, "")
 	if e == nil {
 		_, e = tx.ExecContext(r.Context(), a.store.Rebind(`INSERT INTO system_settings(category,version,value_encrypted,updated_by,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(category) DO UPDATE SET version=excluded.version,value_encrypted=excluded.value_encrypted,updated_by=excluded.updated_by,updated_at=excluded.updated_at`), category, version, sealed, p.UserID, time.Now().UTC())
 	}
@@ -1097,6 +1102,27 @@ func (a *App) putSetting(w http.ResponseWriter, r *http.Request) {
 		result["loginTestUrl"] = "/auth/login?return_to=/"
 	}
 	jsonOut(w, 200, result)
+}
+
+func (a *App) deleteSetting(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	category := r.PathValue("category")
+	if !settingCategories()[category] {
+		problem(w, http.StatusNotFound, "not_found", "Setting category not found")
+		return
+	}
+	result, err := a.store.DB.ExecContext(r.Context(), a.store.Rebind(`DELETE FROM system_settings WHERE category=?`), category)
+	if err != nil {
+		problem(w, http.StatusInternalServerError, "setting_delete_failed", "Unable to delete setting")
+		return
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		problem(w, http.StatusNotFound, "not_found", "Setting category not configured")
+		return
+	}
+	a.audit(r, p, "settings.delete", category, category, "success", nil)
+	w.WriteHeader(http.StatusNoContent)
 }
 func (a *App) testIntegrationSetting(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
@@ -1127,111 +1153,6 @@ func (a *App) testIntegrationSetting(w http.ResponseWriter, r *http.Request) {
 	}
 	a.audit(r, p, "settings.test", category, category, "success", nil)
 	jsonOut(w, http.StatusOK, map[string]any{"category": category, "status": "verified", "testedAt": time.Now().UTC()})
-}
-func (a *App) rollbackSetting(w http.ResponseWriter, r *http.Request) {
-	p, _ := auth.FromContext(r.Context())
-	category := r.PathValue("category")
-	if !settingCategories()[category] {
-		problem(w, 404, "not_found", "Setting category not found")
-		return
-	}
-	var in struct {
-		TargetVersion int    `json:"targetVersion"`
-		Reason        string `json:"reason"`
-	}
-	if decode(r, &in) != nil {
-		problem(w, 400, "invalid_request", "targetVersion and reason are required")
-		return
-	}
-	var current int
-	if err := a.store.DB.QueryRowContext(r.Context(), a.store.Rebind(`SELECT version FROM system_settings WHERE category=?`), category).Scan(&current); err != nil {
-		problem(w, 404, "not_found", "Setting category not configured")
-		return
-	}
-	if in.TargetVersion == 0 {
-		in.TargetVersion = current - 1
-	}
-	if in.TargetVersion < 1 || in.TargetVersion >= current || strings.TrimSpace(in.Reason) == "" {
-		problem(w, 400, "invalid_rollback", "A prior targetVersion and rollback reason are required")
-		return
-	}
-	var sealed []byte
-	if err := a.store.DB.QueryRowContext(r.Context(), a.store.Rebind(`SELECT value_encrypted FROM setting_versions WHERE category=? AND version=?`), category, in.TargetVersion).Scan(&sealed); err != nil {
-		problem(w, 404, "version_not_found", "Target setting version not found")
-		return
-	}
-	raw, err := a.open(sealed)
-	if err != nil {
-		problem(w, 500, "decrypt_failed", "Unable to decrypt target version")
-		return
-	}
-	var value map[string]any
-	if err := json.Unmarshal(raw, &value); err != nil {
-		problem(w, 500, "invalid_stored_setting", "Target setting is invalid")
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-	if err := a.validateSetting(ctx, category, value); err != nil {
-		problem(w, 400, "rollback_validation_failed", err.Error())
-		return
-	}
-	newVersion := current + 1
-	tx, err := a.store.DB.BeginTx(r.Context(), nil)
-	if err != nil {
-		problem(w, 500, "internal_error", err.Error())
-		return
-	}
-	defer tx.Rollback()
-	reason := fmt.Sprintf("rollback to v%d: %s", in.TargetVersion, in.Reason)
-	if _, err = tx.ExecContext(r.Context(), a.store.Rebind(`INSERT INTO setting_versions(category,version,value_encrypted,changed_by,reason) VALUES(?,?,?,?,?)`), category, newVersion, sealed, p.UserID, reason); err == nil {
-		_, err = tx.ExecContext(r.Context(), a.store.Rebind(`UPDATE system_settings SET version=?,value_encrypted=?,updated_by=?,updated_at=? WHERE category=?`), newVersion, sealed, p.UserID, time.Now().UTC(), category)
-	}
-	if err != nil {
-		problem(w, 500, "rollback_failed", err.Error())
-		return
-	}
-	if err = tx.Commit(); err != nil {
-		problem(w, 500, "rollback_failed", err.Error())
-		return
-	}
-	if category == "observability" {
-		if err = a.traces.Apply(r.Context(), observabilityConfigFromMap(value)); err != nil {
-			problem(w, 500, "setting_apply_failed", "Rolled back observability setting was saved but could not be applied")
-			return
-		}
-	}
-	a.audit(r, p, "settings.rollback", category, category, "success", map[string]any{"fromVersion": current, "targetVersion": in.TargetVersion, "newVersion": newVersion})
-	jsonOut(w, 200, map[string]any{"category": category, "version": newVersion, "restoredFrom": in.TargetVersion})
-}
-func (a *App) settingVersions(w http.ResponseWriter, r *http.Request) {
-	category := r.PathValue("category")
-	if !settingCategories()[category] {
-		problem(w, 404, "not_found", "Setting category not found")
-		return
-	}
-	rows, err := a.store.DB.QueryContext(r.Context(), a.store.Rebind(`SELECT v.version,v.changed_by,v.reason,v.created_at,CASE WHEN s.version=v.version THEN 1 ELSE 0 END FROM setting_versions v LEFT JOIN system_settings s ON s.category=v.category WHERE v.category=? ORDER BY v.version DESC LIMIT 100`), category)
-	if err != nil {
-		problem(w, 500, "setting_versions_failed", err.Error())
-		return
-	}
-	defer rows.Close()
-	versions := make([]map[string]any, 0)
-	for rows.Next() {
-		var version, current int
-		var changedBy, reason string
-		var createdAt time.Time
-		if err = rows.Scan(&version, &changedBy, &reason, &createdAt, &current); err != nil {
-			problem(w, 500, "setting_versions_failed", err.Error())
-			return
-		}
-		versions = append(versions, map[string]any{"version": version, "changedBy": changedBy, "reason": reason, "createdAt": createdAt, "current": current == 1})
-	}
-	if err = rows.Err(); err != nil {
-		problem(w, 500, "setting_versions_failed", err.Error())
-		return
-	}
-	jsonOut(w, 200, versions)
 }
 func (a *App) getSetting(w http.ResponseWriter, r *http.Request) {
 	category := r.PathValue("category")
@@ -1430,63 +1351,31 @@ func (a *App) normalizeSetting(ctx context.Context, category string, value map[s
 	if category != "keycloak" {
 		return nil
 	}
-	issuer := strings.TrimSpace(stringValue(value, "issuerUrl"))
 	baseURL := strings.TrimSpace(stringValue(value, "baseUrl"))
 	realm := strings.TrimSpace(stringValue(value, "realm"))
-	derivedIssuer := ""
-	if baseURL != "" && realm != "" {
+	if strings.TrimSpace(stringValue(value, "clientId")) == "" {
+		return errors.New("keycloak clientId is required")
+	}
+	issuer := strings.TrimSpace(stringValue(value, "issuerUrl"))
+	if baseURL != "" || realm != "" {
+		if baseURL == "" || realm == "" {
+			return errors.New("keycloak baseUrl and realm must be configured together")
+		}
 		parsed, err := url.Parse(baseURL)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
 			return errors.New("keycloak.baseUrl must be an absolute URL without credentials or fragment")
 		}
-		derivedIssuer = strings.TrimRight(parsed.String(), "/") + "/realms/" + url.PathEscape(realm)
+		issuer = strings.TrimRight(parsed.String(), "/") + "/realms/" + url.PathEscape(realm)
+	} else if issuer == "" {
+		return errors.New("keycloak baseUrl and realm are required")
 	}
-	issuerMode := strings.TrimSpace(stringValue(value, "issuerMode"))
-	if issuerMode == "" {
-		if derivedIssuer != "" && (issuer == "" || strings.EqualFold(strings.TrimRight(issuer, "/"), strings.TrimRight(derivedIssuer, "/"))) {
-			issuerMode = "auto"
-		} else {
-			issuerMode = "custom"
-		}
-	}
-	if issuerMode != "auto" && issuerMode != "custom" {
-		return errors.New("keycloak.issuerMode must be auto or custom")
-	}
-	if issuerMode == "auto" {
-		if derivedIssuer == "" {
-			return errors.New("keycloak baseUrl and realm are required in automatic issuer mode")
-		}
-		issuer = derivedIssuer
-	}
-	if issuer == "" {
-		return errors.New("keycloak issuerUrl is required in custom issuer mode")
-	}
-	value["issuerMode"], value["issuerUrl"] = issuerMode, strings.TrimRight(issuer, "/")
+	value["issuerMode"], value["issuerUrl"] = "auto", issuer
 	public := strings.TrimRight(a.publicURL(ctx), "/")
-	derivedRedirect, derivedLogout := public+"/auth/callback", public+"/"
-	redirect := strings.TrimSpace(stringValue(value, "redirectUrl"))
-	logoutRedirect := strings.TrimSpace(stringValue(value, "postLogoutRedirectUrl"))
-	redirectMode := strings.TrimSpace(stringValue(value, "redirectMode"))
-	if redirectMode == "" {
-		if (redirect == "" || redirect == derivedRedirect) && (logoutRedirect == "" || logoutRedirect == derivedLogout) {
-			redirectMode = "auto"
-		} else {
-			redirectMode = "custom"
-		}
-	}
-	if redirectMode != "auto" && redirectMode != "custom" {
-		return errors.New("keycloak.redirectMode must be auto or custom")
-	}
-	if redirectMode == "auto" {
-		redirect, logoutRedirect = derivedRedirect, derivedLogout
-	}
-	if redirect == "" {
-		return errors.New("keycloak.redirectUrl is required")
-	}
-	value["redirectMode"], value["redirectUrl"], value["postLogoutRedirectUrl"] = redirectMode, redirect, logoutRedirect
-	if _, exists := value["tlsVerify"]; !exists {
-		value["tlsVerify"] = true
-	}
+	value["redirectMode"], value["redirectUrl"], value["postLogoutRedirectUrl"] = "auto", public+"/auth/callback", public+"/"
+	value["tlsVerify"] = true
+	delete(value, "caCertificate")
+	delete(value, "proxyUrl")
+	delete(value, "timeoutSeconds")
 	return nil
 }
 func (a *App) validateSetting(ctx context.Context, category string, value map[string]any) error {
@@ -2146,7 +2035,7 @@ func (a *App) adminRevokeKey(w http.ResponseWriter, r *http.Request) {
 		problem(w, 404, "not_found", "Active API key not found")
 		return
 	}
-	a.audit(r, p, "api_key.admin_revoke", "api_key", r.PathValue("id"), "success", map[string]any{"reason": r.Header.Get("X-Revoke-Reason")})
+	a.audit(r, p, "api_key.admin_revoke", "api_key", r.PathValue("id"), "success", nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 func (a *App) listManagedSecrets(w http.ResponseWriter, r *http.Request) {
@@ -2160,7 +2049,7 @@ func (a *App) listManagedSecrets(w http.ResponseWriter, r *http.Request) {
 func (a *App) putManagedSecret(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
 	var in struct {
-		Name, Backend, Value, Reason string
+		Name, Backend, Value string
 	}
 	if decode(r, &in) != nil {
 		problem(w, http.StatusBadRequest, "invalid_request", "name, backend, and value are required")
@@ -2171,13 +2060,13 @@ func (a *App) putManagedSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	item, err := a.secrets.Put(ctx, in.Name, in.Backend, in.Value, p.UserID, in.Reason)
+	item, err := a.secrets.Put(ctx, in.Name, in.Backend, in.Value, p.UserID, "")
 	if err != nil {
 		a.audit(r, p, "secret.write", "managed_secret", in.Name, "failure", map[string]any{"backend": in.Backend, "error": truncateText(err.Error(), 300)})
 		problem(w, http.StatusBadRequest, "secret_write_failed", err.Error())
 		return
 	}
-	a.audit(r, p, "secret.write", "managed_secret", in.Name, "success", map[string]any{"backend": item.Backend, "version": item.Version, "reason": in.Reason})
+	a.audit(r, p, "secret.write", "managed_secret", in.Name, "success", map[string]any{"backend": item.Backend, "version": item.Version})
 	jsonOut(w, http.StatusCreated, item)
 }
 func (a *App) disableManagedSecret(w http.ResponseWriter, r *http.Request) {
@@ -2187,7 +2076,7 @@ func (a *App) disableManagedSecret(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusNotFound, "secret_not_found", err.Error())
 		return
 	}
-	a.audit(r, p, "secret.disable", "managed_secret", name, "success", map[string]any{"reason": r.Header.Get("X-Change-Reason")})
+	a.audit(r, p, "secret.disable", "managed_secret", name, "success", nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 func (a *App) securityEvents(w http.ResponseWriter, r *http.Request) {
@@ -2650,10 +2539,9 @@ func (a *App) migrateDatabaseTarget(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		DSN     string `json:"dsn"`
 		Confirm string `json:"confirm"`
-		Reason  string `json:"reason"`
 	}
-	if decode(r, &in) != nil || strings.TrimSpace(in.DSN) == "" || in.Confirm != "MIGRATE TO POSTGRES" || strings.TrimSpace(in.Reason) == "" {
-		problem(w, 400, "migration_confirmation_required", "DSN, reason and exact confirmation MIGRATE TO POSTGRES are required")
+	if decode(r, &in) != nil || strings.TrimSpace(in.DSN) == "" || in.Confirm != "MIGRATE TO POSTGRES" {
+		problem(w, 400, "migration_confirmation_required", "DSN and exact confirmation MIGRATE TO POSTGRES are required")
 		return
 	}
 	if store.DriverForDSN(in.DSN) != "postgres" {
@@ -2678,15 +2566,15 @@ func (a *App) migrateDatabaseTarget(w http.ResponseWriter, r *http.Request) {
 	}
 	defer target.DB.Close()
 	if err = backup.MigrateLogical(ctx, a.store, target); err != nil {
-		a.audit(r, p, "database.migrate", "database", "postgres", "failure", map[string]any{"reason": in.Reason, "error": truncateText(err.Error(), 500)})
+		a.audit(r, p, "database.migrate", "database", "postgres", "failure", map[string]any{"error": truncateText(err.Error(), 500)})
 		problem(w, 400, "database_migration_failed", err.Error())
 		return
 	}
-	if err = a.saveDatabaseTarget(ctx, target, in.DSN, p.UserID, in.Reason); err != nil {
+	if err = a.saveDatabaseTarget(ctx, target, in.DSN, p.UserID, "database migration"); err != nil {
 		problem(w, 500, "database_target_save_failed", err.Error())
 		return
 	}
-	a.audit(r, p, "database.migrate", "database", "postgres", "success", map[string]any{"reason": in.Reason})
+	a.audit(r, p, "database.migrate", "database", "postgres", "success", nil)
 	succeeded = true
 	a.databaseRestart.Store(true)
 	jsonOut(w, 200, map[string]any{"status": "migrated", "restartRequired": true, "message": "Data migration completed. Restart the service to activate PostgreSQL."})
@@ -2748,9 +2636,8 @@ func (a *App) downloadBackup(w http.ResponseWriter, r *http.Request) {
 func (a *App) restoreBackup(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
 	id := r.PathValue("id")
-	reason := strings.TrimSpace(r.Header.Get("X-Change-Reason"))
-	if r.Header.Get("X-Restore-Confirmation") != "RESTORE "+id || reason == "" {
-		problem(w, 400, "restore_confirmation_required", "Exact restore confirmation and change reason are required")
+	if r.Header.Get("X-Restore-Confirmation") != "RESTORE "+id {
+		problem(w, 400, "restore_confirmation_required", "Exact restore confirmation is required")
 		return
 	}
 	a.requestGate.Lock()
@@ -2759,11 +2646,11 @@ func (a *App) restoreBackup(w http.ResponseWriter, r *http.Request) {
 	a.startBackground()
 	a.requestGate.Unlock()
 	if err != nil {
-		a.audit(r, p, "backup.restore", "backup", id, "failure", map[string]any{"reason": reason, "error": truncateText(err.Error(), 500)})
+		a.audit(r, p, "backup.restore", "backup", id, "failure", map[string]any{"error": truncateText(err.Error(), 500)})
 		problem(w, 400, "backup_restore_failed", err.Error())
 		return
 	}
-	a.audit(r, p, "backup.restore", "backup", id, "success", map[string]any{"reason": reason})
+	a.audit(r, p, "backup.restore", "backup", id, "success", nil)
 	jsonOut(w, http.StatusOK, map[string]any{"id": id, "status": "restored", "sessionsInvalidated": true})
 }
 func (a *App) listQualityCases(w http.ResponseWriter, r *http.Request) {

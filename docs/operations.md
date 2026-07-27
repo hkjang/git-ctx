@@ -28,11 +28,10 @@ Store에 보관한다.
 ## 장애 확인
 
 - `/healthz`와 DB 연결 상태를 먼저 확인한다.
-- Keycloak 저장 후 로그인이 이전 Realm으로 이동하면 `issuerMode=auto`와 Base URL/Realm을
+- Keycloak 저장 후 로그인이 이전 Realm으로 이동하면 Base URL과 Realm을
   확인하고 관리자 Keycloak 탭의 적용 상태에서 최종 Issuer·Authorization·Token·JWKS
-  endpoint를 확인한다. `custom` 모드에서는 Issuer와 Redirect를 직접 갱신해야 한다.
-- 사내 CA 환경에서 Discovery는 성공하지만 callback의 token exchange만 실패하는 경우에도
-  같은 Keycloak TLS/CA/proxy 설정이 적용된다. 관리자 상태가 정상인데 실패하면 Keycloak
+  endpoint를 확인한다.
+- Discovery는 성공하지만 callback의 token exchange만 실패하면 Keycloak
   Client의 Valid Redirect URI와 Web Origin이 표시된 최종 Redirect와 정확히 같은지 확인한다.
 - 로그인 전 `/api/v1/public/status`에서 DB 연결 여부·driver·Ping 지연을 확인한다.
 - 관리자는 “데이터베이스” 메뉴 또는 `/api/v1/admin/database/status`에서 현재 DB 이름,
@@ -41,7 +40,7 @@ Store에 보관한다.
 - 최초 PostgreSQL이 연결되지 않으면 `backups/recovery.db`로 복구 기동한다. 공개·관리자
   상태의 `recoveryMode=true`를 확인하고 이전 완료까지 단일 replica로 운영한다.
 - 새 PostgreSQL DSN 연결 시험은 Ping과 서버 정보만 읽고 schema를 변경하지 않는다.
-  `MIGRATE TO POSTGRES` 확인문과 변경 사유로 이전하면 schema migration 후 durable
+  `MIGRATE TO POSTGRES` 확인문으로 이전하면 schema migration 후 durable
   데이터를 논리 snapshot으로 복사하며 세션·OIDC flow·Bootstrap credential은 제외한다.
 - 이전 성공 후 Worker가 중지되고 `/readyz`가 503 `restart_required`를 반환한다. 즉시
   재시작해 PostgreSQL을 활성화한다. 실패 시 Worker와 SQLite 상태를 유지한다.
@@ -73,7 +72,7 @@ PostgreSQL 모두 일관된 트랜잭션 스냅샷을 사용한다. 복원은 �
 및 테이블 스키마가 정확히 같은 백업만 허용하고 전체 쓰기를 하나의 트랜잭션으로
 적용한다. 성공하면 기존 웹 세션을 모두 무효화하고 Worker와 Scheduler를 재시작한다.
 
-복원에는 `platform-admin` 재인증과 `RESTORE <백업 ID>` 확인문, 변경 사유가 필요하다.
+복원에는 `platform-admin` 재인증과 `RESTORE <백업 ID>` 확인문이 필요하다.
 사전에 별도 환경에서 아카이브 SHA-256, 원래 DSN, 복원 후 readiness와 Keycloak
 로그인을 검증한다. DSN Secret은 백업 볼륨과 분리해 Secret Store에 보관한다. 목표는
 RPO 24시간, RTO 4시간이며 분기별 복구

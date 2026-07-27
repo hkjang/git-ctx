@@ -174,27 +174,17 @@
             <select id="category" hidden aria-hidden="true"></select>
             <div id="setting-context" class="wide setting-context"></div>
             <div id="keycloak-runtime-status" class="wide notice" hidden></div>
-            <label
-              >변경 사유<input id="reason" placeholder="변경 사유"
-            /></label>
             <div id="setting-fields" class="form-row wide"></div>
-            <details class="wide advanced-json">
+            <details id="advanced-setting-json" class="wide advanced-json">
               <summary>고급 JSON 설정</summary>
               <label>JSON 설정<textarea id="setting-json" rows="16" spellcheck="false">{}</textarea></label>
             </details>
             <div class="wide setting-actions">
-              <button id="load-setting">불러오기</button>
               <button id="test-connection">연결 테스트·검증</button>
               <button id="preview-keycloak">Claim·역할 미리보기</button>
               <button id="login-keycloak" class="secondary">Keycloak 로그인 시험</button>
               <button id="save-setting">저장</button>
-              <button id="rollback-setting" class="danger">
-                이전 버전 복구
-              </button>
-            </div>
-            <div class="wide">
-              <h3>설정 버전 이력</h3>
-              <div id="setting-versions" class="table-wrap"></div>
+              <button id="delete-setting" class="danger">설정 삭제</button>
             </div>
           </div>
         </div>
@@ -246,7 +236,6 @@
             <p>복구 SQLite로 기동된 경우 PostgreSQL을 읽기 전용으로 시험한 뒤, 명시적 확인을 거쳐 스키마와 데이터를 이전합니다. DSN 원문은 암호화 저장되고 다시 표시되지 않습니다.</p>
             <form id="database-form" class="form-row">
               <label class="wide">PostgreSQL DSN<input id="database-dsn" type="password" required autocomplete="new-password" placeholder="postgres://user:password@db:5432/gitctx?sslmode=require" /></label>
-              <label>변경 사유<input id="database-reason" placeholder="운영 PostgreSQL 전환" /></label>
               <label>마이그레이션 확인<input id="database-confirm" placeholder="MIGRATE TO POSTGRES" /></label>
               <div class="button-row"><button id="test-database" type="button">연결 시험</button><button id="migrate-database" type="button" class="danger">데이터 이전</button></div>
             </form>
@@ -359,7 +348,6 @@
               <label>이름<input name="name" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,127}" /></label>
               <label>Backend<select name="backend"><option value="database">암호화 DB</option><option value="vault">Vault KV v2</option></select></label>
               <label>값<input name="value" type="password" required autocomplete="new-password" /></label>
-              <label>변경 사유<input name="reason" /></label>
               <button type="submit">등록·회전</button>
             </form>
             <div id="managed-secrets" class="table-wrap"></div>

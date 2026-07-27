@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.7.1
+  version: 0.8.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -122,7 +122,7 @@ paths:
   /api/v1/admin/settings:
     get:
       {
-        summary: Setting categories and versions,
+        summary: Configured setting categories,
         responses: { "200": { description: Settings } },
       }
   /api/v1/admin/settings/{category}:
@@ -138,19 +138,11 @@ paths:
         parameters: [{ $ref: "#/components/parameters/Category" }],
         responses: { "200": { description: New version } },
       }
-  /api/v1/admin/settings/{category}/rollback:
-    post:
+    delete:
       {
-        summary: Restore a historical value as a new version,
+        summary: Delete the active setting while retaining audit history,
         parameters: [{ $ref: "#/components/parameters/Category" }],
-        responses: { "200": { description: Restored version } },
-      }
-  /api/v1/admin/settings/{category}/versions:
-    get:
-      {
-        summary: List non-secret setting version metadata and rollback targets,
-        parameters: [{ $ref: "#/components/parameters/Category" }],
-        responses: { "200": { description: Version metadata } },
+        responses: { "204": { description: Deleted } },
       }
   /api/v1/admin/settings/{category}/test:
     post:
@@ -353,12 +345,6 @@ paths:
             required: true,
             schema: { type: string },
             description: "RESTORE followed by a space and the backup id",
-          }
-        - {
-            name: X-Change-Reason,
-            in: header,
-            required: true,
-            schema: { type: string },
           }
       responses: { "204": { description: Restored } }
   /api/v1/admin/quality/cases:
