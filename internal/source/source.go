@@ -19,6 +19,16 @@ type File struct {
 	Size int64
 }
 type Permission struct{ Principal, Kind, Permission string }
+type QueryResult struct {
+	Path      string
+	Snippet   string
+	CommitID  string
+	LineStart int
+	LineEnd   int
+}
+type QuerySearcher interface {
+	SearchQuery(context.Context, RepositoryRef, string, string, int) ([]QueryResult, error)
+}
 
 type RepositorySource interface {
 	ListProjects(context.Context) ([]Project, error)

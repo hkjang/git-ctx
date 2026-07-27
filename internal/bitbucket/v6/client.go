@@ -178,6 +178,90 @@ func (c *Client) GetFile(ctx context.Context, r source.RepositoryRef, ref, fileP
 	q := url.Values{"at": []string{ref}}
 	return c.bytes(ctx, c.repo(r)+"/raw/"+escapePath(filePath), q)
 }
+func (c *Client) SearchQuery(ctx context.Context, r source.RepositoryRef, ref, query string, limit int) ([]source.QueryResult, error) {
+	if limit < 1 || limit > 50 {
+		limit = 8
+	}
+	body := map[string]any{
+		"query":    fmt.Sprintf("project:%s repo:%s %s", r.ProjectKey, r.Slug, query),
+		"entities": map[string]any{"code": map[string]int{"start": 0, "limit": limit}},
+		"limits":   map[string]int{"primary": limit, "secondary": limit},
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	u := *c.base
+	u.Path = strings.TrimSuffix(c.base.Path, "/") + "/rest/search/latest/search"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), strings.NewReader(string(raw)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	if c.cfg.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.cfg.Token)
+	} else if c.cfg.Username != "" {
+		req.SetBasicAuth(c.cfg.Username, c.cfg.Password)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("bitbucket search API %s: %s", resp.Status, string(limited))
+	}
+	var payload struct {
+		Code struct {
+			Values []struct {
+				File  string `json:"file"`
+				Lines []struct {
+					Line     int    `json:"line"`
+					Text     string `json:"text"`
+					Segments []struct {
+						Text string `json:"text"`
+					} `json:"segments"`
+				} `json:"lines"`
+			} `json:"values"`
+		} `json:"code"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&payload); err != nil {
+		return nil, err
+	}
+	out := make([]source.QueryResult, 0, len(payload.Code.Values))
+	for _, hit := range payload.Code.Values {
+		if hit.File == "" {
+			continue
+		}
+		var lines []string
+		start, end := 0, 0
+		for _, line := range hit.Lines {
+			text := line.Text
+			if text == "" {
+				for _, segment := range line.Segments {
+					text += segment.Text
+				}
+			}
+			lines = append(lines, text)
+			if start == 0 || line.Line < start {
+				start = line.Line
+			}
+			if line.Line > end {
+				end = line.Line
+			}
+		}
+		if start < 1 {
+			start = 1
+		}
+		if end < start {
+			end = start
+		}
+		out = append(out, source.QueryResult{Path: hit.File, Snippet: strings.Join(lines, "\n"), CommitID: ref, LineStart: start, LineEnd: end})
+	}
+	return out, nil
+}
 func (c *Client) GetPermissions(ctx context.Context, r source.RepositoryRef) ([]source.Permission, error) {
 	type userItem struct {
 		Permission string

@@ -31,6 +31,11 @@ func TestGitLabAdapterPaginationFilesAndPermissions(t *testing.T) {
 			w.Write([]byte("# Guide"))
 		case "/api/v4/projects/core%2Fdemo/members/all":
 			w.Write([]byte(`[{"id":42,"username":"alice","access_level":30}]`))
+		case "/api/v4/projects/core%2Fdemo/search":
+			if r.URL.Query().Get("scope") != "blobs" || r.URL.Query().Get("search") != "gpu usage" || r.URL.Query().Get("ref") != "main" {
+				t.Errorf("search query=%s", r.URL.RawQuery)
+			}
+			w.Write([]byte(`[{"path":"docs/gpu.md","data":"GPU usage API","ref":"main","startline":12}]`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -56,5 +61,9 @@ func TestGitLabAdapterPaginationFilesAndPermissions(t *testing.T) {
 	perms, err := c.GetPermissions(context.Background(), ref)
 	if err != nil || len(perms) != 1 || perms[0].Principal != "gitlab:42" || perms[0].Permission != "developer" {
 		t.Fatalf("permissions=%#v err=%v", perms, err)
+	}
+	hits, err := c.SearchQuery(context.Background(), ref, "main", "gpu usage", 5)
+	if err != nil || len(hits) != 1 || hits[0].Path != "docs/gpu.md" || hits[0].LineStart != 12 {
+		t.Fatalf("hits=%#v err=%v", hits, err)
 	}
 }

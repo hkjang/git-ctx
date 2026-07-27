@@ -35,13 +35,15 @@ Go 모듈형 모놀리스로 시작하되 API/MCP/indexer/scheduler 프로세스
 | Bitbucket 6.9.1 수집/Webhook | 완료 | REST v1 어댑터, ref 색인, HMAC webhook, 멱등 작업, polling 보정 |
 | GitLab 수집/Webhook | 완료 | API v4 어댑터, ref 색인, token webhook, 멱등 작업, polling 보정 |
 | 하이브리드 검색 | 완료 | 동적 BM25+로컬/사내 임베딩, ACL 이후 사내 API Reranker, 장애 fallback 구현 |
+| 모델 미설정 검색 | 완료 | ACL 선검사 후 Bitbucket 6.9.1/GitLab 서버측 Query Search API, 장애·비기본 ref의 로컬 BM25 fallback |
+| 검색 품질 벤치마크 | 완료 | ACL principal별 정답 파일, Recall@K·MRR·nDCG@K 회귀 판정과 관리자 UI/API |
 | 사용자/관리자 UI | 완료 | SSO, 키·사용량, MCP 연결과 세분화 관리자 역할별 설정·소스·도구·보안·감사 화면 |
-| 관리자 동적 설정 | 완료 | 전체 범주 암호화 저장·버전·마스킹·연결시험·명시적 rollback 및 즉시 조회 반영 |
+| 관리자 동적 설정 | 완료 | DB DSN 외 전체 범주, 전용 연동 폼, 암호화·버전·마스킹, 실제 연결시험, rollback 및 즉시 반영 |
 | 저장소·색인 운영 UI | 완료 | 탐색, 등록, 초기/수동/주기 색인, 작업 조회·재시도 |
 | Secret Scan | 완료 | 개인키 차단, 자격증명·클라우드 키 마스킹, 보안 이벤트 이력 |
 | 그룹 ACL | 완료 | Keycloak→Bitbucket 그룹 매핑을 사용자·API 키 후보 검색에 적용 |
 | 키 알림 | 완료 | 7일 이내 만료와 호출량 초과 이상 사용 알림 |
-| Kubernetes/관측/백업 | 부분 | Kustomize, hardened deployment, JSON 로그·readiness·Prometheus·동적 OTLP tracing 구현; 자동 백업은 미구현 |
+| Kubernetes/관측/백업 | 완료 | Kustomize, hardened deployment, JSON 로그·readiness·Prometheus·동적 OTLP tracing, 암호화 예약 백업·복원 |
 
 상세한 구현 증거와 실환경 승인 경계는
 [completion-audit.md](completion-audit.md)에 기록한다.

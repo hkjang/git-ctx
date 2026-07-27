@@ -19,6 +19,8 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -35,6 +37,7 @@ import (
 	"git-ctx/internal/indexer"
 	"git-ctx/internal/mcp"
 	"git-ctx/internal/observability"
+	"git-ctx/internal/quality"
 	"git-ctx/internal/rerank"
 	"git-ctx/internal/scheduler"
 	"git-ctx/internal/search"
@@ -52,22 +55,26 @@ import (
 )
 
 type App struct {
-	cfg          config.Config
-	store        *store.Store
-	keys         *apikey.Service
-	mcp          *mcp.Server
-	search       *search.Service
-	mux          *http.ServeMux
-	aead         cipher.AEAD
-	oidc         *auth.OIDCVerifier
-	hooks        *webhook.Service
-	traces       *observability.Manager
-	backup       *backup.Service
-	rootCtx      context.Context
-	requestGate  sync.RWMutex
-	backgroundMu sync.Mutex
-	cancel       context.CancelFunc
-	wg           sync.WaitGroup
+	cfg                config.Config
+	store              *store.Store
+	keys               *apikey.Service
+	mcp                *mcp.Server
+	search             *search.Service
+	mux                *http.ServeMux
+	aead               cipher.AEAD
+	oidc               *auth.OIDCVerifier
+	hooks              *webhook.Service
+	traces             *observability.Manager
+	backup             *backup.Service
+	quality            *quality.Service
+	rootCtx            context.Context
+	requestGate        sync.RWMutex
+	backgroundMu       sync.Mutex
+	bootstrapMu        sync.RWMutex
+	bootstrapPath      string
+	bootstrapPersisted bool
+	cancel             context.CancelFunc
+	wg                 sync.WaitGroup
 }
 
 func New(ctx context.Context, c config.Config) (*App, error) {
@@ -83,7 +90,29 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &App{cfg: c, store: s, keys: apikey.New(s, c.KeyPepper), aead: aead, mux: http.NewServeMux(), traces: observability.New(), rootCtx: ctx}
+	bootstrapPath, bootstrapPersisted := "", false
+	if c.BootstrapAdmin == "" {
+		if c.BackupDirectory == "" {
+			c.BackupDirectory = "backups"
+		}
+		c.BootstrapAdmin, bootstrapPersisted, err = loadOrCreateBootstrapToken(ctx, s, aead)
+		if err != nil {
+			s.DB.Close()
+			return nil, err
+		}
+		if c.BootstrapAdmin != "" {
+			bootstrapPath = filepath.Join(c.BackupDirectory, "bootstrap-admin.token")
+			if err = os.MkdirAll(c.BackupDirectory, 0700); err == nil {
+				err = os.WriteFile(bootstrapPath, []byte(c.BootstrapAdmin+"\n"), 0600)
+			}
+			if err != nil {
+				s.DB.Close()
+				return nil, fmt.Errorf("write one-time bootstrap token: %w", err)
+			}
+			slog.Warn("Keycloak is not configured; one-time bootstrap token is available", "token_file", bootstrapPath)
+		}
+	}
+	a := &App{cfg: c, store: s, keys: apikey.New(s, c.KeyPepper), aead: aead, mux: http.NewServeMux(), traces: observability.New(), rootCtx: ctx, bootstrapPath: bootstrapPath, bootstrapPersisted: bootstrapPersisted}
 	a.backup = backup.New(s, aead, a.backupConfig)
 	if settings, loadErr := a.loadSettingMap(ctx, "observability"); loadErr == nil {
 		if applyErr := a.traces.Apply(ctx, observabilityConfigFromMap(settings)); applyErr != nil {
@@ -108,6 +137,8 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 		}
 		return provider
 	})
+	a.search.SetSourceLoader(a.sourceAdapter)
+	a.quality = quality.New(s, a.search)
 	a.mcp = mcp.New(a.search, s)
 	a.routes()
 	a.startBackground()
@@ -195,10 +226,8 @@ func (a *App) routes() {
 	a.mux.Handle("GET /api/v1/admin/settings/{category}", a.settingsAuthorize(http.HandlerFunc(a.getSetting)))
 	a.mux.Handle("PUT /api/v1/admin/settings/{category}", a.settingsAuthorize(http.HandlerFunc(a.putSetting)))
 	a.mux.Handle("POST /api/v1/admin/settings/{category}/rollback", a.settingsAuthorize(http.HandlerFunc(a.rollbackSetting)))
-	a.mux.Handle("POST /api/v1/admin/settings/keycloak/test", a.settingsAuthorize(http.HandlerFunc(a.testKeycloak)))
+	a.mux.Handle("POST /api/v1/admin/settings/{category}/test", a.settingsAuthorize(http.HandlerFunc(a.testIntegrationSetting)))
 	a.mux.Handle("POST /api/v1/admin/settings/keycloak/preview", a.settingsAuthorize(http.HandlerFunc(a.previewKeycloak)))
-	a.mux.Handle("POST /api/v1/admin/settings/bitbucket/test", a.settingsAuthorize(http.HandlerFunc(a.testSource)))
-	a.mux.Handle("POST /api/v1/admin/settings/gitlab/test", a.settingsAuthorize(http.HandlerFunc(a.testSource)))
 	a.mux.Handle("GET /api/v1/admin/audit-logs", a.authorize(http.HandlerFunc(a.auditLogs), "auditor", "security-admin"))
 	a.mux.Handle("GET /api/v1/admin/api-keys", a.authorize(http.HandlerFunc(a.adminAPIKeys), "security-admin"))
 	a.mux.Handle("POST /api/v1/admin/api-keys/{id}/revoke", a.authorize(http.HandlerFunc(a.adminRevokeKey), "security-admin"))
@@ -217,6 +246,12 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/admin/backups", a.admin(http.HandlerFunc(a.createBackup)))
 	a.mux.Handle("GET /api/v1/admin/backups/{id}/download", a.authorize(http.HandlerFunc(a.downloadBackup), "readonly-operator"))
 	a.mux.Handle("POST /api/v1/admin/backups/{id}/restore", a.admin(http.HandlerFunc(a.restoreBackup)))
+	a.mux.Handle("GET /api/v1/admin/quality/cases", a.authorize(http.HandlerFunc(a.listQualityCases), "search-admin", "readonly-operator"))
+	a.mux.Handle("POST /api/v1/admin/quality/cases", a.authorize(http.HandlerFunc(a.createQualityCase), "search-admin"))
+	a.mux.Handle("DELETE /api/v1/admin/quality/cases/{id}", a.authorize(http.HandlerFunc(a.deleteQualityCase), "search-admin"))
+	a.mux.Handle("GET /api/v1/admin/quality/runs", a.authorize(http.HandlerFunc(a.listQualityRuns), "search-admin", "readonly-operator"))
+	a.mux.Handle("POST /api/v1/admin/quality/runs", a.authorize(http.HandlerFunc(a.runQualityBenchmark), "search-admin"))
+	a.mux.Handle("GET /api/v1/admin/quality/runs/{id}/results", a.authorize(http.HandlerFunc(a.qualityResults), "search-admin", "readonly-operator"))
 	a.mux.Handle("GET /api/v1/admin/mcp/tools", a.authorize(http.HandlerFunc(a.mcpTools), "mcp-admin", "readonly-operator"))
 	a.mux.Handle("PUT /api/v1/admin/mcp/tools/{id}", a.authorize(http.HandlerFunc(a.updateMCPTool), "mcp-admin"))
 	a.mux.Handle("/", http.FileServer(http.Dir("web")))
@@ -258,7 +293,7 @@ func (a *App) authenticate(next http.Handler) http.Handler {
 		}
 		// Bootstrap authentication is intentionally limited to initial on-prem setup.
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if token != "" && a.cfg.BootstrapAdmin != "" && token == a.cfg.BootstrapAdmin {
+		if token != "" && a.validBootstrapToken(r.Context(), token) {
 			id := "bootstrap-admin"
 			_, _ = a.store.DB.ExecContext(r.Context(), a.store.Rebind(`INSERT INTO users(id,subject,username,email) VALUES(?,?,?,?) ON CONFLICT(id) DO NOTHING`), id, id, id, "")
 			next.ServeHTTP(w, r.WithContext(auth.WithPrincipal(r.Context(), auth.Principal{UserID: id, Subject: id, Username: id, Roles: []string{"platform-admin"}})))
@@ -845,7 +880,7 @@ func (a *App) putSetting(w http.ResponseWriter, r *http.Request) {
 	if previous, err := a.loadSettingMap(r.Context(), category); err == nil {
 		preserveMasked(previous, value)
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	if err := a.validateSetting(ctx, category, value); err != nil {
 		problem(w, 400, "setting_validation_failed", err.Error())
@@ -889,8 +924,37 @@ func (a *App) putSetting(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if category == "keycloak" {
+		a.disableBootstrapAdmin()
+	}
 	a.audit(r, p, "settings.update", category, category, "success", map[string]any{"version": version})
 	jsonOut(w, 200, map[string]any{"category": category, "version": version, "secretFields": "encrypted and masked"})
+}
+func (a *App) testIntegrationSetting(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	category := r.PathValue("category")
+	allowed := map[string]bool{"keycloak": true, "bitbucket": true, "gitlab": true, "model": true, "observability": true, "backup": true}
+	if !allowed[category] {
+		problem(w, 400, "setting_test_unsupported", "This setting category has no external or storage connection test")
+		return
+	}
+	var value map[string]any
+	if decode(r, &value) != nil {
+		problem(w, 400, "invalid_request", "Invalid JSON")
+		return
+	}
+	if previous, err := a.loadSettingMap(r.Context(), category); err == nil {
+		preserveMasked(previous, value)
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if err := a.validateSetting(ctx, category, value); err != nil {
+		a.audit(r, p, "settings.test", category, category, "failure", map[string]any{"error": truncateText(err.Error(), 500)})
+		problem(w, 400, "setting_connection_test_failed", err.Error())
+		return
+	}
+	a.audit(r, p, "settings.test", category, category, "success", nil)
+	jsonOut(w, http.StatusOK, map[string]any{"category": category, "status": "verified", "testedAt": time.Now().UTC()})
 }
 func (a *App) rollbackSetting(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
@@ -993,20 +1057,6 @@ func (a *App) getSetting(w http.ResponseWriter, r *http.Request) {
 	maskSecrets(value)
 	jsonOut(w, 200, map[string]any{"category": category, "version": version, "value": value})
 }
-func (a *App) testKeycloak(w http.ResponseWriter, r *http.Request) {
-	var cfg auth.OIDCConfig
-	if decode(r, &cfg) != nil {
-		problem(w, 400, "invalid_request", "Invalid Keycloak configuration")
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-	if err := auth.ValidateOIDCConfig(ctx, cfg); err != nil {
-		problem(w, 400, "keycloak_connection_failed", err.Error())
-		return
-	}
-	jsonOut(w, 200, map[string]any{"status": "ok", "issuer": cfg.IssuerURL, "clientId": cfg.ClientID})
-}
 func (a *App) previewKeycloak(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Config auth.OIDCConfig `json:"config"`
@@ -1027,27 +1077,6 @@ func (a *App) previewKeycloak(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
 	a.audit(r, p, "keycloak.claim_preview", "keycloak", "candidate", "success", nil)
 	jsonOut(w, 200, map[string]any{"subject": identity.Subject, "username": identity.Username, "email": identity.Email, "groups": identity.Groups, "roles": identity.Roles, "bitbucketUserSlug": identity.BitbucketUserSlug, "gitlabUserId": identity.GitLabUserID})
-}
-func (a *App) testSource(w http.ResponseWriter, r *http.Request) {
-	sourceType := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/admin/settings/"), "/")[0]
-	var value map[string]any
-	if decode(r, &value) != nil {
-		problem(w, 400, "invalid_request", "Invalid source configuration")
-		return
-	}
-	adapter, err := sourceAdapterFromMap(sourceType, value)
-	if err != nil {
-		problem(w, 400, "invalid_source_config", err.Error())
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-	projects, err := adapter.ListProjects(ctx)
-	if err != nil {
-		problem(w, 400, "source_connection_failed", err.Error())
-		return
-	}
-	jsonOut(w, 200, map[string]any{"status": "ok", "sourceType": sourceType, "projectCount": len(projects)})
 }
 func (a *App) receiveWebhook(w http.ResponseWriter, r *http.Request) {
 	sourceType := strings.TrimPrefix(r.URL.Path, "/webhooks/")
@@ -1297,9 +1326,12 @@ func validatePublicAssetURL(value string) error {
 	return nil
 }
 func (a *App) publicUIConfig(w http.ResponseWriter, r *http.Request) {
-	out := map[string]string{
+	bootstrapRequired, bootstrapPath := a.bootstrapStatus()
+	out := map[string]any{
 		"serviceName": "git-ctx", "tagline": "사내 개발 지식 MCP",
 		"logoUrl": "/logo.svg", "faviconUrl": "/favicon.svg", "notice": "",
+		"bootstrapRequired":  bootstrapRequired,
+		"bootstrapTokenFile": bootstrapPath,
 	}
 	if settings, err := a.loadSettingMap(r.Context(), "ui"); err == nil {
 		for _, key := range []string{"serviceName", "tagline", "logoUrl", "faviconUrl", "notice"} {
@@ -1309,6 +1341,93 @@ func (a *App) publicUIConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	jsonOut(w, http.StatusOK, out)
+}
+func (a *App) bootstrapAdminToken() string {
+	a.bootstrapMu.RLock()
+	defer a.bootstrapMu.RUnlock()
+	return a.cfg.BootstrapAdmin
+}
+func (a *App) validBootstrapToken(ctx context.Context, candidate string) bool {
+	a.bootstrapMu.RLock()
+	expected, persisted := a.cfg.BootstrapAdmin, a.bootstrapPersisted
+	a.bootstrapMu.RUnlock()
+	if expected == "" || !hmac.Equal([]byte(candidate), []byte(expected)) {
+		return false
+	}
+	if !persisted {
+		return true
+	}
+	var count int
+	return a.store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM platform_bootstrap WHERE id='initial-admin'`).Scan(&count) == nil && count == 1
+}
+func loadOrCreateBootstrapToken(ctx context.Context, s *store.Store, aead cipher.AEAD) (string, bool, error) {
+	var keycloakConfigured int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM system_settings WHERE category='keycloak'`).Scan(&keycloakConfigured); err != nil || keycloakConfigured > 0 {
+		return "", false, err
+	}
+	decrypt := func(sealed []byte) (string, error) {
+		if len(sealed) < aead.NonceSize() {
+			return "", errors.New("stored bootstrap token is truncated")
+		}
+		raw, err := aead.Open(nil, sealed[:aead.NonceSize()], sealed[aead.NonceSize():], []byte("git-ctx/bootstrap/v1"))
+		return string(raw), err
+	}
+	var sealed []byte
+	err := s.DB.QueryRowContext(ctx, `SELECT token_encrypted FROM platform_bootstrap WHERE id='initial-admin'`).Scan(&sealed)
+	if err == nil {
+		token, openErr := decrypt(sealed)
+		return token, true, openErr
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", false, err
+	}
+	raw := make([]byte, 32)
+	if _, err = rand.Read(raw); err != nil {
+		return "", false, err
+	}
+	token := base64.RawURLEncoding.EncodeToString(raw)
+	nonce := make([]byte, aead.NonceSize())
+	if _, err = rand.Read(nonce); err != nil {
+		return "", false, err
+	}
+	sealed = aead.Seal(nonce, nonce, []byte(token), []byte("git-ctx/bootstrap/v1"))
+	result, err := s.DB.ExecContext(ctx, s.Rebind(`INSERT INTO platform_bootstrap(id,token_encrypted) VALUES('initial-admin',?) ON CONFLICT(id) DO NOTHING`), sealed)
+	if err != nil {
+		return "", false, err
+	}
+	if affected, _ := result.RowsAffected(); affected == 1 {
+		return token, true, nil
+	}
+	if err = s.DB.QueryRowContext(ctx, `SELECT token_encrypted FROM platform_bootstrap WHERE id='initial-admin'`).Scan(&sealed); err != nil {
+		return "", false, err
+	}
+	token, err = decrypt(sealed)
+	return token, true, err
+}
+func (a *App) bootstrapStatus() (bool, string) {
+	a.bootstrapMu.RLock()
+	defer a.bootstrapMu.RUnlock()
+	required := a.cfg.BootstrapAdmin != ""
+	if required && a.bootstrapPersisted {
+		var count int
+		if err := a.store.DB.QueryRow(`SELECT COUNT(*) FROM platform_bootstrap WHERE id='initial-admin'`).Scan(&count); err != nil || count == 0 {
+			required = false
+		}
+	}
+	return required, a.bootstrapPath
+}
+func (a *App) disableBootstrapAdmin() {
+	a.bootstrapMu.Lock()
+	a.cfg.BootstrapAdmin = ""
+	path := a.bootstrapPath
+	a.bootstrapPath = ""
+	a.bootstrapMu.Unlock()
+	_, _ = a.store.DB.Exec(`DELETE FROM platform_bootstrap WHERE id='initial-admin'`)
+	if path != "" {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("one-time bootstrap token file could not be removed", "path", path, "error", err)
+		}
+	}
 }
 func (a *App) pollingInterval(ctx context.Context) time.Duration {
 	settings, err := a.loadSettingMap(ctx, "index")
@@ -1322,8 +1441,15 @@ func (a *App) pollingInterval(ctx context.Context) time.Duration {
 }
 func (a *App) searchConfig(ctx context.Context) search.Config {
 	cfg := search.Config{KeywordWeight: 1, VectorWeight: .35, FinalK: 8, CandidateLimit: 5000}
+	modelSettings, modelErr := a.loadSettingMap(ctx, "model")
+	provider, _ := modelSettings["provider"].(string)
+	noRemoteModel := modelErr != nil || provider == "" || provider == "local"
 	settings, err := a.loadSettingMap(ctx, "search")
 	if err != nil {
+		if noRemoteModel {
+			cfg.VectorWeight = 0
+			cfg.SourceQuerySearch = true
+		}
 		return cfg
 	}
 	if value, ok := settings["keywordWeight"].(float64); ok {
@@ -1340,6 +1466,10 @@ func (a *App) searchConfig(ctx context.Context) search.Config {
 	}
 	if value, ok := settings["rerankLimit"].(float64); ok {
 		cfg.RerankLimit = int(value)
+	}
+	if noRemoteModel {
+		cfg.VectorWeight = 0
+		cfg.SourceQuerySearch = true
 	}
 	return cfg
 }
@@ -1931,6 +2061,79 @@ func (a *App) restoreBackup(w http.ResponseWriter, r *http.Request) {
 	a.audit(r, p, "backup.restore", "backup", id, "success", map[string]any{"reason": reason})
 	jsonOut(w, http.StatusOK, map[string]any{"id": id, "status": "restored", "sessionsInvalidated": true})
 }
+func (a *App) listQualityCases(w http.ResponseWriter, r *http.Request) {
+	cases, err := a.quality.ListCases(r.Context())
+	if err != nil {
+		problem(w, 500, "quality_cases_failed", err.Error())
+		return
+	}
+	jsonOut(w, http.StatusOK, cases)
+}
+func (a *App) createQualityCase(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	var input quality.Case
+	if err := decode(r, &input); err != nil {
+		problem(w, 400, "invalid_request", err.Error())
+		return
+	}
+	created, err := a.quality.CreateCase(r.Context(), input, p.UserID)
+	if err != nil {
+		a.audit(r, p, "quality.case.create", "quality_case", "", "failure", map[string]any{"error": truncateText(err.Error(), 500)})
+		problem(w, 400, "quality_case_invalid", err.Error())
+		return
+	}
+	a.audit(r, p, "quality.case.create", "quality_case", created.ID, "success", map[string]any{"libraryId": created.LibraryID, "relevantSourceCount": len(created.RelevantSources)})
+	jsonOut(w, http.StatusCreated, created)
+}
+func (a *App) deleteQualityCase(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	id := r.PathValue("id")
+	if err := a.quality.DeleteCase(r.Context(), id); err != nil {
+		status := http.StatusConflict
+		if errors.Is(err, sql.ErrNoRows) {
+			status = http.StatusNotFound
+		}
+		problem(w, status, "quality_case_delete_failed", "The case does not exist or is referenced by a benchmark run")
+		return
+	}
+	a.audit(r, p, "quality.case.delete", "quality_case", id, "success", nil)
+	w.WriteHeader(http.StatusNoContent)
+}
+func (a *App) listQualityRuns(w http.ResponseWriter, r *http.Request) {
+	runs, err := a.quality.ListRuns(r.Context())
+	if err != nil {
+		problem(w, 500, "quality_runs_failed", err.Error())
+		return
+	}
+	jsonOut(w, http.StatusOK, runs)
+}
+func (a *App) runQualityBenchmark(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	var input struct {
+		TopK int `json:"topK"`
+		quality.Thresholds
+	}
+	if err := decode(r, &input); err != nil {
+		problem(w, 400, "invalid_request", err.Error())
+		return
+	}
+	run, err := a.quality.Run(r.Context(), p.UserID, input.TopK, input.Thresholds)
+	if err != nil {
+		a.audit(r, p, "quality.run", "quality_run", run.ID, "failure", map[string]any{"error": truncateText(err.Error(), 500)})
+		problem(w, 400, "quality_run_failed", err.Error())
+		return
+	}
+	a.audit(r, p, "quality.run", "quality_run", run.ID, run.Status, map[string]any{"recallAtK": run.RecallAtK, "mrr": run.MRR, "ndcgAtK": run.NDCGAtK, "caseCount": run.CaseCount})
+	jsonOut(w, http.StatusCreated, run)
+}
+func (a *App) qualityResults(w http.ResponseWriter, r *http.Request) {
+	results, err := a.quality.Results(r.Context(), r.PathValue("id"))
+	if err != nil {
+		problem(w, 500, "quality_results_failed", err.Error())
+		return
+	}
+	jsonOut(w, http.StatusOK, results)
+}
 func (a *App) metrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	type metric struct{ name, help, query string }
@@ -1941,6 +2144,8 @@ func (a *App) metrics(w http.ResponseWriter, r *http.Request) {
 		{"git_ctx_mcp_calls_total", "Recorded MCP tool calls", `SELECT COUNT(*) FROM mcp_calls`},
 		{"git_ctx_index_jobs_pending", "Pending index jobs", `SELECT COUNT(*) FROM index_jobs WHERE status='pending'`},
 		{"git_ctx_index_jobs_failed", "Failed index jobs", `SELECT COUNT(*) FROM index_jobs WHERE status='failed'`},
+		{"git_ctx_quality_benchmark_cases", "Enabled search quality benchmark cases", `SELECT COUNT(*) FROM quality_benchmark_cases WHERE enabled=1`},
+		{"git_ctx_quality_benchmark_regressions", "Search quality benchmark regression runs", `SELECT COUNT(*) FROM quality_benchmark_runs WHERE status='regressed'`},
 	}
 	for _, item := range items {
 		var value int64

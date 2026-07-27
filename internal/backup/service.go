@@ -30,6 +30,7 @@ var tables = []string{
 	"users", "roles", "user_identities", "user_roles",
 	"api_keys", "api_key_restrictions", "api_key_usage_buckets",
 	"repositories", "repository_permissions", "repository_index_policies", "document_chunks",
+	"quality_benchmark_cases", "quality_benchmark_runs", "quality_benchmark_results",
 	"system_settings", "setting_versions", "audit_logs", "mcp_calls", "index_jobs",
 	"webhook_events", "index_security_events", "mcp_tools", "notifications",
 }
@@ -297,7 +298,7 @@ func (s *Service) Restore(ctx context.Context, id string) error {
 	defer tx.Rollback()
 	// Authentication flows and sessions are deliberately not restored. This
 	// both prevents replay and ensures restored identity state starts closed.
-	for _, ephemeral := range []string{"user_sessions", "auth_flows"} {
+	for _, ephemeral := range []string{"user_sessions", "auth_flows", "platform_bootstrap"} {
 		if _, err = tx.ExecContext(ctx, `DELETE FROM "`+ephemeral+`"`); err != nil {
 			return fmt.Errorf("clear %s: %w", ephemeral, err)
 		}

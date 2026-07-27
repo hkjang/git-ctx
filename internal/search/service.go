@@ -11,6 +11,7 @@ import (
 
 	"git-ctx/internal/embedding"
 	"git-ctx/internal/rerank"
+	"git-ctx/internal/source"
 	"git-ctx/internal/store"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -19,11 +20,12 @@ import (
 )
 
 type Config struct {
-	KeywordWeight  float64
-	VectorWeight   float64
-	FinalK         int
-	CandidateLimit int
-	RerankLimit    int
+	KeywordWeight     float64
+	VectorWeight      float64
+	FinalK            int
+	CandidateLimit    int
+	RerankLimit       int
+	SourceQuerySearch bool
 }
 type ConfigLoader func(context.Context) Config
 type EmbeddingLoader func(context.Context) embedding.Provider
@@ -33,12 +35,16 @@ type Service struct {
 	load     ConfigLoader
 	embedder EmbeddingLoader
 	reranker RerankerLoader
+	sources  func(context.Context, string) (source.RepositorySource, error)
 }
 
 func (s *Service) SetRerankerLoader(loader RerankerLoader) {
 	if loader != nil {
 		s.reranker = loader
 	}
+}
+func (s *Service) SetSourceLoader(loader func(context.Context, string) (source.RepositorySource, error)) {
+	s.sources = loader
 }
 
 func New(s *store.Store) *Service {
@@ -162,10 +168,10 @@ func (s *Service) Query(ctx context.Context, principals []string, libraryID, que
 	for _, principal := range principals {
 		args = append(args, principal)
 	}
-	var repoID, name, defaultRef, sourceType string
+	var repoID, name, defaultRef, sourceType, projectKey, repositorySlug string
 	err = s.store.DB.QueryRowContext(ctx, s.store.Rebind(`
-SELECT r.id,r.name,r.default_branch,r.source_type FROM repositories r JOIN repository_permissions p ON p.repository_id=r.id
-WHERE r.library_id=? AND r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p.principal='*') LIMIT 1`), args...).Scan(&repoID, &name, &defaultRef, &sourceType)
+SELECT r.id,r.name,r.default_branch,r.source_type,r.project_key,r.slug FROM repositories r JOIN repository_permissions p ON p.repository_id=r.id
+WHERE r.library_id=? AND r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p.principal='*') LIMIT 1`), args...).Scan(&repoID, &name, &defaultRef, &sourceType, &projectKey, &repositorySlug)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", errors.New("library is unavailable or access is denied")
 	}
@@ -192,6 +198,21 @@ WHERE r.library_id=? AND r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p
 	}
 	if cfg.RerankLimit < 1 || cfg.RerankLimit > 100 {
 		cfg.RerankLimit = 30
+	}
+	if cfg.SourceQuerySearch && s.sources != nil && (sourceType != "bitbucket" || ref == defaultRef) {
+		adapter, sourceErr := s.sources(ctx, sourceType)
+		if sourceErr == nil {
+			if querySearcher, ok := adapter.(source.QuerySearcher); ok {
+				remoteHits, queryErr := querySearcher.SearchQuery(ctx, source.RepositoryRef{ProjectKey: projectKey, Slug: repositorySlug}, ref, query, cfg.FinalK)
+				if queryErr == nil && len(remoteHits) > 0 {
+					safeHits := s.indexedSourceHits(ctx, repoID, ref, remoteHits, cfg.FinalK)
+					if len(safeHits) > 0 {
+						span.SetAttributes(attribute.Int("git_ctx.search.result_count", len(safeHits)), attribute.String("git_ctx.search.mode", "source-query-api"))
+						return assembleSourceQueryResults(name, sourceType, baseID, ref, safeHits), nil
+					}
+				}
+			}
+		}
 	}
 	candidateSQL := `SELECT content,file_path,line_start,line_end,commit_id,heading,embedding FROM document_chunks WHERE repository_id=? AND ref_name=?`
 	args = []any{repoID, ref}
@@ -242,9 +263,13 @@ WHERE r.library_id=? AND r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p
 		hits = append(hits, h)
 	}
 	avgLength := float64(totalLength) / math.Max(1, float64(len(hits)))
-	queryVector, embedErr := s.embedder(ctx).Embed(ctx, query)
-	if embedErr != nil {
-		queryVector = embedding.Embed(query)
+	var queryVector []float32
+	if cfg.VectorWeight > 0 {
+		var embedErr error
+		queryVector, embedErr = s.embedder(ctx).Embed(ctx, query)
+		if embedErr != nil {
+			queryVector = embedding.Embed(query)
+		}
 	}
 	filtered := hits[:0]
 	for n := range hits {
@@ -262,7 +287,10 @@ WHERE r.library_id=? AND r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p
 			lengthNorm := 1 - 0.75 + 0.75*float64(len(hits[n].tokens))/avgLength
 			bm25 += idf * (frequency * 2.2) / (frequency + 1.2*lengthNorm)
 		}
-		vectorScore := embedding.Cosine(queryVector, embedding.Decode(hits[n].vector))
+		vectorScore := 0.0
+		if cfg.VectorWeight > 0 {
+			vectorScore = embedding.Cosine(queryVector, embedding.Decode(hits[n].vector))
+		}
 		hits[n].score = cfg.KeywordWeight*bm25 + cfg.VectorWeight*math.Max(0, vectorScore)
 		if bm25 > 0 || vectorScore > 0.18 {
 			filtered = append(filtered, hits[n])
@@ -299,6 +327,45 @@ WHERE r.library_id=? AND r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p
 		fmt.Fprintf(&b, "## %s\n\n%s\n\nSource: `%s://%s@%s/%s#L%d-L%d`\n\n", h.heading, h.content, sourceType, strings.TrimPrefix(baseID, "/"), h.commit, h.path, h.start, h.end)
 	}
 	return b.String(), nil
+}
+func (s *Service) indexedSourceHits(ctx context.Context, repoID, ref string, remote []source.QueryResult, limit int) []source.QueryResult {
+	out := make([]source.QueryResult, 0, min(limit, len(remote)))
+	seen := map[string]bool{}
+	for _, hit := range remote {
+		if hit.Path == "" || seen[hit.Path] {
+			continue
+		}
+		var safe source.QueryResult
+		err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT file_path,content,commit_id,line_start,line_end FROM document_chunks WHERE repository_id=? AND ref_name=? AND file_path=? ORDER BY line_start LIMIT 1`), repoID, ref, hit.Path).Scan(&safe.Path, &safe.Snippet, &safe.CommitID, &safe.LineStart, &safe.LineEnd)
+		if err != nil {
+			continue
+		}
+		seen[safe.Path] = true
+		out = append(out, safe)
+		if len(out) == limit {
+			break
+		}
+	}
+	return out
+}
+func assembleSourceQueryResults(name, sourceType, baseID, ref string, hits []source.QueryResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# %s\n\n", name)
+	for _, hit := range hits {
+		commit := hit.CommitID
+		if commit == "" {
+			commit = ref
+		}
+		snippet := strings.TrimSpace(hit.Snippet)
+		if len(snippet) > 16000 {
+			snippet = snippet[:16000]
+		}
+		if snippet == "" {
+			snippet = "Matched by the repository source query API."
+		}
+		fmt.Fprintf(&b, "## %s\n\n%s\n\nSource: `%s://%s@%s/%s#L%d-L%d`\n\n", hit.Path, snippet, sourceType, strings.TrimPrefix(baseID, "/"), commit, hit.Path, max(1, hit.LineStart), max(max(1, hit.LineStart), hit.LineEnd))
+	}
+	return b.String()
 }
 func unique(values []string) []string {
 	seen := map[string]bool{}

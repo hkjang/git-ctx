@@ -14,7 +14,7 @@ docker build -t git-ctx:verify .
 자동 테스트는 API 키 원문 비저장, 키 제한·회전, OIDC 서명과 역할 매핑, Bitbucket
 6.9.1/GitLab API 계약, ACL 비노출, MCP 세션·도구 계약, 50개 동시 호출, Webhook
 중복, Worker 재시도, Secret Scan, SQLite migration, OTLP protobuf export와 W3C
-trace context 전파를 포함한다.
+trace context 전파, 모델 실호출 검증, source query API와 품질 지표를 포함한다.
 
 실제 PostgreSQL 백업·복원 계약 시험은 격리된 빈 시험 DB DSN을 명시해서 실행한다.
 시험은 대상 DB의 데이터를 삭제하므로 운영 DB에는 절대 지정하지 않는다.
@@ -22,6 +22,10 @@ trace context 전파를 포함한다.
 ```bash
 GIT_CTX_TEST_POSTGRES_DSN='postgres://gitctx:password@localhost:5432/gitctx_test?sslmode=disable' \
   go test -run TestPostgresBackupRestoreIntegration -v ./internal/backup
+GIT_CTX_TEST_POSTGRES_DSN='postgres://gitctx:password@localhost:5432/gitctx_test?sslmode=disable' \
+  go test -run TestPostgresQualityBenchmarkIntegration -v ./internal/quality
+GIT_CTX_TEST_POSTGRES_DSN='postgres://gitctx:password@localhost:5432/gitctx_test?sslmode=disable' \
+  go test -run TestPostgresDSNOnlyBootstrapIntegration -v ./internal/app
 ```
 
 ## 부하 시험
@@ -47,7 +51,7 @@ k6 run test/load/mcp.js
 - GitLab push/tag webhook, 중복·역순 이벤트
 - 권한 회수 후 캐시 만료 이전/이후 Fail Closed 동작
 - 사내 CA 교체, 잘못된 CA, 프록시 장애와 복구
-- PostgreSQL 백업 복원 및 master key 분리 복구
+- PostgreSQL 백업 복원 및 원래 DSN Secret 분리 복구
 - 2개 Pod 동시 Worker의 `SKIP LOCKED` 중복 방지
 
 외부 시스템이 필요한 항목은 배포 환경의 서명된 시험 보고서 없이는 완료로 판정하지

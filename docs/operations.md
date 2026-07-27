@@ -2,16 +2,17 @@
 
 ## Bootstrap
 
-필수 외부 값은 DB DSN, 32바이트 API 키 pepper, 32바이트 설정 암호화 키다.
-초기 관리자 토큰은 Keycloak 설정 직후 환경에서 제거하고 재시작한다. 운영에서는 TLS
-종단 뒤에 배치하고 프록시가 신뢰할 수 없는 전달 헤더를 제거해야 한다.
+필수 외부 값은 `GIT_CTX_DB_DSN` 하나다. DB driver, 설정 암호화 키와 API-key pepper는
+DSN에서 도메인 분리해 결정한다. Keycloak 미설정 시 `backups/bootstrap-admin.token`이
+0600 권한으로 생성되며 관리자 화면에서 Keycloak 연결을 시험하고 저장하는 즉시
+메모리와 파일에서 폐기된다. 운영에서는 TLS 종단 뒤에 배치하고 프록시가 신뢰할 수
+없는 전달 헤더를 제거해야 한다.
 
 ## 비밀 회전
 
-API 키 pepper를 바꾸면 기존 키를 검증할 수 없으므로 이중 pepper 검증 기간을 포함한
-계획 회전이 필요하다. Master key 회전은 모든 `system_settings`와
-`setting_versions` 값을 트랜잭션으로 재암호화한 뒤 수행한다. DB 백업과 복구 시험
-없이 키를 교체하지 않는다.
+DSN 문자열은 설정 암호문과 API 키 검증 재료에 포함되므로 임의로 정규화하거나
+비밀번호만 바꿔서는 안 된다. DSN 회전은 별도 staging 복원본과 재암호화 migration을
+거쳐 계획 작업으로 수행한다. 원래 DSN은 DB 백업과 분리한 Secret Store에 보관한다.
 
 사용자 MCP 키 회전은 UI에서 0~1,440분의 중복 유효기간을 선택한다. 신규 키는 기존
 키의 도구·CIDR·저장소·호출량 제한과 만료일을 상속하며 원문은 한 번만 표시된다.
@@ -42,9 +43,9 @@ PostgreSQL 모두 일관된 트랜잭션 스냅샷을 사용한다. 복원은 �
 적용한다. 성공하면 기존 웹 세션을 모두 무효화하고 Worker와 Scheduler를 재시작한다.
 
 복원에는 `platform-admin` 재인증과 `RESTORE <백업 ID>` 확인문, 변경 사유가 필요하다.
-사전에 별도 환경에서 아카이브 SHA-256, master key, 복원 후 readiness와 Keycloak
-로그인을 검증한다. DB에는 설정 암호문이 저장되므로 `GIT_CTX_MASTER_KEY`는 백업
-볼륨과 분리해 KMS에 보관한다. 목표는 RPO 24시간, RTO 4시간이며 분기별 복구
+사전에 별도 환경에서 아카이브 SHA-256, 원래 DSN, 복원 후 readiness와 Keycloak
+로그인을 검증한다. DSN Secret은 백업 볼륨과 분리해 Secret Store에 보관한다. 목표는
+RPO 24시간, RTO 4시간이며 분기별 복구
 훈련으로 입증한다. 인프라 전체 재해 복구에는 PostgreSQL 물리/`pg_dump` 백업과
 스토리지 스냅샷을 추가 계층으로 함께 유지한다.
 

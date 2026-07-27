@@ -34,6 +34,8 @@
       audit: has("security-admin") || roles.has("auditor"),
       backup: has("readonly-operator"),
       backupWrite: roles.has("platform-admin"),
+      quality: has("search-admin") || roles.has("readonly-operator"),
+      qualityWrite: has("search-admin"),
     };
   }
 

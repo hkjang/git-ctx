@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.3.0
+  version: 0.4.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -130,6 +130,13 @@ paths:
         summary: Restore a historical value as a new version,
         parameters: [{ $ref: "#/components/parameters/Category" }],
         responses: { "200": { description: Restored version } },
+      }
+  /api/v1/admin/settings/{category}/test:
+    post:
+      {
+        summary: Test and validate Keycloak source model telemetry or backup connectivity without saving,
+        parameters: [{ $ref: "#/components/parameters/Category" }],
+        responses: { "200": { description: Verified } },
       }
   /api/v1/admin/settings/keycloak/test:
     post:
@@ -284,6 +291,42 @@ paths:
             schema: { type: string },
           }
       responses: { "204": { description: Restored } }
+  /api/v1/admin/quality/cases:
+    get:
+      {
+        summary: List ACL-aware search quality cases,
+        responses: { "200": { description: Cases } },
+      }
+    post:
+      {
+        summary: Create a quality case with expected source paths,
+        responses: { "201": { description: Created } },
+      }
+  /api/v1/admin/quality/cases/{id}:
+    delete:
+      {
+        summary: Delete an unused quality case,
+        parameters: [{ $ref: "#/components/parameters/Id" }],
+        responses: { "204": { description: Deleted } },
+      }
+  /api/v1/admin/quality/runs:
+    get:
+      {
+        summary: List Recall@K MRR and nDCG@K benchmark runs,
+        responses: { "200": { description: Runs } },
+      }
+    post:
+      {
+        summary: Execute the current production search configuration against enabled cases,
+        responses: { "201": { description: Completed run } },
+      }
+  /api/v1/admin/quality/runs/{id}/results:
+    get:
+      {
+        summary: List per-case ranked sources and metrics,
+        parameters: [{ $ref: "#/components/parameters/Id" }],
+        responses: { "200": { description: Results } },
+      }
   /api/v1/admin/mcp/tools:
     get:
       {

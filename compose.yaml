@@ -21,11 +21,7 @@ services:
     volumes:
       - backup-data:/var/lib/git-ctx/backups
     environment:
-      GIT_CTX_DB_DRIVER: postgres
       GIT_CTX_DB_DSN: postgres://gitctx:${POSTGRES_PASSWORD}@postgres:5432/gitctx?sslmode=disable
-      GIT_CTX_API_KEY_PEPPER: ${GIT_CTX_API_KEY_PEPPER:?set GIT_CTX_API_KEY_PEPPER}
-      GIT_CTX_MASTER_KEY: ${GIT_CTX_MASTER_KEY:?set 32-byte GIT_CTX_MASTER_KEY}
-      GIT_CTX_BOOTSTRAP_ADMIN: ${GIT_CTX_BOOTSTRAP_ADMIN:-}
 volumes:
   postgres-data:
   backup-data:

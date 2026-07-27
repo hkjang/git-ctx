@@ -1,15 +1,15 @@
 # 오프라인 Docker 이미지 배포
 
-GitHub Release의 `git-ctx-v0.3.0-linux-amd64.tar.gz`는 네트워크가 없는 Linux
+GitHub Release의 `git-ctx-v0.4.0-linux-amd64.tar.gz`는 네트워크가 없는 Linux
 AMD64 환경으로 반입할 수 있는 Docker/OCI 이미지 보관 파일이다. 같은 릴리스의
 `.sha256` 파일과 함께 내려받는다.
 
 ## 무결성 확인과 Docker 로드
 
 ```bash
-sha256sum -c git-ctx-v0.3.0-linux-amd64.tar.gz.sha256
-gzip -dc git-ctx-v0.3.0-linux-amd64.tar.gz | docker load
-docker image inspect git-ctx:v0.3.0 --format '{{.Id}} {{.Architecture}} {{.Os}}'
+sha256sum -c git-ctx-v0.4.0-linux-amd64.tar.gz.sha256
+gzip -dc git-ctx-v0.4.0-linux-amd64.tar.gz | docker load
+docker image inspect git-ctx:v0.4.0 --format '{{.Id}} {{.Architecture}} {{.Os}}'
 ```
 
 애플리케이션 이미지만 포함되므로 PostgreSQL, Keycloak과 사내 CA는 대상 망에서
@@ -19,19 +19,17 @@ docker image inspect git-ctx:v0.3.0 --format '{{.Id}} {{.Architecture}} {{.Os}}'
 docker run -d --name git-ctx \
   --restart unless-stopped \
   -p 4747:4747 \
-  -e GIT_CTX_DB_DRIVER=postgres \
+  -v git-ctx-backups:/var/lib/git-ctx/backups \
   -e 'GIT_CTX_DB_DSN=postgres://gitctx:password@postgres.company:5432/gitctx?sslmode=require' \
-  -e GIT_CTX_API_KEY_PEPPER='32자 이상의 별도 난수' \
-  -e GIT_CTX_MASTER_KEY='정확히 32자인 별도 암호화 키' \
-  -e GIT_CTX_BOOTSTRAP_ADMIN='최초 설정 후 제거할 복구 토큰' \
-  git-ctx:v0.3.0
+  git-ctx:v0.4.0
 
 curl --fail http://127.0.0.1:4747/readyz
 ```
 
-운영 Secret을 shell history에 남기지 않도록 실제 배포에서는 `--env-file` 대신
-Docker Secret, Kubernetes Secret 또는 사내 Vault/KMS를 사용한다. Bootstrap
-관리자 값은 Keycloak 로그인을 검증한 뒤 컨테이너 설정에서 제거한다.
+운영 DSN을 shell history에 남기지 않도록 실제 배포에서는 Docker Secret,
+Kubernetes Secret 또는 사내 Secret Store를 사용한다. 최초 관리자 토큰은 컨테이너의
+`/var/lib/git-ctx/backups/bootstrap-admin.token`에서 한 번 읽으며 Keycloak 설정 저장
+직후 자동 폐기된다.
 
 ## Kubernetes/containerd 반입
 
@@ -39,14 +37,15 @@ Docker Secret, Kubernetes Secret 또는 사내 Vault/KMS를 사용한다. Bootst
 같다.
 
 ```bash
-gzip -dc git-ctx-v0.3.0-linux-amd64.tar.gz \
+gzip -dc git-ctx-v0.4.0-linux-amd64.tar.gz \
   | sudo ctr --namespace k8s.io images import -
 sudo ctr --namespace k8s.io images list | grep git-ctx
 ```
 
-`deploy/kubernetes/base/deployment.yaml`의 이미지 이름을 `git-ctx:v0.3.0` 또는
+`deploy/kubernetes/base/deployment.yaml`의 이미지 이름을 `git-ctx:v0.4.0` 또는
 사내 registry 주소로 바꾸고 `imagePullPolicy: IfNotPresent`를 유지한다. Bootstrap
-Secret, 사내 CA, 실제 egress CIDR과 Ingress는 환경 overlay에서 제공한다.
+DSN Secret, 실제 egress CIDR과 Ingress는 환경 overlay에서 제공한다. 사내 CA와
+연동 URL은 관리자 화면에서 연결 시험 후 저장한다.
 
 ## 업그레이드와 복구
 

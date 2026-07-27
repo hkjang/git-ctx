@@ -25,6 +25,8 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - SQLite/PostgreSQL 공통 암호화 예약 백업, 보존 및 트랜잭션 복원 UI/API
 - BM25와 256차원 로컬 벡터 결합 검색, 색인 전 Secret 차단·마스킹
 - ACL 필터 이후 사내 `/v1/rerank` 재순위화와 장애 시 하이브리드 점수 fallback
+- 모델 미설정 시 ACL 선검사 후 Bitbucket/GitLab 서버측 Query Search API 모드
+- ACL 적용 정답 데이터셋 기반 Recall@K·MRR·nDCG@K 검색 품질 회귀 게이트
 - 버전형 DB migration 및 PostgreSQL 다중 Worker `SKIP LOCKED`
 - Docker 및 PostgreSQL Compose 배포
 
@@ -33,26 +35,24 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 SQLite는 개발·평가용이며 운영 기본은 PostgreSQL입니다.
 
 ```bash
-export GIT_CTX_DB_DRIVER=sqlite
 export GIT_CTX_DB_DSN='file:git-ctx.db?_foreign_keys=on&_busy_timeout=5000'
-export GIT_CTX_API_KEY_PEPPER='change-this-to-a-long-random-pepper'
-export GIT_CTX_MASTER_KEY='0123456789abcdef0123456789abcdef'
-export GIT_CTX_BOOTSTRAP_ADMIN='short-lived-bootstrap-token'
 go run ./cmd/git-ctx
 ```
 
-Bootstrap 토큰은 초기 Keycloak 설정을 위한 제한적 수단입니다. 운영 SSO 검증을
-활성화한 뒤 제거해야 합니다.
+실제 Bootstrap 입력은 `GIT_CTX_DB_DSN` 하나뿐이며 driver는 DSN에서 자동 판별됩니다.
+Keycloak이 설정되지 않은 최초 기동에는 `backups/bootstrap-admin.token`이 권한 0600으로
+한 번 생성됩니다. 화면의 `최초 관리자 설정`에서 입력하면 되고 Keycloak 설정 저장
+직후 서버가 토큰과 파일을 폐기합니다.
 
 ```bash
-curl -H 'Authorization: Bearer short-lived-bootstrap-token' \
+curl -H "Authorization: Bearer $(cat backups/bootstrap-admin.token)" \
   http://localhost:4747/api/v1/admin/settings
 ```
 
 Keycloak 설정은 먼저 Discovery 연결을 시험한 뒤 저장됩니다.
 
 ```bash
-curl -X POST -H 'Authorization: Bearer short-lived-bootstrap-token' \
+curl -X POST -H "Authorization: Bearer $(cat backups/bootstrap-admin.token)" \
   -H 'Content-Type: application/json' \
   -d '{"issuerUrl":"https://sso.company/realms/company","clientId":"git-ctx",
        "bitbucketUserSlugClaim":"bitbucket_user_slug",
@@ -65,12 +65,12 @@ curl -X POST -H 'Authorization: Bearer short-lived-bootstrap-token' \
 PostgreSQL은 `GIT_CTX_DB_DSN` 하나만으로 연결할 수 있습니다.
 
 ```bash
-GIT_CTX_DB_DRIVER=postgres
 GIT_CTX_DB_DSN='postgres://gitctx:password@db:5432/gitctx?sslmode=require'
 ```
 
-마이그레이션은 시작할 때 멱등 실행됩니다. 비밀 설정은
-`GIT_CTX_MASTER_KEY`로 AES-256-GCM 암호화됩니다.
+마이그레이션은 시작할 때 멱등 실행됩니다. 설정 암호화 키와 API-key pepper는 DSN을
+도메인 분리해 파생하므로 별도 Bootstrap 환경변수가 필요하지 않습니다. 암호화된 DB와
+백업을 복원할 때는 원래 DSN 문자열이 필요하므로 DSN은 Secret Store에서 별도 보관합니다.
 
 상세 설계와 구현 상태는 [docs/requirements.md](docs/requirements.md) 및
 [docs/operations.md](docs/operations.md)를 참고하십시오. 구현 증거, 미구현 범위와

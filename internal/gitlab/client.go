@@ -156,6 +156,35 @@ func (c *Client) GetFile(ctx context.Context, r source.RepositoryRef, ref, fileP
 	q := url.Values{"ref": []string{ref}}
 	return c.bytes(ctx, c.repo(r)+"/repository/files/"+escape(filePath)+"/raw", q)
 }
+func (c *Client) SearchQuery(ctx context.Context, r source.RepositoryRef, ref, query string, limit int) ([]source.QueryResult, error) {
+	if limit < 1 || limit > 50 {
+		limit = 8
+	}
+	var items []struct {
+		Path      string `json:"path"`
+		Data      string `json:"data"`
+		Ref       string `json:"ref"`
+		StartLine int    `json:"startline"`
+	}
+	params := url.Values{"scope": []string{"blobs"}, "search": []string{query}, "ref": []string{ref}, "per_page": []string{strconv.Itoa(limit)}}
+	if err := c.json(ctx, http.MethodGet, c.repo(r)+"/search", params, nil, &items); err != nil {
+		return nil, err
+	}
+	out := make([]source.QueryResult, 0, min(limit, len(items)))
+	seen := map[string]bool{}
+	for _, item := range items {
+		if item.Path == "" || seen[item.Path] {
+			continue
+		}
+		seen[item.Path] = true
+		start := max(1, item.StartLine)
+		out = append(out, source.QueryResult{Path: item.Path, Snippet: item.Data, CommitID: item.Ref, LineStart: start, LineEnd: start + max(0, strings.Count(item.Data, "\n"))})
+		if len(out) == limit {
+			break
+		}
+	}
+	return out, nil
+}
 func (c *Client) GetPermissions(ctx context.Context, r source.RepositoryRef) ([]source.Permission, error) {
 	var members []struct {
 		ID          int64

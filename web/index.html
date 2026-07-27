@@ -139,8 +139,10 @@
           <div class="admin-editor">
             <label>설정 영역<select id="category"></select></label
             ><label
-              >변경 사유<input id="reason" placeholder="변경 사유" /></label
-            ><label class="wide"
+              >변경 사유<input id="reason" placeholder="변경 사유"
+            /></label>
+            <div id="setting-fields" class="form-row wide"></div>
+            <label class="wide"
               >JSON 설정<textarea
                 id="setting-json"
                 rows="16"
@@ -151,7 +153,7 @@
             </label>
             <div>
               <button id="load-setting">불러오기</button>
-              <button id="test-keycloak">Keycloak 연결 시험</button>
+              <button id="test-connection">연결 테스트·검증</button>
               <button id="preview-keycloak">Claim·역할 미리보기</button>
               <button id="save-setting">저장</button>
               <button id="rollback-setting" class="danger">
@@ -209,6 +211,86 @@
             <button id="create-backup">지금 백업</button>
           </div>
           <div id="backups" class="table-wrap"></div>
+        </div>
+        <div id="quality-admin-section" hidden>
+          <hr />
+          <div class="section-title">
+            <div>
+              <h2>검색 품질 벤치마크</h2>
+              <p>
+                정답 파일을 기준으로 Recall@K, MRR, nDCG@K 회귀를 검사합니다.
+              </p>
+            </div>
+            <button id="refresh-quality">새로고침</button>
+          </div>
+          <div id="quality-write-section" class="form-row">
+            <label
+              >이름<input id="quality-name" placeholder="GPU API 검색"
+            /></label>
+            <label
+              >Library ID<input
+                id="quality-library"
+                placeholder="/kcb/clustara/main"
+            /></label>
+            <label class="wide"
+              >질의<input id="quality-query" placeholder="Pod별 GPU 사용량 API"
+            /></label>
+            <label
+              >ACL Principal<input
+                id="quality-principals"
+                placeholder="alice,group:platform"
+            /></label>
+            <label
+              >정답 파일<input
+                id="quality-sources"
+                placeholder="docs/gpu.md,internal/gpu.go"
+            /></label>
+            <div><button id="create-quality-case">평가 사례 추가</button></div>
+          </div>
+          <h3>평가 사례</h3>
+          <div id="quality-cases" class="table-wrap"></div>
+          <div id="quality-run-controls" class="form-row">
+            <label
+              >Top K<input
+                id="quality-top-k"
+                type="number"
+                min="1"
+                max="50"
+                value="8"
+            /></label>
+            <label
+              >최소 Recall<input
+                id="quality-min-recall"
+                type="number"
+                min="0"
+                max="1"
+                step="0.01"
+                value="0.8"
+            /></label>
+            <label
+              >최소 MRR<input
+                id="quality-min-mrr"
+                type="number"
+                min="0"
+                max="1"
+                step="0.01"
+                value="0.7"
+            /></label>
+            <label
+              >최소 nDCG<input
+                id="quality-min-ndcg"
+                type="number"
+                min="0"
+                max="1"
+                step="0.01"
+                value="0.7"
+            /></label>
+            <div><button id="run-quality">벤치마크 실행</button></div>
+          </div>
+          <h3>실행 이력</h3>
+          <div id="quality-runs" class="table-wrap"></div>
+          <h3>사례별 결과</h3>
+          <div id="quality-results" class="table-wrap"></div>
         </div>
         <div id="security-admin-section" hidden>
           <h2>보안</h2>

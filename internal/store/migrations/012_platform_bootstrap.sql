@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS platform_bootstrap (
+  id TEXT PRIMARY KEY,
+  token_encrypted BLOB NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

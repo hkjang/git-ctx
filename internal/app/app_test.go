@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,7 +28,7 @@ func TestHTTPTraceContextPropagation(t *testing.T) {
 	defer collector.Close()
 	a, err := New(context.Background(), config.Config{
 		DatabaseDriver: "sqlite", DatabaseDSN: "file:http-trace?mode=memory&cache=shared&_foreign_keys=on",
-		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), PublicURL: "http://localhost:4747",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -47,6 +50,49 @@ func TestHTTPTraceContextPropagation(t *testing.T) {
 	defer cancel()
 	if err = a.traces.ForceFlush(ctx); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOneTimeBootstrapTokenGeneratedAndRemoved(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "backups")
+	baseConfig := config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "bootstrap.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), PublicURL: "http://localhost:4747", BackupDirectory: directory,
+	}
+	a, err := New(context.Background(), baseConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	required, path := a.bootstrapStatus()
+	if !required || path != filepath.Join(directory, "bootstrap-admin.token") {
+		t.Fatalf("required=%v path=%q", required, path)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("mode=%v", info.Mode().Perm())
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || strings.TrimSpace(string(raw)) != a.bootstrapAdminToken() {
+		t.Fatalf("token file mismatch err=%v", err)
+	}
+	b, err := New(context.Background(), baseConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if b.bootstrapAdminToken() != a.bootstrapAdminToken() || !b.validBootstrapToken(context.Background(), strings.TrimSpace(string(raw))) {
+		t.Fatal("multiple instances did not share the bootstrap token")
+	}
+	a.disableBootstrapAdmin()
+	if b.validBootstrapToken(context.Background(), strings.TrimSpace(string(raw))) {
+		t.Fatal("bootstrap revocation did not propagate to another instance")
+	}
+	if _, err = os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("token file remains: %v", err)
 	}
 }
 
@@ -105,6 +151,92 @@ func TestAdministrativeBackupRestoreFlow(t *testing.T) {
 }
 
 func magicForTest() string { return "GCTXBACKUP1\n" }
+
+func TestAdministrativeSearchQualityBenchmarkFlow(t *testing.T) {
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "quality-api.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(t.TempDir(), "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	_, _ = a.store.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r1','KCB','demo','Demo','bitbucket','1','/kcb/demo','main')`)
+	_, _ = a.store.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r1','alice','read')`)
+	_, _ = a.store.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding) VALUES('c1','r1','main','abc','docs/gpu.md',1,5,'GPU API','document','Pod GPU usage endpoint','hash',x'')`)
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer bootstrap")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	created := request(http.MethodPost, "/api/v1/admin/quality/cases", `{"name":"GPU","libraryId":"/kcb/demo/main","query":"Pod GPU usage","principals":["alice"],"relevantSources":["docs/gpu.md"]}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("case status=%d body=%s", created.Code, created.Body.String())
+	}
+	run := request(http.MethodPost, "/api/v1/admin/quality/runs", `{"topK":8,"minimumRecall":0.8,"minimumMrr":0.8,"minimumNdcg":0.8}`)
+	if run.Code != http.StatusCreated {
+		t.Fatalf("run status=%d body=%s", run.Code, run.Body.String())
+	}
+	var result struct {
+		ID     string  `json:"id"`
+		Status string  `json:"status"`
+		Recall float64 `json:"recallAtK"`
+	}
+	if err = json.Unmarshal(run.Body.Bytes(), &result); err != nil || result.ID == "" || result.Status != "passed" || result.Recall != 1 {
+		t.Fatalf("run=%#v err=%v", result, err)
+	}
+	details := request(http.MethodGet, "/api/v1/admin/quality/runs/"+result.ID+"/results", "")
+	if details.Code != http.StatusOK || !strings.Contains(details.Body.String(), "docs/gpu.md") {
+		t.Fatalf("details status=%d body=%s", details.Code, details.Body.String())
+	}
+	var audits int
+	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE action='quality.run' AND outcome='passed'`).Scan(&audits); err != nil || audits != 1 {
+		t.Fatalf("audits=%d err=%v", audits, err)
+	}
+}
+
+func TestAdministrativeModelConnectionTestCallsEmbeddingAndReranker(t *testing.T) {
+	var embeddingCalls, rerankCalls int
+	modelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer model-secret" {
+			t.Errorf("missing model authorization")
+		}
+		switch r.URL.Path {
+		case "/v1/embeddings":
+			embeddingCalls++
+			_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
+		case "/v1/rerank":
+			rerankCalls++
+			_, _ = w.Write([]byte(`{"results":[{"index":0,"relevance_score":0.9},{"index":1,"relevance_score":0.1}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer modelServer.Close()
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:model-test-api?mode=memory&cache=shared&_foreign_keys=on&_busy_timeout=5000",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(t.TempDir(), "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	body := fmt.Sprintf(`{"provider":"openai-compatible","baseUrl":%q,"model":"embed","apiKey":"model-secret","rerankerEnabled":true,"rerankerProvider":"openai-compatible","rerankerBaseUrl":%q,"rerankerModel":"rerank","rerankerApiKey":"model-secret","tlsVerify":true}`, modelServer.URL, modelServer.URL)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/settings/model/test", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer bootstrap")
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || embeddingCalls != 1 || rerankCalls != 1 || !strings.Contains(rec.Body.String(), `"status":"verified"`) {
+		t.Fatalf("status=%d body=%s embedding=%d rerank=%d", rec.Code, rec.Body.String(), embeddingCalls, rerankCalls)
+	}
+	var audits int
+	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE action='settings.test' AND resource_type='model' AND outcome='success'`).Scan(&audits); err != nil || audits != 1 {
+		t.Fatalf("audits=%d err=%v", audits, err)
+	}
+}
 
 func TestAdministrativeRoleMatrix(t *testing.T) {
 	principal := func(role string) auth.Principal { return auth.Principal{Roles: []string{role}} }
@@ -177,7 +309,7 @@ func TestPublicUIConfigExposesOnlyBranding(t *testing.T) {
 	if getResult.Code != http.StatusOK || strings.Contains(getResult.Body.String(), "must-not-leak") || strings.Contains(getResult.Body.String(), "apiToken") {
 		t.Fatalf("unsafe public config status=%d body=%s", getResult.Code, getResult.Body.String())
 	}
-	var got map[string]string
+	var got map[string]any
 	if err = json.Unmarshal(getResult.Body.Bytes(), &got); err != nil || got["serviceName"] != "Internal Context" || got["notice"] != "점검 공지" {
 		t.Fatalf("public config=%#v err=%v", got, err)
 	}
@@ -242,7 +374,7 @@ func TestSettingMaskPreservationAndRollback(t *testing.T) {
 }
 
 func TestForwardedIPRequiresConfiguredTrustedProxy(t *testing.T) {
-	a, err := New(context.Background(), config.Config{DatabaseDriver: "sqlite", DatabaseDSN: "file:trusted-proxy?mode=memory&cache=shared&_foreign_keys=on", KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), PublicURL: "https://git-ctx.company"})
+	a, err := New(context.Background(), config.Config{DatabaseDriver: "sqlite", DatabaseDSN: "file:trusted-proxy?mode=memory&cache=shared&_foreign_keys=on", KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "https://git-ctx.company"})
 	if err != nil {
 		t.Fatal(err)
 	}

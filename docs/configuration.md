@@ -176,10 +176,50 @@ attribute에 기록하지 않는다.
 설정에만 보관된다. 평문 HTTP endpoint는 기본 거부한다. 로컬 Collector 시험에서만
 `allowInsecureLocalhost: true`로 localhost HTTP를 허용할 수 있다.
 
+## 관리자 연동 설정과 검증
+
+DB DSN을 제외한 운영 설정은 관리자 화면에서 입력·시험·저장·버전 복구한다. Keycloak,
+Bitbucket, GitLab과 모델 영역은 URL, Client/Token/API Key, 모델, TLS, 사내 CA,
+Proxy와 Timeout 전용 필드를 제공하고 알 수 없는 확장 필드는 고급 JSON 편집기에
+보존한다. Secret/PAT/Token/API Key는 암호화 저장되고 재조회 시 `********`로
+마스킹되며, 마스킹 값을 그대로 저장하거나 시험하면 이전 암호문 값을 재사용한다.
+
+`연결 테스트·검증`은 저장하지 않고 실제 호출을 수행한다.
+
+- Keycloak: OIDC Discovery와 JWKS/endpoint/issuer 계약
+- Bitbucket 6.9.1: 인증된 프로젝트 REST 조회
+- GitLab: 인증된 Group API 조회
+- Embedding: OpenAI 호환 `/v1/embeddings` 실제 벡터 응답
+- Reranker: `/v1/rerank` 문서 index와 score 완전성
+- OpenTelemetry: 실제 시험 span export
+- Backup: 전용 경로 생성·쓰기와 정책 검증
+
+저장과 rollback도 동일 검증을 다시 통과해야 한다. 시험 결과는 성공·실패 모두 감사
+로그에 남되 입력 Secret과 응답 원문은 기록하지 않는다.
+
+## 모델 미설정 검색 모드
+
+`model.provider`가 없거나 `local`이면 벡터와 Reranker 점수를 사용하지 않는다. 저장소
+ACL과 Library ID를 먼저 검증한 다음 GitLab은 프로젝트 `/search?scope=blobs`,
+Bitbucket Server 6.9.1은 `/rest/search/latest/search`를 해당 저장소로 제한해 호출한다.
+서버측 검색이 결과를 반환하면 Context7 형식 Markdown과 원문 출처로 조립한다. 검색
+API 결과 경로가 현재 ref의 승인된 색인에 존재할 때만 채택하고, 반환 본문은 Secret
+Scan·경로 정책을 통과한 로컬 청크로 대체한다. 검색 API가 비활성·장애이면 로컬
+색인의 BM25 키워드 검색으로 Fail Safe fallback한다.
+Bitbucket code search는 기본 브랜치 계약이므로 비기본 branch/tag 질의는 버전별 로컬
+색인만 사용한다.
+
+## 검색 품질 회귀 게이트
+
+`search-admin`은 Library ID, 질의, 시험 ACL principal과 정답 파일 경로를 등록하고
+현재 운영 검색을 실행한다. 문서 원문은 결과 DB에 저장하지 않고 순위화된 상대 경로,
+Recall@K, reciprocal rank와 nDCG@K만 보존한다. 하나 이상의 질의 오류 또는 평균
+지표가 실행 임계값보다 낮으면 상태는 `regressed`다.
+
 ## 백업
 
 애플리케이션 백업은 SQLite와 PostgreSQL에서 동일한 논리 형식으로 생성되고 gzip 뒤
-bootstrap `GIT_CTX_MASTER_KEY`에서 파생한 AES-256-GCM 키로 인증 암호화된다. 여러
+DSN에서 도메인 분리해 파생한 AES-256-GCM 키로 인증 암호화된다. 여러
 Pod가 같은 DB와 RWX 볼륨을 사용할 때도 schedule slot 고유 제약으로 한 번만 실행된다.
 
 ```json

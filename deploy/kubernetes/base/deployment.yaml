@@ -24,18 +24,18 @@ spec:
       serviceAccountName: git-ctx
       securityContext:
         runAsNonRoot: true
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: git-ctx
-          image: git-ctx:0.3.0
+          image: git-ctx:0.4.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 4747
           envFrom:
-            - configMapRef:
-                name: git-ctx
             - secretRef:
                 name: git-ctx-bootstrap
           readinessProbe:
