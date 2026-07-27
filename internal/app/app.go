@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -279,6 +280,10 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/admin/settings/keycloak/preview", a.settingsAuthorize(http.HandlerFunc(a.previewKeycloak)))
 	a.mux.Handle("GET /api/v1/admin/settings/keycloak/status", a.settingsAuthorize(http.HandlerFunc(a.keycloakStatus)))
 	a.mux.Handle("GET /api/v1/admin/audit-logs", a.authorize(http.HandlerFunc(a.auditLogs), "auditor", "security-admin"))
+	a.mux.Handle("GET /api/v1/admin/users", a.authorize(http.HandlerFunc(a.adminUsers), "platform-admin"))
+	a.mux.Handle("POST /api/v1/admin/users", a.authorize(http.HandlerFunc(a.createAdminUser), "platform-admin"))
+	a.mux.Handle("PUT /api/v1/admin/users/{id}", a.authorize(http.HandlerFunc(a.updateAdminUser), "platform-admin"))
+	a.mux.Handle("DELETE /api/v1/admin/users/{id}", a.authorize(http.HandlerFunc(a.deleteAdminUser), "platform-admin"))
 	a.mux.Handle("GET /api/v1/admin/api-keys", a.authorize(http.HandlerFunc(a.adminAPIKeys), "security-admin"))
 	a.mux.Handle("POST /api/v1/admin/api-keys/{id}/revoke", a.authorize(http.HandlerFunc(a.adminRevokeKey), "security-admin"))
 	a.mux.Handle("GET /api/v1/admin/secrets", a.authorize(http.HandlerFunc(a.listManagedSecrets), "security-admin"))
@@ -530,8 +535,25 @@ func (a *App) callback(w http.ResponseWriter, r *http.Request) {
 		problem(w, 401, "invalid_id_token", "Keycloak ID token validation failed")
 		return
 	}
+	if accessIdentity, accessErr := a.oidc.VerifyAccessToken(ctx, token.AccessToken); accessErr == nil {
+		for _, role := range accessIdentity.Roles {
+			if !slices.Contains(identity.Roles, role) {
+				identity.Roles = append(identity.Roles, role)
+			}
+		}
+		if len(accessIdentity.Groups) > 0 {
+			identity.Groups = accessIdentity.Groups
+		}
+		if len(accessIdentity.ACLGroups) > 0 {
+			identity.ACLGroups = accessIdentity.ACLGroups
+		}
+	}
 	userID, err := a.upsertIdentity(ctx, identity)
 	if err != nil {
+		if errors.Is(err, errUserDisabled) {
+			problem(w, 403, "user_disabled", "This user account is disabled")
+			return
+		}
 		problem(w, 500, "identity_sync_failed", "Unable to synchronize authenticated identity")
 		return
 	}
@@ -1588,12 +1610,15 @@ func validatePublicAssetURL(value string) error {
 }
 func (a *App) publicUIConfig(w http.ResponseWriter, r *http.Request) {
 	bootstrapRequired, bootstrapPath := a.bootstrapStatus()
+	var ssoConfigured int
+	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM system_settings WHERE category='keycloak'`).Scan(&ssoConfigured)
 	out := map[string]any{
 		"serviceName": "git-ctx", "tagline": "사내 개발 지식 MCP",
 		"logoUrl": "/logo.svg", "faviconUrl": "/favicon.svg", "notice": "",
 		"version":            version.Version,
 		"bootstrapRequired":  bootstrapRequired,
 		"bootstrapTokenFile": bootstrapPath,
+		"ssoConfigured":      ssoConfigured > 0,
 	}
 	if settings, err := a.loadSettingMap(r.Context(), "ui"); err == nil {
 		for _, key := range []string{"serviceName", "tagline", "logoUrl", "faviconUrl", "notice"} {
@@ -1986,6 +2011,193 @@ func (a *App) auditLogs(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]any{"at": t, "actor": actor, "action": action, "resourceType": rt, "resourceId": rid, "outcome": outcome, "ip": ip})
 	}
 	jsonOut(w, 200, out)
+}
+
+var platformRoles = []string{
+	"platform-admin", "security-admin", "mcp-admin", "source-admin",
+	"search-admin", "auditor", "developer", "service-account", "readonly-operator",
+}
+var errUserDisabled = errors.New("user is disabled")
+
+type adminUserInput struct {
+	Subject  string   `json:"subject"`
+	Username string   `json:"username"`
+	Email    string   `json:"email"`
+	Status   string   `json:"status"`
+	Roles    []string `json:"roles"`
+}
+
+func (a *App) adminUsers(w http.ResponseWriter, r *http.Request) {
+	rows, err := a.store.DB.QueryContext(r.Context(), `SELECT id,subject,username,email,status,created_at FROM users WHERE id <> 'bootstrap-admin' ORDER BY username`)
+	if err != nil {
+		problem(w, 500, "internal_error", err.Error())
+		return
+	}
+	type listedUser struct {
+		id, subject, username, email, status string
+		created                              time.Time
+	}
+	users := make([]listedUser, 0)
+	for rows.Next() {
+		var user listedUser
+		if err = rows.Scan(&user.id, &user.subject, &user.username, &user.email, &user.status, &user.created); err != nil {
+			rows.Close()
+			problem(w, 500, "internal_error", err.Error())
+			return
+		}
+		users = append(users, user)
+	}
+	if err = rows.Close(); err != nil {
+		problem(w, 500, "internal_error", err.Error())
+		return
+	}
+	out := make([]map[string]any, 0, len(users))
+	for _, user := range users {
+		roles, roleErr := a.userRoles(r.Context(), user.id)
+		if roleErr != nil {
+			problem(w, 500, "internal_error", roleErr.Error())
+			return
+		}
+		out = append(out, map[string]any{"id": user.id, "subject": user.subject, "username": user.username, "email": user.email, "status": user.status, "roles": roles, "createdAt": user.created})
+	}
+	jsonOut(w, 200, map[string]any{"users": out, "roles": platformRoles})
+}
+
+func validateAdminUserInput(in *adminUserInput, requireSubject bool) error {
+	in.Subject, in.Username, in.Email, in.Status = strings.TrimSpace(in.Subject), strings.TrimSpace(in.Username), strings.TrimSpace(in.Email), strings.TrimSpace(in.Status)
+	if in.Username == "" || (requireSubject && in.Subject == "") {
+		return errors.New("subject and username are required")
+	}
+	if len(in.Username) > 200 || len(in.Subject) > 500 || len(in.Email) > 320 {
+		return errors.New("user field is too long")
+	}
+	if in.Status == "" {
+		in.Status = "active"
+	}
+	if in.Status != "active" && in.Status != "disabled" {
+		return errors.New("status must be active or disabled")
+	}
+	uniqueRoles := make([]string, 0, len(in.Roles))
+	for _, role := range in.Roles {
+		if !slices.Contains(platformRoles, role) {
+			return fmt.Errorf("unsupported role: %s", role)
+		}
+		if !slices.Contains(uniqueRoles, role) {
+			uniqueRoles = append(uniqueRoles, role)
+		}
+	}
+	in.Roles = uniqueRoles
+	if len(in.Roles) == 0 {
+		in.Roles = []string{"developer"}
+	}
+	return nil
+}
+
+func (a *App) createAdminUser(w http.ResponseWriter, r *http.Request) {
+	var in adminUserInput
+	if decode(r, &in) != nil || validateAdminUserInput(&in, true) != nil {
+		problem(w, 400, "invalid_user", "Subject, username, status, and roles must be valid")
+		return
+	}
+	id, err := randomToken(18)
+	if err != nil {
+		problem(w, 500, "internal_error", err.Error())
+		return
+	}
+	if err = a.writeAdminUser(r.Context(), id, in, true); err != nil {
+		problem(w, 409, "user_create_failed", "Subject must be unique and roles must be valid")
+		return
+	}
+	p, _ := auth.FromContext(r.Context())
+	a.audit(r, p, "user.create", "user", id, "success", map[string]any{"roles": in.Roles, "status": in.Status})
+	jsonOut(w, 201, map[string]any{"id": id})
+}
+
+func (a *App) updateAdminUser(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var in adminUserInput
+	if id == "" || decode(r, &in) != nil || validateAdminUserInput(&in, false) != nil {
+		problem(w, 400, "invalid_user", "Username, status, and roles must be valid")
+		return
+	}
+	p, _ := auth.FromContext(r.Context())
+	if id == p.UserID && (in.Status != "active" || !slices.Contains(in.Roles, "platform-admin")) {
+		problem(w, 409, "self_lockout", "You cannot disable yourself or remove your own platform-admin role")
+		return
+	}
+	if err := a.writeAdminUser(r.Context(), id, in, false); err != nil {
+		problem(w, 404, "user_not_found", "User was not found")
+		return
+	}
+	a.audit(r, p, "user.update", "user", id, "success", map[string]any{"roles": in.Roles, "status": in.Status})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) writeAdminUser(ctx context.Context, id string, in adminUserInput, create bool) error {
+	tx, err := a.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if create {
+		_, err = tx.ExecContext(ctx, a.store.Rebind(`INSERT INTO users(id,subject,username,email,status,roles_managed) VALUES(?,?,?,?,?,1)`), id, in.Subject, in.Username, in.Email, in.Status)
+	} else {
+		result, updateErr := tx.ExecContext(ctx, a.store.Rebind(`UPDATE users SET username=?,email=?,status=?,roles_managed=1 WHERE id=? AND id <> 'bootstrap-admin'`), in.Username, in.Email, in.Status, id)
+		err = updateErr
+		if err == nil {
+			if affected, _ := result.RowsAffected(); affected == 0 {
+				return sql.ErrNoRows
+			}
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, a.store.Rebind(`DELETE FROM user_roles WHERE user_id=?`), id); err != nil {
+		return err
+	}
+	for _, role := range in.Roles {
+		if _, err = tx.ExecContext(ctx, a.store.Rebind(`INSERT INTO user_roles(user_id,role_code) VALUES(?,?)`), id, role); err != nil {
+			return err
+		}
+	}
+	if in.Status != "active" {
+		_, _ = tx.ExecContext(ctx, a.store.Rebind(`DELETE FROM user_sessions WHERE user_id=?`), id)
+		_, _ = tx.ExecContext(ctx, a.store.Rebind(`UPDATE api_keys SET revoked_at=CURRENT_TIMESTAMP WHERE user_id=? AND revoked_at IS NULL`), id)
+	}
+	return tx.Commit()
+}
+
+func (a *App) deleteAdminUser(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	p, _ := auth.FromContext(r.Context())
+	if id == "" || id == p.UserID {
+		problem(w, 409, "self_lockout", "You cannot delete your own administrator account")
+		return
+	}
+	tx, err := a.store.DB.BeginTx(r.Context(), nil)
+	if err != nil {
+		problem(w, 500, "internal_error", err.Error())
+		return
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(r.Context(), a.store.Rebind(`UPDATE users SET status='deleted' WHERE id=? AND id <> 'bootstrap-admin'`), id)
+	if err != nil {
+		problem(w, 500, "internal_error", err.Error())
+		return
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		problem(w, 404, "user_not_found", "User was not found")
+		return
+	}
+	_, _ = tx.ExecContext(r.Context(), a.store.Rebind(`DELETE FROM user_sessions WHERE user_id=?`), id)
+	_, _ = tx.ExecContext(r.Context(), a.store.Rebind(`UPDATE api_keys SET revoked_at=CURRENT_TIMESTAMP WHERE user_id=? AND revoked_at IS NULL`), id)
+	if err = tx.Commit(); err != nil {
+		problem(w, 500, "internal_error", err.Error())
+		return
+	}
+	a.audit(r, p, "user.delete", "user", id, "success", nil)
+	w.WriteHeader(http.StatusNoContent)
 }
 func (a *App) adminAPIKeys(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.store.DB.QueryContext(r.Context(), `SELECT k.id,u.username,k.name,k.prefix,k.scopes,k.expires_at,k.disabled_at,k.revoked_at,k.last_used_at,k.created_at FROM api_keys k JOIN users u ON u.id=k.user_id ORDER BY k.created_at DESC LIMIT 1000`)
@@ -2803,20 +3015,30 @@ func (a *App) upsertIdentity(ctx context.Context, identity auth.Identity) (strin
 		return "", err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, a.store.Rebind(`INSERT INTO users(id,subject,username,email,status) VALUES(?,?,?,?,'active') ON CONFLICT(subject) DO UPDATE SET username=excluded.username,email=excluded.email,status='active'`), userID, identity.Subject, identity.Username, identity.Email)
+	_, err = tx.ExecContext(ctx, a.store.Rebind(`INSERT INTO users(id,subject,username,email,status) VALUES(?,?,?,?,'active') ON CONFLICT(subject) DO UPDATE SET username=excluded.username,email=excluded.email`), userID, identity.Subject, identity.Username, identity.Email)
 	if err != nil {
 		return "", err
+	}
+	var status string
+	var rolesManaged int
+	if err = tx.QueryRowContext(ctx, a.store.Rebind(`SELECT id,status,roles_managed FROM users WHERE subject=?`), identity.Subject).Scan(&userID, &status, &rolesManaged); err != nil {
+		return "", err
+	}
+	if status != "active" {
+		return "", errUserDisabled
 	}
 	_, err = tx.ExecContext(ctx, a.store.Rebind(`INSERT INTO user_identities(user_id,bitbucket_user_slug,gitlab_user_id,bitbucket_groups,mapping_source,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET bitbucket_user_slug=excluded.bitbucket_user_slug,gitlab_user_id=excluded.gitlab_user_id,bitbucket_groups=excluded.bitbucket_groups,mapping_source=excluded.mapping_source,updated_at=excluded.updated_at`), userID, identity.BitbucketUserSlug, identity.GitLabUserID, strings.Join(identity.ACLGroups, ","), "keycloak-claims", time.Now().UTC())
 	if err != nil {
 		return "", err
 	}
-	if _, err = tx.ExecContext(ctx, a.store.Rebind(`DELETE FROM user_roles WHERE user_id=?`), userID); err != nil {
-		return "", err
-	}
-	for _, role := range identity.Roles {
-		if _, err = tx.ExecContext(ctx, a.store.Rebind(`INSERT INTO user_roles(user_id,role_code) VALUES(?,?) ON CONFLICT(user_id,role_code) DO NOTHING`), userID, role); err != nil {
+	if rolesManaged == 0 {
+		if _, err = tx.ExecContext(ctx, a.store.Rebind(`DELETE FROM user_roles WHERE user_id=?`), userID); err != nil {
 			return "", err
+		}
+		for _, role := range identity.Roles {
+			if _, err = tx.ExecContext(ctx, a.store.Rebind(`INSERT INTO user_roles(user_id,role_code) VALUES(?,?) ON CONFLICT(user_id,role_code) DO NOTHING`), userID, role); err != nil {
+				return "", err
+			}
 		}
 	}
 	return userID, tx.Commit()

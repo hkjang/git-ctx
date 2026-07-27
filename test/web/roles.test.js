@@ -34,6 +34,7 @@ assert.deepEqual(categoriesFor(categories, ["auditor"]), []);
 assert.deepEqual(categoriesFor(categories, ["platform-admin"]), categories);
 assert.deepEqual(capabilitiesFor(["readonly-operator"]), {
   platform: false,
+  users: false,
   settings: false,
   source: true,
   sourceWrite: false,
@@ -56,4 +57,5 @@ assert.equal(capabilitiesFor(["source-admin"]).sourceWrite, true);
 assert.equal(capabilitiesFor(["developer"]).settings, false);
 assert.equal(capabilitiesFor(["platform-admin"]).backupWrite, true);
 assert.equal(capabilitiesFor(["platform-admin"]).qualityWrite, true);
+assert.equal(capabilitiesFor(["platform-admin"]).users, true);
 console.log("role capability tests passed");

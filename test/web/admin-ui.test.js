@@ -25,6 +25,10 @@ for (const id of [
   "test-database",
   "migrate-database",
   "login-keycloak",
+  "bootstrap-login",
+  "users-admin-section",
+  "admin-user-form",
+  "admin-users",
 ]) {
   assert.match(html, new RegExp(`id=["']${id}["']`), `missing ${id}`);
 }
@@ -40,6 +44,7 @@ assert.match(script, /api\/v1\/admin\/database\/status/);
 assert.match(script, /api\/v1\/admin\/database\/\$\{action\}/);
 assert.match(script, /Keycloak Base URL/);
 assert.match(script, /loadCurrentSetting/);
+assert.match(script, /api\/v1\/admin\/users/);
 assert.doesNotMatch(html, /변경 사유|id=["']load-setting["']|id=["']rollback-setting["']/);
 const keycloakFields = script.slice(script.indexOf("keycloak: ["), script.indexOf("bitbucket: ["));
 for (const required of ["baseUrl", "realm", "clientId", "clientSecret"]) assert.match(keycloakFields, new RegExp(`"${required}"`));

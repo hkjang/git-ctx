@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.8.0
+  version: 0.8.1
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -266,6 +266,30 @@ paths:
       {
         summary: List all key metadata,
         responses: { "200": { description: Keys } },
+      }
+  /api/v1/admin/users:
+    get:
+      {
+        summary: List users and assignable platform roles,
+        responses: { "200": { description: User and role list } },
+      }
+    post:
+      {
+        summary: Pre-provision a Keycloak user by subject,
+        responses: { "201": { description: User created }, "409": { description: Duplicate subject } },
+      }
+  /api/v1/admin/users/{id}:
+    put:
+      {
+        summary: Update user profile status and platform roles,
+        parameters: [{ $ref: "#/components/parameters/Id" }],
+        responses: { "204": { description: User updated }, "409": { description: Self lockout prevented } },
+      }
+    delete:
+      {
+        summary: Soft-delete a user and revoke sessions and API keys,
+        parameters: [{ $ref: "#/components/parameters/Id" }],
+        responses: { "204": { description: User deleted } },
       }
   /api/v1/admin/api-keys/{id}/revoke:
     post:

@@ -171,7 +171,7 @@ const settingDefaults = (category) => {
   );
   return defaults;
 };
-let bootstrapInfo = { required: false, tokenFile: "" };
+let bootstrapInfo = { required: false, tokenFile: "", ssoConfigured: false };
 const api = async (url, options = {}) => {
   const bootstrapToken = sessionStorage.getItem("git_ctx_bootstrap_token");
   const response = await fetch(url, {
@@ -209,8 +209,13 @@ async function loadBranding() {
     bootstrapInfo = {
       required: Boolean(config.bootstrapRequired),
       tokenFile: config.bootstrapTokenFile || "backups/bootstrap-admin.token",
+      ssoConfigured: Boolean(config.ssoConfigured),
     };
-    if (bootstrapInfo.required) $("#login").textContent = "최초 관리자 설정";
+    $("#login").disabled = !bootstrapInfo.ssoConfigured;
+    $("#login").title = bootstrapInfo.ssoConfigured
+      ? "Keycloak SSO로 로그인"
+      : "관리자가 Keycloak SSO를 먼저 설정해야 합니다.";
+    $("#bootstrap-login").hidden = !bootstrapInfo.required;
     if (config.notice) {
       $("#service-notice").textContent = config.notice;
       $("#service-notice").hidden = false;
@@ -233,7 +238,9 @@ async function loadPublicStatus() {
   }
 }
 $("#login").onclick = () => {
-  if (!bootstrapInfo.required) return (location.href = "/auth/login");
+  if (bootstrapInfo.ssoConfigured) location.href = "/auth/login";
+};
+$("#bootstrap-login").onclick = () => {
   const token = prompt(
     `서버의 ${bootstrapInfo.tokenFile} 파일에 생성된 일회용 토큰을 입력하세요.`,
   );
@@ -267,6 +274,7 @@ async function boot() {
     $("#status").textContent = "Keycloak 인증이 완료되었습니다.";
     $("#status").classList.add("ok");
     $("#login").hidden = true;
+    $("#bootstrap-login").hidden = true;
     $("#logout").hidden = true;
     $("#profile-menu").hidden = false;
     $("#quick-nav-button").hidden = false;
@@ -382,6 +390,7 @@ function setupQuickNavigation(capabilities) {
   ];
   const admin = [
     ["관리자 설정", "관리자", "settings-admin", capabilities.settings],
+    ["사용자 관리", "관리자", "users-admin-section", capabilities.users],
     ["MCP 도구 운영", "관리자", "mcp-admin-section", capabilities.mcp],
     ["소스·색인", "관리자", "source-admin-section", capabilities.source],
     ["검색 품질", "관리자", "quality-admin-section", capabilities.quality],
@@ -652,6 +661,31 @@ function applyTLSFieldState() {
 function setupAdmin(roles, capabilities) {
   const allowedCategories = GitCtxRoles.categoriesFor(categories, [...roles]);
   $("#settings-admin").hidden = !capabilities.settings;
+  if (capabilities.users) {
+    $("#new-admin-user").onclick = () => openAdminUserForm();
+    $("#cancel-admin-user").onclick = () => ($("#admin-user-form").hidden = true);
+    $("#admin-user-form").onsubmit = async (event) => {
+      event.preventDefault();
+      const id = $("#admin-user-id").value;
+      const payload = {
+        subject: $("#admin-user-subject").value.trim(),
+        username: $("#admin-user-username").value.trim(),
+        email: $("#admin-user-email").value.trim(),
+        status: $("#admin-user-status").value,
+        roles: [...document.querySelectorAll('[name="admin-role"]:checked')].map((input) => input.value),
+      };
+      try {
+        await api(id ? `/api/v1/admin/users/${encodeURIComponent(id)}` : "/api/v1/admin/users", {
+          method: id ? "PUT" : "POST",
+          body: JSON.stringify(payload),
+        });
+        $("#admin-user-form").hidden = true;
+        await refreshAdminUsers();
+      } catch (error) {
+        showAdmin(error.message, false);
+      }
+    };
+  }
   if (!capabilities.settings) return;
   $("#category").innerHTML = allowedCategories
     .map((c) => `<option>${c}</option>`)
@@ -883,6 +917,7 @@ function setupOps(capabilities) {
 function setupAdminNavigation(capabilities) {
   const entries = [
     ["settings-admin", "설정", capabilities.settings],
+    ["users-admin-section", "사용자", capabilities.users],
     ["mcp-admin-section", "MCP", capabilities.mcp],
     ["source-admin-section", "소스·색인", capabilities.source],
     ["quality-admin-section", "검색 품질", capabilities.quality],
@@ -899,11 +934,48 @@ function setupAdminNavigation(capabilities) {
     document.querySelectorAll(".admin-panel").forEach((panel) => (panel.hidden = panel.id !== target));
     document.querySelectorAll("[data-admin-target]").forEach((button) => button.classList.toggle("active", button.dataset.adminTarget === target));
     if (target === "database-admin-section") refreshDatabase();
+    if (target === "users-admin-section") refreshAdminUsers();
   };
   document.querySelectorAll("[data-admin-target]").forEach(
     (button) => (button.onclick = () => open(button.dataset.adminTarget)),
   );
   if (entries.length) open(entries[0][0]);
+}
+
+let adminUserRoles = [];
+async function refreshAdminUsers() {
+  try {
+    const result = await api("/api/v1/admin/users");
+    adminUserRoles = result.roles || [];
+    $("#admin-user-roles").innerHTML =
+      `<legend>플랫폼 역할</legend>${adminUserRoles.map((role) => `<label><input type="checkbox" name="admin-role" value="${esc(role)}" /> ${esc(role)}${role === "platform-admin" ? " (최고관리자)" : ""}</label>`).join("")}`;
+    $("#admin-users").innerHTML = result.users.length
+      ? `<table><thead><tr><th>사용자</th><th>상태</th><th>역할</th><th>생성</th><th></th></tr></thead><tbody>${result.users.map((user) => `<tr><td>${esc(user.username)}<br><small>${esc(user.email || "")}<br>${esc(user.subject)}</small></td><td>${esc(user.status)}</td><td>${esc((user.roles || []).join(", "))}</td><td>${date(user.createdAt)}</td><td><button data-edit-user="${esc(user.id)}">수정</button> <button class="danger" data-delete-user="${esc(user.id)}">삭제</button></td></tr>`).join("")}</tbody></table>`
+      : "등록된 사용자가 없습니다.";
+    document.querySelectorAll("[data-edit-user]").forEach((button) => {
+      button.onclick = () => openAdminUserForm(result.users.find((user) => user.id === button.dataset.editUser));
+    });
+    document.querySelectorAll("[data-delete-user]").forEach((button) => {
+      button.onclick = async () => {
+        if (!confirm("사용자를 삭제 상태로 전환하고 세션과 API 키를 폐기할까요?")) return;
+        await api(`/api/v1/admin/users/${encodeURIComponent(button.dataset.deleteUser)}`, { method: "DELETE" });
+        refreshAdminUsers();
+      };
+    });
+  } catch (error) {
+    $("#admin-users").innerHTML = `<div class="notice error">${esc(error.message)}</div>`;
+  }
+}
+function openAdminUserForm(user = null) {
+  $("#admin-user-form").hidden = false;
+  $("#admin-user-id").value = user?.id || "";
+  $("#admin-user-subject").value = user?.subject || "";
+  $("#admin-user-subject").disabled = Boolean(user);
+  $("#admin-user-username").value = user?.username || "";
+  $("#admin-user-email").value = user?.email || "";
+  $("#admin-user-status").value = user?.status === "disabled" ? "disabled" : "active";
+  const roles = new Set(user?.roles || ["developer"]);
+  document.querySelectorAll('[name="admin-role"]').forEach((input) => (input.checked = roles.has(input.value)));
 }
 async function refreshDatabase() {
   try {

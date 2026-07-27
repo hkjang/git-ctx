@@ -76,11 +76,24 @@ func TestOIDCVerifierMapsKeycloakClaims(t *testing.T) {
 	if !contains(id.ACLGroups, "group:readonly") {
 		t.Fatalf("automatic ACL groups=%v", id.ACLGroups)
 	}
+	accessID, err := verifier.VerifyAccessToken(context.Background(), raw)
+	if err != nil || !contains(accessID.Roles, "platform-admin") {
+		t.Fatalf("access token identity=%#v err=%v", accessID, err)
+	}
 	logoutURL, err := EndSessionURL(context.Background(), OIDCConfig{IssuerURL: issuer, ClientID: "git-ctx", PostLogoutRedirectURL: "https://git-ctx.example/"})
 	if err != nil || !strings.Contains(logoutURL, "client_id=git-ctx") || !strings.Contains(logoutURL, "post_logout_redirect_uri=") {
 		t.Fatalf("logoutURL=%s err=%v", logoutURL, err)
 	}
 }
+
+func TestOIDCDefaultsUseOnlyBuiltInKeycloakScopes(t *testing.T) {
+	cfg := OIDCConfig{}
+	cfg.defaults()
+	if got := strings.Join(cfg.Scopes, " "); got != "openid profile email" {
+		t.Fatalf("default scopes=%q", got)
+	}
+}
+
 func TestExchangeCodeUsesConfiguredOIDCHTTPClient(t *testing.T) {
 	var issuer string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

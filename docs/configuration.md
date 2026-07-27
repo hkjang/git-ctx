@@ -8,10 +8,17 @@
 
 Keycloak 관리자 화면에는 Base URL, Realm, Client ID, Client Secret 네 항목만 표시한다.
 Issuer는 `{baseUrl}/realms/{realm}`, callback과 logout URL은 현재 `ui.publicUrl`에서
-서버가 자동 계산한다. Scope와 표준 Claim 이름도 서버 기본값을 사용한다. Keycloak의
+서버가 자동 계산한다. Scope와 표준 Claim 이름도 서버 기본값을 사용한다. 기본 요청
+Scope는 별도 Client Scope 생성이 필요 없는 `openid profile email`이다. 그룹 Claim이
+설정된 환경에서는 이를 자동 인식하지만, 그룹 매퍼가 없어도 로그인은 정상 동작한다.
+Keycloak 26처럼 역할을 기본 ID Token이 아닌 Access Token에만 넣는 환경도 서명과
+발급 대상을 검증한 뒤 역할을 자동 반영한다. Keycloak의
 Realm 또는 Client Role 이름을 `platform-admin`, `security-admin`, `mcp-admin`,
 `source-admin`, `search-admin`, `auditor`, `developer`, `service-account`,
 `readonly-operator` 중 하나로 만들면 별도 매핑 없이 같은 플랫폼 역할로 적용된다.
+`platform-admin`은 모든 설정과 사용자 CRUD를 수행하는 최고관리자다. 사용자 관리에서
+Keycloak Subject를 사전 등록하고 활성/비활성 상태와 역할을 변경할 수 있으며, 사용자
+삭제는 감사·참조 무결성을 위해 Soft Delete하고 활성 세션과 API 키를 즉시 폐기한다.
 
 저장 전 Discovery, Authorization/Token endpoint와 OAuth client 설정을 검증하며 저장
 응답은 `applied=true`, 적용 버전, 최종 Issuer와 Redirect를 반환한다. 저장 후 관리자

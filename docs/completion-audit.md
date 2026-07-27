@@ -26,11 +26,15 @@
 | 최초 관리자 세션 | 완료 | 일회용 토큰을 30분 HttpOnly·SameSite 세션으로 교환, Origin 검증, Keycloak 저장 시 세션·키 전역 폐기 |
 | 버전 표시 | 완료 | 공개 설정과 `/api/v1/me` 버전 제공, 로그인 전 상단·안내와 로그인 후 프로필 표시 |
 | 비밀정보 관리 | 완료(계약 시험) | 암호화 DB/Vault KV v2 backend, 등록·회전·중지, 원문 비노출, `secret://` 동적 참조와 Fail Closed |
-| 관리자 UI 구조 | 완료 | 개인화 영역과 분리된 권한 기반 관리자 진입, 역할별 대메뉴, 설정 종류별 탭, 고급 JSON 접기, TLS 토글·CA 조건부 표시, 저장 진행·오류 상태 |
-| Keycloak 설정 안정성 | 완료 | 4개 필드 UI, 자동 Issuer·Redirect·표준 Claim·동일 이름 역할/그룹, 저장값 자동 재조회, Discovery/JWKS/token exchange, PKCE callback·세션 E2E, 실제 platform-admin 로그인 뒤 Bootstrap 폐기 |
+| 관리자 UI 구조 | 완료 | 개인화 영역과 분리된 권한 기반 관리자 진입, 역할별 대메뉴, 설정 종류별 탭, 저장 진행·오류 상태 |
+| Keycloak 설정 안정성 | 완료 | 4개 필드 UI, 자동 Issuer·Redirect·표준 Scope/Claim·동일 이름 역할/그룹, 저장값 자동 재조회, Discovery/JWKS/token exchange, PKCE callback·세션 E2E, Access Token 역할 병합, 실제 platform-admin 로그인 뒤 Bootstrap 폐기 |
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 
 2026-07-27 로컬 검증 결과:
+
+- Keycloak 26.3.3에서 별도 `groups` Client Scope나 ID Token 역할 Mapper 없이
+  Authorization Code+PKCE 로그인, `/admin` 복귀, `/api/v1/me` 200,
+  `platform-admin` 역할 반영과 Bootstrap 자동 폐기를 검증했다.
 
 ```text
 go test -race ./...                         PASS

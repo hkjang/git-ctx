@@ -55,7 +55,7 @@ func (c *OIDCConfig) defaults() {
 		c.GitLabUserIDClaim = "gitlab_user_id"
 	}
 	if len(c.Scopes) == 0 {
-		c.Scopes = []string{oidc.ScopeOpenID, "profile", "email", "groups"}
+		c.Scopes = []string{oidc.ScopeOpenID, "profile", "email"}
 	}
 }
 
@@ -74,11 +74,14 @@ type OIDCMetadata struct {
 }
 
 type OIDCVerifier struct {
-	load     func(context.Context) (OIDCConfig, error)
-	mu       sync.Mutex
-	key      string
-	verifier *oidc.IDTokenVerifier
-	expires  time.Time
+	load           func(context.Context) (OIDCConfig, error)
+	mu             sync.Mutex
+	key            string
+	verifier       *oidc.IDTokenVerifier
+	expires        time.Time
+	accessKey      string
+	accessVerifier *oidc.IDTokenVerifier
+	accessExpires  time.Time
 }
 
 func NewOIDCVerifier(loader func(context.Context) (OIDCConfig, error)) *OIDCVerifier {
@@ -234,6 +237,17 @@ func EndSessionURL(ctx context.Context, cfg OIDCConfig) (string, error) {
 }
 
 func (v *OIDCVerifier) Verify(ctx context.Context, raw string) (Identity, error) {
+	return v.verify(ctx, raw, false)
+}
+
+// VerifyAccessToken verifies a Keycloak JWT access token and requires it to
+// have been issued to the configured client. Keycloak exposes realm/client
+// roles in access tokens by default, while its default ID token does not.
+func (v *OIDCVerifier) VerifyAccessToken(ctx context.Context, raw string) (Identity, error) {
+	return v.verify(ctx, raw, true)
+}
+
+func (v *OIDCVerifier) verify(ctx context.Context, raw string, accessToken bool) (Identity, error) {
 	cfg, err := v.load(ctx)
 	if err != nil {
 		return Identity{}, err
@@ -242,7 +256,7 @@ func (v *OIDCVerifier) Verify(ctx context.Context, raw string) (Identity, error)
 	if cfg.IssuerURL == "" || cfg.ClientID == "" {
 		return Identity{}, errors.New("Keycloak OIDC is not configured")
 	}
-	verifier, err := v.get(ctx, cfg)
+	verifier, err := v.get(ctx, cfg, accessToken)
 	if err != nil {
 		return Identity{}, err
 	}
@@ -254,7 +268,14 @@ func (v *OIDCVerifier) Verify(ctx context.Context, raw string) (Identity, error)
 	if err := token.Claims(&claims); err != nil {
 		return Identity{}, err
 	}
-	id := Identity{Subject: token.Subject, Username: stringClaim(claims, cfg.UsernameClaim), Email: stringClaim(claims, cfg.EmailClaim), Groups: stringSliceClaim(claims, cfg.GroupsClaim), BitbucketUserSlug: stringClaim(claims, cfg.BitbucketUserSlugClaim), GitLabUserID: stringClaim(claims, cfg.GitLabUserIDClaim)}
+	if accessToken && stringClaim(claims, "azp") != cfg.ClientID && !slices.Contains(token.Audience, cfg.ClientID) {
+		return Identity{}, errors.New("access token was not issued to the configured client")
+	}
+	return identityFromClaims(cfg, token.Subject, claims)
+}
+
+func identityFromClaims(cfg OIDCConfig, subject string, claims map[string]any) (Identity, error) {
+	id := Identity{Subject: subject, Username: stringClaim(claims, cfg.UsernameClaim), Email: stringClaim(claims, cfg.EmailClaim), Groups: stringSliceClaim(claims, cfg.GroupsClaim), BitbucketUserSlug: stringClaim(claims, cfg.BitbucketUserSlugClaim), GitLabUserID: stringClaim(claims, cfg.GitLabUserIDClaim)}
 	if id.Subject == "" || id.Username == "" {
 		return Identity{}, errors.New("required Keycloak subject or username claim is missing")
 	}
@@ -299,11 +320,14 @@ func (v *OIDCVerifier) Verify(ctx context.Context, raw string) (Identity, error)
 	return id, nil
 }
 
-func (v *OIDCVerifier) get(ctx context.Context, cfg OIDCConfig) (*oidc.IDTokenVerifier, error) {
+func (v *OIDCVerifier) get(ctx context.Context, cfg OIDCConfig, accessToken bool) (*oidc.IDTokenVerifier, error) {
 	transportKey := sha256.Sum256([]byte(fmt.Sprintf("%v|%s|%s", cfg.TLSVerify, cfg.CACertificate, cfg.ProxyURL)))
 	key := strings.TrimSuffix(cfg.IssuerURL, "/") + "|" + cfg.ClientID + "|" + fmt.Sprintf("%x", transportKey)
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if accessToken && v.accessVerifier != nil && v.accessKey == key && time.Now().Before(v.accessExpires) {
+		return v.accessVerifier, nil
+	}
 	if v.verifier != nil && v.key == key && time.Now().Before(v.expires) {
 		return v.verifier, nil
 	}
@@ -316,6 +340,12 @@ func (v *OIDCVerifier) get(ctx context.Context, cfg OIDCConfig) (*oidc.IDTokenVe
 		return nil, fmt.Errorf("OIDC discovery: %w", err)
 	}
 	skew := time.Duration(cfg.AllowedClockSkewSeconds) * time.Second
+	if accessToken {
+		v.accessVerifier = provider.VerifierContext(ctx, &oidc.Config{SkipClientIDCheck: true, Now: func() time.Time { return time.Now().Add(-skew) }})
+		v.accessKey = key
+		v.accessExpires = time.Now().Add(10 * time.Minute)
+		return v.accessVerifier, nil
+	}
 	v.verifier = provider.VerifierContext(ctx, &oidc.Config{ClientID: cfg.ClientID, Now: func() time.Time { return time.Now().Add(-skew) }})
 	v.key = key
 	v.expires = time.Now().Add(10 * time.Minute)

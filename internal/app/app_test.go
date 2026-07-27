@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -145,6 +146,66 @@ func TestOneTimeBootstrapTokenGeneratedAndRemoved(t *testing.T) {
 	}
 	if _, err = os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("token file remains: %v", err)
+	}
+}
+
+func TestPlatformAdminUserCRUDAndDisabledOIDCUser(t *testing.T) {
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite",
+		DatabaseDSN:    "file:" + filepath.Join(t.TempDir(), "users.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		KeyPepper:      strings.Repeat("p", 32),
+		MasterKey:      strings.Repeat("m", 32),
+		BootstrapAdmin: "bootstrap",
+		PublicURL:      "http://localhost:4747",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer bootstrap")
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	created := request(http.MethodPost, "/api/v1/admin/users", `{"subject":"kc-user-1","username":"alice","email":"alice@example.test","status":"active","roles":["developer","source-admin"]}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create=%d body=%s", created.Code, created.Body.String())
+	}
+	var createdBody map[string]string
+	if err = json.Unmarshal(created.Body.Bytes(), &createdBody); err != nil {
+		t.Fatal(err)
+	}
+	id := createdBody["id"]
+	listed := request(http.MethodGet, "/api/v1/admin/users", "")
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"source-admin"`) {
+		t.Fatalf("list=%d body=%s", listed.Code, listed.Body.String())
+	}
+	updated := request(http.MethodPut, "/api/v1/admin/users/"+id, `{"username":"alice","email":"alice@example.test","status":"disabled","roles":["developer"]}`)
+	if updated.Code != http.StatusNoContent {
+		t.Fatalf("update=%d body=%s", updated.Code, updated.Body.String())
+	}
+	if _, err = a.upsertIdentity(context.Background(), auth.Identity{Subject: "kc-user-1", Username: "alice", Roles: []string{"developer"}}); !errors.Is(err, errUserDisabled) {
+		t.Fatalf("disabled OIDC login err=%v", err)
+	}
+	reactivated := request(http.MethodPut, "/api/v1/admin/users/"+id, `{"username":"alice","email":"alice@example.test","status":"active","roles":["platform-admin"]}`)
+	if reactivated.Code != http.StatusNoContent {
+		t.Fatalf("reactivate=%d body=%s", reactivated.Code, reactivated.Body.String())
+	}
+	if _, err = a.upsertIdentity(context.Background(), auth.Identity{Subject: "kc-user-1", Username: "alice", Roles: []string{"developer"}}); err != nil {
+		t.Fatal(err)
+	}
+	roles, err := a.userRoles(context.Background(), id)
+	if err != nil || !slices.Contains(roles, "platform-admin") || slices.Contains(roles, "developer") {
+		t.Fatalf("admin-managed roles=%v err=%v", roles, err)
+	}
+	deleted := request(http.MethodDelete, "/api/v1/admin/users/"+id, "")
+	if deleted.Code != http.StatusNoContent {
+		t.Fatalf("delete=%d body=%s", deleted.Code, deleted.Body.String())
 	}
 }
 
@@ -385,6 +446,12 @@ func TestKeycloakBaseRealmSaveNormalizesAndKeepsBootstrapUntilAdminLogin(t *test
 	if !a.validBootstrapToken(context.Background(), token) {
 		t.Fatal("bootstrap was revoked before a successful Keycloak platform-admin login")
 	}
+	publicRequest := httptest.NewRequest(http.MethodGet, "/api/v1/public/config", nil)
+	publicResult := httptest.NewRecorder()
+	a.Handler().ServeHTTP(publicResult, publicRequest)
+	if publicResult.Code != http.StatusOK || !strings.Contains(publicResult.Body.String(), `"ssoConfigured":true`) || !strings.Contains(publicResult.Body.String(), `"bootstrapRequired":true`) {
+		t.Fatalf("public login choices status=%d body=%s", publicResult.Code, publicResult.Body.String())
+	}
 	request = httptest.NewRequest(http.MethodPut, "/api/v1/admin/settings/keycloak", strings.NewReader(fmt.Sprintf(`{"baseUrl":%q,"realm":"engineering","issuerMode":"auto","issuerUrl":%q,"clientId":"git-ctx","clientSecret":"********","redirectMode":"auto","realmRoleMappings":{"ctx-admin":"platform-admin"},"tlsVerify":false}`, server.URL, issuer)))
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Content-Type", "application/json")
@@ -443,7 +510,7 @@ func TestPublicAndAdminDatabaseStatus(t *testing.T) {
 	adminRequest.Header.Set("Authorization", "Bearer bootstrap")
 	admin := httptest.NewRecorder()
 	a.Handler().ServeHTTP(admin, adminRequest)
-	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"latest":"013_managed_secrets.sql"`) || !strings.Contains(admin.Body.String(), `"pool"`) {
+	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"latest":"014_user_role_management.sql"`) || !strings.Contains(admin.Body.String(), `"pool"`) {
 		t.Fatalf("admin status=%d body=%s", admin.Code, admin.Body.String())
 	}
 }

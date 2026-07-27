@@ -15,6 +15,7 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - 암호화 DB 또는 Vault KV v2 기반 관리 Secret 등록·회전·중지와 `secret://` 설정 참조
 - 네 항목으로 단순화한 Keycloak OIDC 설정, 자동 Issuer·Redirect, Discovery/JWKS 검증과 동일 이름 역할 매핑
 - Keycloak Authorization Code+PKCE 사용자 로그인과 HttpOnly 서버 세션
+- SSO 로그인과 최초 관리자 복구 진입 분리, 최고관리자용 사용자 CRUD·상태·역할 관리
 - Bitbucket Server 6.9.1 및 GitLab API v4 소스 어댑터
 - 저장소 ACL 동기화, 파일 정책, Markdown 청킹, 버전별 색인 작업
 - 서명 검증 Webhook, 이벤트 멱등 처리 및 ref별 작업 큐

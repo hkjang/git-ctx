@@ -21,6 +21,7 @@
     const has = (role) => roles.has("platform-admin") || roles.has(role);
     return {
       platform: roles.has("platform-admin"),
+      users: roles.has("platform-admin"),
       settings:
         roles.has("platform-admin") ||
         ["source-admin", "mcp-admin", "search-admin", "security-admin"].some(
