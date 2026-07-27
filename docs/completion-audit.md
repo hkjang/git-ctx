@@ -7,7 +7,7 @@
 
 | 영역 | 상태 | 구현·검증 증거 |
 |---|---|---|
-| Context7 MCP | 완료 | `/mcp` GET/POST/DELETE, initialize, 세션형 SSE heartbeat·DELETE 종료, tools/list, tools/call 및 두 호환 도구의 통합 시험 |
+| Context7 MCP | 완료 | `/mcp` GET/POST/DELETE, initialize, 세션형 SSE heartbeat·DELETE 종료, tools/list, tools/call, 두 호환 도구의 통합 시험과 실제 Codex CLI·Claude Code 호출 |
 | 인증과 API 키 | 완료 | OIDC/JWKS, PKCE, HMAC 키 저장, 1회 노출, 회전·중지·폐기, CIDR·도구·저장소·호출량 제한 |
 | 권한 | 완료 | 사용자/그룹/키 제한을 후보 SQL 단계에서 적용하고 미인가 저장소를 일반화된 오류로 처리 |
 | Bitbucket/GitLab 어댑터 | 완료 | Bitbucket Server REST 1.0 및 GitLab API v4 계약 시험, webhook 검증·중복 제거 |
@@ -48,6 +48,8 @@ scripts/package-offline-image.sh            PASS (`git-ctx-vX.Y.Z.tar.gz`)
 Docker build + UID 10001 readiness/UI       PASS
 OpenSearch auth/mapping/bulk/ACL contract   PASS
 Default listen address :4747 readiness      PASS
+Codex CLI 0.145.0 resolve-library-id         PASS
+Claude Code 2.1.218 resolve-library-id       PASS
 ```
 
 ## 구현되지 않았거나 후속 단계인 항목
@@ -65,7 +67,8 @@ Default listen address :4747 readiness      PASS
    issuer/audience와 키 회전 시험
 2. 실제 Bitbucket Server 6.9.1에서 프로젝트·저장소·ACL·branch/tag 수집과
    저장소별 push webhook, 누락 polling 시험
-3. 승인된 Codex CLI, Claude Code, Cursor 중 최소 2개에서 MCP 연결·도구 호출 시험
+3. Codex CLI와 Claude Code 실제 호출은 로컬 Docker에서 통과했다. 조직 승인 버전과
+   실제 사내 저장소에서 두 단계 호출·출처 확인 필요
 4. 권한 부여·회수 전후 저장소 이름, ID, 캐시, 오류 내용의 완전 비노출 시험
 5. 목표 데이터량과 50개 동시 호출에서 P95 및 오류율 측정
 6. PostgreSQL 백업/복원, 원래 DSN Secret 분리 복구, Keycloak 설정 rollback과

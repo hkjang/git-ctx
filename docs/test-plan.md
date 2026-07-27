@@ -55,6 +55,8 @@ k6 run test/load/mcp.js
 
 ## 실환경 승인
 
+- 실제 클라이언트 로컬 호환 결과와 재현 절차는
+  [mcp-client-compatibility.md](mcp-client-compatibility.md)를 기준으로 대조
 - Keycloak Authorization Code+PKCE 로그인, 역할/Claim 미리보기와 Single Logout
 - Codex CLI, Claude Code, Cursor 중 조직 승인 대상 2개 이상의 실제 연결
 - Bitbucket Server 6.9.1 push/branch/tag webhook과 30분 polling 보정
