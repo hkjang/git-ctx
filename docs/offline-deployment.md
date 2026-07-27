@@ -7,7 +7,7 @@ AMD64 환경으로 반입할 수 있는 Docker/OCI 이미지 보관 파일이다
 ## 무결성 확인과 Docker 로드
 
 ```bash
-VERSION=0.8.2
+VERSION=0.8.3
 sha256sum -c "git-ctx-v${VERSION}.tar.gz.sha256"
 gzip -dc "git-ctx-v${VERSION}.tar.gz" | docker load
 docker image inspect "git-ctx:v${VERSION}" --format '{{.Id}} {{.Architecture}} {{.Os}}'
@@ -17,7 +17,7 @@ docker image inspect "git-ctx:v${VERSION}" --format '{{.Id}} {{.Architecture}} {
 별도로 준비한다. 기본 포트는 `4747`이며 PostgreSQL은 DSN 하나로 연결한다.
 
 ```bash
-VERSION=0.8.2
+VERSION=0.8.3
 docker run -d --name git-ctx \
   --restart unless-stopped \
   -p 4747:4747 \
@@ -39,7 +39,7 @@ Kubernetes Secret 또는 사내 Secret Store를 사용한다. 최초 관리자 �
 같다.
 
 ```bash
-VERSION=0.8.2
+VERSION=0.8.3
 gzip -dc "git-ctx-v${VERSION}.tar.gz" \
   | sudo ctr --namespace k8s.io images import -
 sudo ctr --namespace k8s.io images list | grep git-ctx

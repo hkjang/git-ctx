@@ -26,6 +26,8 @@ for (const id of [
   "migrate-database",
   "login-keycloak",
   "bootstrap-login",
+  "admin-entry-link",
+  "entry-description",
   "users-admin-section",
   "admin-user-form",
   "admin-users",
@@ -45,6 +47,11 @@ assert.match(script, /api\/v1\/admin\/database\/\$\{action\}/);
 assert.match(script, /Keycloak Base URL/);
 assert.match(script, /loadCurrentSetting/);
 assert.match(script, /api\/v1\/admin\/users/);
+assert.match(script, /const isAdminEntry = location\.pathname === "\/admin"/);
+assert.match(script, /!isAdminEntry \|\| !bootstrapInfo\.required/);
+assert.match(script, /return_to=\$\{encodeURIComponent\(returnTo\)\}/);
+assert.match(html, /Keycloak SSO 로그인/);
+assert.match(html, /최고관리자는 모든 관리자 설정과 운영 기능/);
 assert.doesNotMatch(html, /변경 사유|id=["']load-setting["']|id=["']rollback-setting["']/);
 const keycloakFields = script.slice(script.indexOf("keycloak: ["), script.indexOf("bitbucket: ["));
 for (const required of ["baseUrl", "realm", "clientId", "clientSecret"]) assert.match(keycloakFields, new RegExp(`"${required}"`));

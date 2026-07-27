@@ -172,6 +172,7 @@ const settingDefaults = (category) => {
   return defaults;
 };
 let bootstrapInfo = { required: false, tokenFile: "", ssoConfigured: false };
+const isAdminEntry = location.pathname === "/admin" || location.pathname.startsWith("/admin/");
 const api = async (url, options = {}) => {
   const bootstrapToken = sessionStorage.getItem("git_ctx_bootstrap_token");
   const response = await fetch(url, {
@@ -215,7 +216,13 @@ async function loadBranding() {
     $("#login").title = bootstrapInfo.ssoConfigured
       ? "Keycloak SSO로 로그인"
       : "관리자가 Keycloak SSO를 먼저 설정해야 합니다.";
-    $("#bootstrap-login").hidden = !bootstrapInfo.required;
+    // The one-time bootstrap credential is an administrative recovery path.
+    // Never expose it on the regular user sign-in page.
+    $("#bootstrap-login").hidden = !isAdminEntry || !bootstrapInfo.required;
+    $("#entry-description").textContent = isAdminEntry
+      ? "관리 설정과 사용자·역할을 운영합니다. 일반 사용자는 서비스 홈에서 Keycloak SSO로 로그인하세요."
+      : "Keycloak SSO로 로그인하여 접근 가능한 Bitbucket·GitLab 문서를 검색하고 MCP 키를 관리하세요.";
+    $("#admin-entry-link").hidden = isAdminEntry;
     if (config.notice) {
       $("#service-notice").textContent = config.notice;
       $("#service-notice").hidden = false;
@@ -238,7 +245,10 @@ async function loadPublicStatus() {
   }
 }
 $("#login").onclick = () => {
-  if (bootstrapInfo.ssoConfigured) location.href = "/auth/login";
+  if (bootstrapInfo.ssoConfigured) {
+    const returnTo = isAdminEntry ? "/admin" : "/";
+    location.href = `/auth/login?return_to=${encodeURIComponent(returnTo)}`;
+  }
 };
 $("#bootstrap-login").onclick = () => {
   const token = prompt(
@@ -299,7 +309,7 @@ async function boot() {
   } catch (e) {
     $("#status").textContent =
       "Keycloak으로 로그인하면 개인 MCP 키와 관리자 기능을 사용할 수 있습니다.";
-    if (location.pathname.startsWith("/admin") && !bootstrapInfo.required) {
+    if (isAdminEntry && !bootstrapInfo.required) {
       location.href = `/auth/login?return_to=${encodeURIComponent("/admin")}`;
     }
   }
