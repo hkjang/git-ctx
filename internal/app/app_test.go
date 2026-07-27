@@ -41,6 +41,37 @@ func TestStatusWriterPreservesStreaming(t *testing.T) {
 	}
 }
 
+func TestOperationalSettingsValidation(t *testing.T) {
+	a := &App{}
+	valid := []struct {
+		category string
+		value    map[string]any
+	}{
+		{"mcp", map[string]any{"allowedOrigins": []any{"https://git-ctx.company"}, "maxRequestBytes": float64(1 << 20)}},
+		{"index", map[string]any{"pollingMinutes": float64(30)}},
+		{"security", map[string]any{"trustedProxyCidrs": []any{"10.20.0.0/16"}}},
+	}
+	for _, test := range valid {
+		if err := a.validateSetting(context.Background(), test.category, test.value); err != nil {
+			t.Fatalf("valid %s setting rejected: %v", test.category, err)
+		}
+	}
+	invalid := []struct {
+		category string
+		value    map[string]any
+	}{
+		{"mcp", map[string]any{"allowedOrigins": []any{"http://git-ctx.company/path"}}},
+		{"mcp", map[string]any{"maxRequestBytes": float64(17 << 20)}},
+		{"index", map[string]any{"pollingMinutes": float64(0)}},
+		{"security", map[string]any{"trustedProxyCidrs": []any{"not-a-cidr"}}},
+	}
+	for _, test := range invalid {
+		if err := a.validateSetting(context.Background(), test.category, test.value); err == nil {
+			t.Fatalf("invalid %s setting was accepted: %#v", test.category, test.value)
+		}
+	}
+}
+
 func TestHTTPTraceContextPropagation(t *testing.T) {
 	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)

@@ -71,6 +71,23 @@ const integrationSettingFields = {
     ["proxyUrl", "Proxy URL", "url", ""],
     ["timeoutSeconds", "Timeout(초)", "number", 30],
   ],
+  mcp: [
+    ["allowedOrigins", "허용 Origin (쉼표 구분)", "array", ""],
+    ["maxRequestBytes", "최대 요청 크기(Byte)", "number", 1048576],
+  ],
+  search: [
+    ["keywordWeight", "키워드 검색 가중치", "number", 1],
+    ["vectorWeight", "벡터 검색 가중치", "number", 0.35],
+    ["candidateLimit", "초기 후보 수", "number", 5000],
+    ["finalK", "최종 문서 수", "number", 8],
+    ["rerankLimit", "재순위화 후보 수", "number", 30],
+  ],
+  index: [
+    ["pollingMinutes", "무결성 Polling 주기(분)", "number", 30],
+  ],
+  security: [
+    ["trustedProxyCidrs", "신뢰 Proxy CIDR (쉼표 구분)", "array", ""],
+  ],
   model: [
     [
       "provider",
@@ -120,6 +137,33 @@ const integrationSettingFields = {
     ["caCertificate", "사내 CA PEM", "textarea", ""],
     ["proxyUrl", "Proxy URL", "url", ""],
     ["timeoutSeconds", "Timeout(초)", "number", 30],
+  ],
+  observability: [
+    ["enabled", "OpenTelemetry 사용", "boolean", false],
+    ["otlpEndpoint", "OTLP HTTP Trace Endpoint", "url", ""],
+    ["serviceName", "Telemetry Service Name", "text", "git-ctx"],
+    ["sampleRatio", "Trace Sample Ratio (0~1)", "number", 1],
+    ["headers", "추가 HTTP Header (JSON)", "json", {}],
+    ["timeoutSeconds", "Timeout(초)", "number", 10],
+    ["tlsVerify", "TLS 인증서 검증 사용", "boolean", true],
+    ["allowInsecureLocalhost", "Localhost HTTP 허용", "boolean", false],
+    ["caCertificate", "사내 CA PEM", "textarea", ""],
+    ["proxyUrl", "Proxy URL", "url", ""],
+  ],
+  backup: [
+    ["enabled", "예약 백업 사용", "boolean", false],
+    ["directory", "백업 디렉터리", "text", "/var/lib/git-ctx/backups"],
+    ["intervalHours", "백업 주기(시간)", "number", 24],
+    ["retentionCount", "보존 개수", "number", 7],
+    ["maxBytes", "백업 최대 크기(Byte)", "number", 536870912],
+  ],
+  ui: [
+    ["publicUrl", "서비스 Public URL", "url", "http://localhost:4747"],
+    ["serviceName", "서비스 이름", "text", "git-ctx"],
+    ["tagline", "상단 설명", "text", "사내 개발 지식 MCP"],
+    ["logoUrl", "로고 URL", "text", "/logo.svg"],
+    ["faviconUrl", "파비콘 URL", "text", "/favicon.svg"],
+    ["notice", "서비스 공지", "textarea", ""],
   ],
 };
 const settingCategoryMeta = {
@@ -570,7 +614,8 @@ function renderSettingFields(category, value) {
       }
       const inputType = type === "array" ? "text" : type;
       const shown = Array.isArray(current) ? current.join(",") : current;
-      return `<label data-field-key="${key}">${esc(label)}<input data-setting-key="${key}" data-setting-type="${type}" type="${inputType}" value="${esc(shown)}" /></label>`;
+      const numeric = type === "number" ? ' step="any"' : "";
+      return `<label data-field-key="${key}">${esc(label)}<input data-setting-key="${key}" data-setting-type="${type}" type="${inputType}"${numeric} value="${esc(shown)}" /></label>`;
     })
     .join("");
   document.querySelectorAll("[data-setting-key]").forEach(

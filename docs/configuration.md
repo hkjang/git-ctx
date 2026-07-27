@@ -201,6 +201,11 @@ attribute에 기록하지 않는다.
 
 ## 관리자 연동 설정과 검증
 
+관리자 설정 탭은 Keycloak, Bitbucket, GitLab, MCP, 검색, 모델, OpenSearch,
+색인, 보안, Vault, 관측성, 백업, UI의 실제 런타임 필드를 전용 폼으로 제공한다.
+그 밖의 확장 정책은 같은 탭의 고급 JSON에서 편집하며, 전용 폼과 JSON은 양방향으로
+동기화된다. Bootstrap 환경변수는 `GIT_CTX_DB_DSN` 하나뿐이다.
+
 DB DSN을 제외한 운영 설정은 관리자 화면에서 입력·시험·저장·버전 복구한다. Keycloak,
 Bitbucket, GitLab과 모델 영역은 URL, Client/Token/API Key, 모델, TLS, 사내 CA,
 Proxy와 Timeout 전용 필드를 제공하고 알 수 없는 확장 필드는 고급 JSON 편집기에

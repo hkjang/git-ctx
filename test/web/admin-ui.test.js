@@ -43,6 +43,23 @@ assert.match(script, /api\/v1\/admin\/database\/status/);
 assert.match(script, /api\/v1\/admin\/database\/\$\{action\}/);
 assert.match(script, /Keycloak Base URL/);
 assert.match(script, /Realm Role 매핑/);
+for (const category of [
+  "keycloak",
+  "bitbucket",
+  "gitlab",
+  "mcp",
+  "search",
+  "model",
+  "opensearch",
+  "index",
+  "security",
+  "vault",
+  "observability",
+  "backup",
+  "ui",
+]) {
+  assert.match(script, new RegExp(`\\n\\s{2}${category}: \\[`), `missing dedicated ${category} settings form`);
+}
 assert.match(styles, /\[hidden\]\s*\{[^}]*display:\s*none\s*!important/s);
 assert.match(html, /class=["']status-row["']/);
 console.log("admin UI structure tests passed");

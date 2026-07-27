@@ -1532,6 +1532,41 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 				}
 			}
 		}
+	case "mcp":
+		if origins, ok := value["allowedOrigins"].([]any); ok {
+			for _, item := range origins {
+				origin, ok := item.(string)
+				if !ok || strings.TrimSpace(origin) == "" {
+					return errors.New("mcp.allowedOrigins must contain non-empty URL strings")
+				}
+				parsed, err := url.Parse(origin)
+				if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+					return fmt.Errorf("mcp.allowedOrigins contains invalid origin %q", origin)
+				}
+				if parsed.Scheme != "https" && parsed.Hostname() != "localhost" && parsed.Hostname() != "127.0.0.1" {
+					return fmt.Errorf("mcp.allowedOrigins must use HTTPS outside localhost: %q", origin)
+				}
+			}
+		}
+		if size, ok := value["maxRequestBytes"].(float64); ok && (size < 1024 || size > 16<<20) {
+			return errors.New("mcp.maxRequestBytes must be 1024..16777216")
+		}
+	case "index":
+		if minutes, ok := value["pollingMinutes"].(float64); ok && (minutes < 1 || minutes > 10080) {
+			return errors.New("index.pollingMinutes must be 1..10080")
+		}
+	case "security":
+		if cidrs, ok := value["trustedProxyCidrs"].([]any); ok {
+			for _, item := range cidrs {
+				cidr, ok := item.(string)
+				if !ok {
+					return errors.New("security.trustedProxyCidrs must contain CIDR strings")
+				}
+				if _, err := netip.ParsePrefix(cidr); err != nil {
+					return fmt.Errorf("security.trustedProxyCidrs contains invalid CIDR %q", cidr)
+				}
+			}
+		}
 	case "search":
 		number := func(key string, fallback float64) float64 {
 			if x, ok := value[key].(float64); ok {
