@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.6.0
+  version: 0.7.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -145,12 +145,25 @@ paths:
         parameters: [{ $ref: "#/components/parameters/Category" }],
         responses: { "200": { description: Restored version } },
       }
+  /api/v1/admin/settings/{category}/versions:
+    get:
+      {
+        summary: List non-secret setting version metadata and rollback targets,
+        parameters: [{ $ref: "#/components/parameters/Category" }],
+        responses: { "200": { description: Version metadata } },
+      }
   /api/v1/admin/settings/{category}/test:
     post:
       {
         summary: Test and validate Keycloak source model OpenSearch telemetry or backup connectivity without saving,
         parameters: [{ $ref: "#/components/parameters/Category" }],
         responses: { "200": { description: Verified } },
+      }
+  /api/v1/admin/settings/keycloak/status:
+    get:
+      {
+        summary: Verify the currently stored and dynamically applied Keycloak OIDC discovery metadata,
+        responses: { "200": { description: Active OIDC version and endpoints }, "503": { description: Stored OIDC setting cannot be applied } },
       }
   /api/v1/admin/database/status:
     get:

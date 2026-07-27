@@ -78,6 +78,34 @@ func TestOIDCVerifierMapsKeycloakClaims(t *testing.T) {
 		t.Fatalf("logoutURL=%s err=%v", logoutURL, err)
 	}
 }
+func TestExchangeCodeUsesConfiguredOIDCHTTPClient(t *testing.T) {
+	var issuer string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			json.NewEncoder(w).Encode(map[string]any{"issuer": issuer, "authorization_endpoint": issuer + "/auth", "token_endpoint": issuer + "/token", "jwks_uri": issuer + "/jwks"})
+		case "/token":
+			if err := r.ParseForm(); err != nil || r.Form.Get("code") != "login-code" || r.Form.Get("code_verifier") != "pkce-verifier" {
+				http.Error(w, "invalid exchange", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"access_token": "access", "token_type": "Bearer", "expires_in": 300, "id_token": "signed-id-token"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	issuer = server.URL
+	verify := false
+	token, err := ExchangeCode(context.Background(), OIDCConfig{IssuerURL: issuer, ClientID: "git-ctx", ClientSecret: "secret", RedirectURL: "http://localhost:4747/auth/callback", TLSVerify: &verify}, "login-code", "pkce-verifier")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token.AccessToken != "access" || token.Extra("id_token") != "signed-id-token" {
+		t.Fatalf("token=%#v id_token=%v", token, token.Extra("id_token"))
+	}
+}
 func contains(values []string, want string) bool {
 	for _, v := range values {
 		if v == want {

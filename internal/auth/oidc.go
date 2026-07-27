@@ -65,6 +65,14 @@ type Identity struct {
 	ACLGroups                                                 []string
 }
 
+type OIDCMetadata struct {
+	Issuer                string `json:"issuer"`
+	AuthorizationEndpoint string `json:"authorizationEndpoint"`
+	TokenEndpoint         string `json:"tokenEndpoint"`
+	JWKSURI               string `json:"jwksUri"`
+	EndSessionEndpoint    string `json:"endSessionEndpoint,omitempty"`
+}
+
 type OIDCVerifier struct {
 	load     func(context.Context) (OIDCConfig, error)
 	mu       sync.Mutex
@@ -79,11 +87,8 @@ func NewOIDCVerifier(loader func(context.Context) (OIDCConfig, error)) *OIDCVeri
 
 func ValidateOIDCConfig(ctx context.Context, cfg OIDCConfig) error {
 	cfg.defaults()
-	if cfg.IssuerURL == "" || cfg.ClientID == "" {
-		return errors.New("issuerUrl and clientId are required")
-	}
-	if cfg.AllowedClockSkewSeconds < 0 || cfg.AllowedClockSkewSeconds > 300 {
-		return errors.New("allowedClockSkewSeconds must be between 0 and 300")
+	if err := validateOIDCFields(cfg); err != nil {
+		return err
 	}
 	ctx, err := oidcContext(ctx, cfg)
 	if err != nil {
@@ -92,6 +97,29 @@ func ValidateOIDCConfig(ctx context.Context, cfg OIDCConfig) error {
 	_, err = oidc.NewProvider(ctx, strings.TrimSuffix(cfg.IssuerURL, "/"))
 	if err != nil {
 		return fmt.Errorf("OIDC discovery: %w", err)
+	}
+	return nil
+}
+
+func validateOIDCFields(cfg OIDCConfig) error {
+	if cfg.IssuerURL == "" || cfg.ClientID == "" {
+		return errors.New("issuerUrl and clientId are required")
+	}
+	if err := validateOIDCURL("issuerUrl", cfg.IssuerURL); err != nil {
+		return err
+	}
+	if cfg.RedirectURL != "" {
+		if err := validateOIDCURL("redirectUrl", cfg.RedirectURL); err != nil {
+			return err
+		}
+	}
+	if cfg.PostLogoutRedirectURL != "" {
+		if err := validateOIDCURL("postLogoutRedirectUrl", cfg.PostLogoutRedirectURL); err != nil {
+			return err
+		}
+	}
+	if cfg.AllowedClockSkewSeconds < 0 || cfg.AllowedClockSkewSeconds > 300 {
+		return errors.New("allowedClockSkewSeconds must be between 0 and 300")
 	}
 	validRoles := map[string]bool{
 		"platform-admin": true, "security-admin": true, "mcp-admin": true,
@@ -108,9 +136,20 @@ func ValidateOIDCConfig(ctx context.Context, cfg OIDCConfig) error {
 	return nil
 }
 
+func validateOIDCURL(field, value string) error {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+		return fmt.Errorf("%s must be an absolute URL without credentials or fragment", field)
+	}
+	if parsed.Scheme != "https" && parsed.Hostname() != "localhost" && parsed.Hostname() != "127.0.0.1" && parsed.Hostname() != "::1" {
+		return fmt.Errorf("%s must use HTTPS outside localhost", field)
+	}
+	return nil
+}
+
 func OAuthConfig(ctx context.Context, cfg OIDCConfig) (oauth2.Config, error) {
 	cfg.defaults()
-	if err := ValidateOIDCConfig(ctx, cfg); err != nil {
+	if err := validateOIDCFields(cfg); err != nil {
 		return oauth2.Config{}, err
 	}
 	if cfg.RedirectURL == "" {
@@ -128,6 +167,43 @@ func OAuthConfig(ctx context.Context, cfg OIDCConfig) (oauth2.Config, error) {
 		ClientID: cfg.ClientID, ClientSecret: cfg.ClientSecret,
 		Endpoint: provider.Endpoint(), RedirectURL: cfg.RedirectURL, Scopes: cfg.Scopes,
 	}, nil
+}
+
+func ExchangeCode(ctx context.Context, cfg OIDCConfig, code, verifier string) (*oauth2.Token, error) {
+	oauthConfig, err := OAuthConfig(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	oidcCtx, err := oidcContext(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return oauthConfig.Exchange(oidcCtx, code, oauth2.VerifierOption(verifier))
+}
+
+func InspectOIDC(ctx context.Context, cfg OIDCConfig) (OIDCMetadata, error) {
+	cfg.defaults()
+	if err := validateOIDCFields(cfg); err != nil {
+		return OIDCMetadata{}, err
+	}
+	oidcCtx, err := oidcContext(ctx, cfg)
+	if err != nil {
+		return OIDCMetadata{}, err
+	}
+	provider, err := oidc.NewProvider(oidcCtx, strings.TrimSuffix(cfg.IssuerURL, "/"))
+	if err != nil {
+		return OIDCMetadata{}, fmt.Errorf("OIDC discovery: %w", err)
+	}
+	var claims struct {
+		Issuer             string `json:"issuer"`
+		JWKSURI            string `json:"jwks_uri"`
+		EndSessionEndpoint string `json:"end_session_endpoint"`
+	}
+	if err = provider.Claims(&claims); err != nil {
+		return OIDCMetadata{}, err
+	}
+	endpoint := provider.Endpoint()
+	return OIDCMetadata{Issuer: claims.Issuer, AuthorizationEndpoint: endpoint.AuthURL, TokenEndpoint: endpoint.TokenURL, JWKSURI: claims.JWKSURI, EndSessionEndpoint: claims.EndSessionEndpoint}, nil
 }
 
 func EndSessionURL(ctx context.Context, cfg OIDCConfig) (string, error) {

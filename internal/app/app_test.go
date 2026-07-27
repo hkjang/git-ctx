@@ -21,6 +21,26 @@ import (
 	"git-ctx/internal/version"
 )
 
+type flushRecorder struct {
+	*httptest.ResponseRecorder
+	flushed bool
+}
+
+func (r *flushRecorder) Flush() { r.flushed = true }
+
+func TestStatusWriterPreservesStreaming(t *testing.T) {
+	recorder := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	w := &statusWriter{ResponseWriter: recorder}
+	flusher, ok := any(w).(http.Flusher)
+	if !ok {
+		t.Fatal("status writer must expose http.Flusher")
+	}
+	flusher.Flush()
+	if !recorder.flushed || w.status != http.StatusOK {
+		t.Fatalf("flush was not forwarded: flushed=%v status=%d", recorder.flushed, w.status)
+	}
+}
+
 func TestHTTPTraceContextPropagation(t *testing.T) {
 	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
@@ -286,23 +306,25 @@ func TestVaultAdminConnectionTest(t *testing.T) {
 }
 
 func TestKeycloakBaseRealmSaveNormalizesAndKeepsBootstrapUntilAdminLogin(t *testing.T) {
-	var issuer string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/realms/company/.well-known/openid-configuration" {
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		const suffix = "/.well-known/openid-configuration"
+		if !strings.HasPrefix(r.URL.Path, "/realms/") || !strings.HasSuffix(r.URL.Path, suffix) {
 			http.NotFound(w, r)
 			return
 		}
+		issuer := server.URL + strings.TrimSuffix(r.URL.Path, suffix)
 		json.NewEncoder(w).Encode(map[string]any{
 			"issuer": issuer, "authorization_endpoint": issuer + "/protocol/openid-connect/auth",
 			"token_endpoint": issuer + "/protocol/openid-connect/token", "jwks_uri": issuer + "/protocol/openid-connect/certs",
 		})
 	}))
 	defer server.Close()
-	issuer = server.URL + "/realms/company"
+	issuer := server.URL + "/realms/company"
 	directory := filepath.Join(t.TempDir(), "backups")
 	cfg := config.Config{
 		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "keycloak-save.db") + "?_foreign_keys=on&_busy_timeout=5000",
-		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), PublicURL: "http://git-ctx.internal:4747", BackupDirectory: directory,
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), PublicURL: "https://git-ctx.internal", BackupDirectory: directory,
 	}
 	a, err := New(context.Background(), cfg)
 	if err != nil {
@@ -319,11 +341,44 @@ func TestKeycloakBaseRealmSaveNormalizesAndKeepsBootstrapUntilAdminLogin(t *test
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	stored, err := a.loadSettingMapRaw(context.Background(), "keycloak")
-	if err != nil || stored["issuerUrl"] != issuer || stored["redirectUrl"] != "http://git-ctx.internal:4747/auth/callback" || stored["tlsVerify"] != false {
+	if err != nil || stored["issuerUrl"] != issuer || stored["redirectUrl"] != "https://git-ctx.internal/auth/callback" || stored["tlsVerify"] != false {
 		t.Fatalf("stored=%#v err=%v", stored, err)
 	}
 	if !a.validBootstrapToken(context.Background(), token) {
 		t.Fatal("bootstrap was revoked before a successful Keycloak platform-admin login")
+	}
+	request = httptest.NewRequest(http.MethodPut, "/api/v1/admin/settings/keycloak", strings.NewReader(fmt.Sprintf(`{"baseUrl":%q,"realm":"engineering","issuerMode":"auto","issuerUrl":%q,"clientId":"git-ctx","clientSecret":"********","redirectMode":"auto","realmRoleMappings":{"ctx-admin":"platform-admin"},"tlsVerify":false}`, server.URL, issuer)))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Change-Reason", "change realm")
+	rec = httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, request)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("realm update status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	stored, err = a.loadSettingMapRaw(context.Background(), "keycloak")
+	if err != nil || stored["issuerUrl"] != server.URL+"/realms/engineering" || stored["clientSecret"] != "client-secret" {
+		t.Fatalf("updated=%#v err=%v", stored, err)
+	}
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/v1/admin/settings/keycloak/status", nil)
+	statusRequest.Header.Set("Authorization", "Bearer "+token)
+	status := httptest.NewRecorder()
+	a.Handler().ServeHTTP(status, statusRequest)
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"status":"active"`) || !strings.Contains(status.Body.String(), `/realms/engineering`) {
+		t.Fatalf("OIDC status=%d body=%s", status.Code, status.Body.String())
+	}
+	uiRequest := httptest.NewRequest(http.MethodPut, "/api/v1/admin/settings/ui", strings.NewReader(`{"publicUrl":"https://new-git-ctx.internal"}`))
+	uiRequest.Header.Set("Authorization", "Bearer "+token)
+	uiRequest.Header.Set("Content-Type", "application/json")
+	uiRequest.Header.Set("X-Change-Reason", "change public URL")
+	uiResult := httptest.NewRecorder()
+	a.Handler().ServeHTTP(uiResult, uiRequest)
+	if uiResult.Code != http.StatusOK {
+		t.Fatalf("UI URL update=%d body=%s", uiResult.Code, uiResult.Body.String())
+	}
+	activeOIDC, err := a.loadOIDCConfig(context.Background())
+	if err != nil || activeOIDC.RedirectURL != "https://new-git-ctx.internal/auth/callback" || activeOIDC.PostLogoutRedirectURL != "https://new-git-ctx.internal/" {
+		t.Fatalf("active OIDC=%#v err=%v", activeOIDC, err)
 	}
 	a.Close()
 	b, err := New(context.Background(), cfg)
@@ -593,6 +648,17 @@ func TestSettingMaskPreservationAndRollback(t *testing.T) {
 	}
 	if stored["apiToken"] != "secret-one" {
 		t.Fatalf("masked update replaced secret: %#v", stored)
+	}
+	rec = request(http.MethodGet, "/api/v1/admin/settings/ui/versions", "")
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "secret-one") || strings.Contains(rec.Body.String(), "value_encrypted") {
+		t.Fatalf("unsafe versions status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var versions []struct {
+		Version int  `json:"version"`
+		Current bool `json:"current"`
+	}
+	if err = json.Unmarshal(rec.Body.Bytes(), &versions); err != nil || len(versions) != 2 || versions[0].Version != 2 || !versions[0].Current || versions[1].Current {
+		t.Fatalf("versions=%#v err=%v", versions, err)
 	}
 	rec = request(http.MethodPost, "/api/v1/admin/settings/ui/rollback", `{"targetVersion":1,"reason":"restore test"}`)
 	if rec.Code != 200 {

@@ -273,10 +273,12 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/tools/query/test", a.authenticate(http.HandlerFunc(a.testQuery)))
 	a.mux.Handle("GET /api/v1/admin/settings", a.admin(http.HandlerFunc(a.listSettings)))
 	a.mux.Handle("GET /api/v1/admin/settings/{category}", a.settingsAuthorize(http.HandlerFunc(a.getSetting)))
+	a.mux.Handle("GET /api/v1/admin/settings/{category}/versions", a.settingsAuthorize(http.HandlerFunc(a.settingVersions)))
 	a.mux.Handle("PUT /api/v1/admin/settings/{category}", a.settingsAuthorize(http.HandlerFunc(a.putSetting)))
 	a.mux.Handle("POST /api/v1/admin/settings/{category}/rollback", a.settingsAuthorize(http.HandlerFunc(a.rollbackSetting)))
 	a.mux.Handle("POST /api/v1/admin/settings/{category}/test", a.settingsAuthorize(http.HandlerFunc(a.testIntegrationSetting)))
 	a.mux.Handle("POST /api/v1/admin/settings/keycloak/preview", a.settingsAuthorize(http.HandlerFunc(a.previewKeycloak)))
+	a.mux.Handle("GET /api/v1/admin/settings/keycloak/status", a.settingsAuthorize(http.HandlerFunc(a.keycloakStatus)))
 	a.mux.Handle("GET /api/v1/admin/audit-logs", a.authorize(http.HandlerFunc(a.auditLogs), "auditor", "security-admin"))
 	a.mux.Handle("GET /api/v1/admin/api-keys", a.authorize(http.HandlerFunc(a.adminAPIKeys), "security-admin"))
 	a.mux.Handle("POST /api/v1/admin/api-keys/{id}/revoke", a.authorize(http.HandlerFunc(a.adminRevokeKey), "security-admin"))
@@ -506,14 +508,9 @@ func (a *App) callback(w http.ResponseWriter, r *http.Request) {
 		problem(w, 503, "sso_unavailable", "Keycloak setting is unavailable")
 		return
 	}
-	oauthCfg, err := auth.OAuthConfig(r.Context(), cfg)
-	if err != nil {
-		problem(w, 503, "sso_unavailable", err.Error())
-		return
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	token, err := oauthCfg.Exchange(ctx, code, oauth2.VerifierOption(verifier))
+	token, err := auth.ExchangeCode(ctx, cfg, code, verifier)
 	if err != nil {
 		problem(w, 401, "token_exchange_failed", "Keycloak code exchange failed")
 		return
@@ -1093,7 +1090,13 @@ func (a *App) putSetting(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.audit(r, p, "settings.update", category, category, "success", map[string]any{"version": version})
-	jsonOut(w, 200, map[string]any{"category": category, "version": version, "secretFields": "encrypted and masked"})
+	result := map[string]any{"category": category, "version": version, "secretFields": "encrypted and masked", "applied": true, "appliedAt": time.Now().UTC()}
+	if category == "keycloak" {
+		result["issuerUrl"] = value["issuerUrl"]
+		result["redirectUrl"] = value["redirectUrl"]
+		result["loginTestUrl"] = "/auth/login?return_to=/"
+	}
+	jsonOut(w, 200, result)
 }
 func (a *App) testIntegrationSetting(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
@@ -1201,6 +1204,35 @@ func (a *App) rollbackSetting(w http.ResponseWriter, r *http.Request) {
 	a.audit(r, p, "settings.rollback", category, category, "success", map[string]any{"fromVersion": current, "targetVersion": in.TargetVersion, "newVersion": newVersion})
 	jsonOut(w, 200, map[string]any{"category": category, "version": newVersion, "restoredFrom": in.TargetVersion})
 }
+func (a *App) settingVersions(w http.ResponseWriter, r *http.Request) {
+	category := r.PathValue("category")
+	if !settingCategories()[category] {
+		problem(w, 404, "not_found", "Setting category not found")
+		return
+	}
+	rows, err := a.store.DB.QueryContext(r.Context(), a.store.Rebind(`SELECT v.version,v.changed_by,v.reason,v.created_at,CASE WHEN s.version=v.version THEN 1 ELSE 0 END FROM setting_versions v LEFT JOIN system_settings s ON s.category=v.category WHERE v.category=? ORDER BY v.version DESC LIMIT 100`), category)
+	if err != nil {
+		problem(w, 500, "setting_versions_failed", err.Error())
+		return
+	}
+	defer rows.Close()
+	versions := make([]map[string]any, 0)
+	for rows.Next() {
+		var version, current int
+		var changedBy, reason string
+		var createdAt time.Time
+		if err = rows.Scan(&version, &changedBy, &reason, &createdAt, &current); err != nil {
+			problem(w, 500, "setting_versions_failed", err.Error())
+			return
+		}
+		versions = append(versions, map[string]any{"version": version, "changedBy": changedBy, "reason": reason, "createdAt": createdAt, "current": current == 1})
+	}
+	if err = rows.Err(); err != nil {
+		problem(w, 500, "setting_versions_failed", err.Error())
+		return
+	}
+	jsonOut(w, 200, versions)
+}
 func (a *App) getSetting(w http.ResponseWriter, r *http.Request) {
 	category := r.PathValue("category")
 	if !settingCategories()[category] {
@@ -1261,6 +1293,23 @@ func (a *App) previewKeycloak(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
 	a.audit(r, p, "keycloak.claim_preview", "keycloak", "candidate", "success", nil)
 	jsonOut(w, 200, map[string]any{"subject": identity.Subject, "username": identity.Username, "email": identity.Email, "groups": identity.Groups, "roles": identity.Roles, "bitbucketUserSlug": identity.BitbucketUserSlug, "gitlabUserId": identity.GitLabUserID})
+}
+func (a *App) keycloakStatus(w http.ResponseWriter, r *http.Request) {
+	cfg, err := a.loadOIDCConfig(r.Context())
+	if err != nil {
+		problem(w, http.StatusNotFound, "sso_not_configured", err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	metadata, err := auth.InspectOIDC(ctx, cfg)
+	if err != nil {
+		problem(w, http.StatusServiceUnavailable, "sso_discovery_failed", err.Error())
+		return
+	}
+	var version int
+	_ = a.store.DB.QueryRowContext(ctx, a.store.Rebind(`SELECT version FROM system_settings WHERE category=?`), "keycloak").Scan(&version)
+	jsonOut(w, http.StatusOK, map[string]any{"status": "active", "version": version, "issuerUrl": cfg.IssuerURL, "clientId": cfg.ClientID, "redirectUrl": cfg.RedirectURL, "tlsVerify": cfg.TLSVerify == nil || *cfg.TLSVerify, "metadata": metadata, "checkedAt": time.Now().UTC()})
 }
 func (a *App) receiveWebhook(w http.ResponseWriter, r *http.Request) {
 	sourceType := strings.TrimPrefix(r.URL.Path, "/webhooks/")
@@ -1381,27 +1430,60 @@ func (a *App) normalizeSetting(ctx context.Context, category string, value map[s
 	if category != "keycloak" {
 		return nil
 	}
-	issuer, _ := value["issuerUrl"].(string)
-	baseURL, _ := value["baseUrl"].(string)
-	realm, _ := value["realm"].(string)
-	if strings.TrimSpace(issuer) == "" && strings.TrimSpace(baseURL) != "" && strings.TrimSpace(realm) != "" {
-		parsed, err := url.Parse(strings.TrimSpace(baseURL))
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			return errors.New("keycloak.baseUrl must be an absolute URL")
+	issuer := strings.TrimSpace(stringValue(value, "issuerUrl"))
+	baseURL := strings.TrimSpace(stringValue(value, "baseUrl"))
+	realm := strings.TrimSpace(stringValue(value, "realm"))
+	derivedIssuer := ""
+	if baseURL != "" && realm != "" {
+		parsed, err := url.Parse(baseURL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+			return errors.New("keycloak.baseUrl must be an absolute URL without credentials or fragment")
 		}
-		issuer = strings.TrimRight(parsed.String(), "/") + "/realms/" + url.PathEscape(strings.TrimSpace(realm))
-		value["issuerUrl"] = issuer
+		derivedIssuer = strings.TrimRight(parsed.String(), "/") + "/realms/" + url.PathEscape(realm)
 	}
-	if strings.TrimSpace(issuer) == "" {
-		return errors.New("keycloak issuerUrl or both baseUrl and realm are required")
+	issuerMode := strings.TrimSpace(stringValue(value, "issuerMode"))
+	if issuerMode == "" {
+		if derivedIssuer != "" && (issuer == "" || strings.EqualFold(strings.TrimRight(issuer, "/"), strings.TrimRight(derivedIssuer, "/"))) {
+			issuerMode = "auto"
+		} else {
+			issuerMode = "custom"
+		}
 	}
+	if issuerMode != "auto" && issuerMode != "custom" {
+		return errors.New("keycloak.issuerMode must be auto or custom")
+	}
+	if issuerMode == "auto" {
+		if derivedIssuer == "" {
+			return errors.New("keycloak baseUrl and realm are required in automatic issuer mode")
+		}
+		issuer = derivedIssuer
+	}
+	if issuer == "" {
+		return errors.New("keycloak issuerUrl is required in custom issuer mode")
+	}
+	value["issuerMode"], value["issuerUrl"] = issuerMode, strings.TrimRight(issuer, "/")
 	public := strings.TrimRight(a.publicURL(ctx), "/")
-	if redirect, _ := value["redirectUrl"].(string); strings.TrimSpace(redirect) == "" {
-		value["redirectUrl"] = public + "/auth/callback"
+	derivedRedirect, derivedLogout := public+"/auth/callback", public+"/"
+	redirect := strings.TrimSpace(stringValue(value, "redirectUrl"))
+	logoutRedirect := strings.TrimSpace(stringValue(value, "postLogoutRedirectUrl"))
+	redirectMode := strings.TrimSpace(stringValue(value, "redirectMode"))
+	if redirectMode == "" {
+		if (redirect == "" || redirect == derivedRedirect) && (logoutRedirect == "" || logoutRedirect == derivedLogout) {
+			redirectMode = "auto"
+		} else {
+			redirectMode = "custom"
+		}
 	}
-	if redirect, _ := value["postLogoutRedirectUrl"].(string); strings.TrimSpace(redirect) == "" {
-		value["postLogoutRedirectUrl"] = public + "/"
+	if redirectMode != "auto" && redirectMode != "custom" {
+		return errors.New("keycloak.redirectMode must be auto or custom")
 	}
+	if redirectMode == "auto" {
+		redirect, logoutRedirect = derivedRedirect, derivedLogout
+	}
+	if redirect == "" {
+		return errors.New("keycloak.redirectUrl is required")
+	}
+	value["redirectMode"], value["redirectUrl"], value["postLogoutRedirectUrl"] = redirectMode, redirect, logoutRedirect
 	if _, exists := value["tlsVerify"]; !exists {
 		value["tlsVerify"] = true
 	}
@@ -1420,9 +1502,6 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 		raw, _ := json.Marshal(value)
 		var cfg auth.OIDCConfig
 		if err := json.Unmarshal(raw, &cfg); err != nil {
-			return err
-		}
-		if err := auth.ValidateOIDCConfig(ctx, cfg); err != nil {
 			return err
 		}
 		_, err := auth.OAuthConfig(ctx, cfg)
@@ -2392,6 +2471,10 @@ func truncateText(value string, limit int) string {
 	}
 	return value
 }
+func stringValue(values map[string]any, key string) string {
+	value, _ := values[key].(string)
+	return value
+}
 func stringContains(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
@@ -2778,6 +2861,12 @@ func (a *App) loadOIDCConfig(ctx context.Context) (auth.OIDCConfig, error) {
 		}
 		return auth.OIDCConfig{}, err
 	}
+	// Auto-mode values are derived again at load time so a later ui.publicUrl,
+	// Keycloak base URL or realm change is reflected by login immediately rather
+	// than leaving a stale redirect or issuer in the active runtime config.
+	if err = a.normalizeSetting(ctx, "keycloak", settings); err != nil {
+		return auth.OIDCConfig{}, err
+	}
 	raw, err := json.Marshal(settings)
 	var cfg auth.OIDCConfig
 	if err := json.Unmarshal(raw, &cfg); err != nil {
@@ -2852,6 +2941,20 @@ type statusWriter struct {
 	http.ResponseWriter
 	status int
 	bytes  int
+}
+
+// Unwrap lets net/http.ResponseController reach optional interfaces exposed by
+// the original writer. Flush is kept explicitly for handlers (including MCP
+// Streamable HTTP) that use the conventional http.Flusher type assertion.
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *statusWriter) Flush() {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func (w *statusWriter) WriteHeader(status int) {

@@ -13,29 +13,53 @@
       <img src="/logo.svg" alt="git-ctx" class="header-logo" />
       <span id="brand-tagline">사내 개발 지식 MCP</span>
       <span id="service-version" class="version-badge">v-</span>
-      <nav>
-        <button id="login">Keycloak 로그인</button
-        ><button id="logout" hidden>로그아웃</button>
+      <nav class="header-actions">
+        <button id="quick-nav-button" class="secondary" type="button" hidden>빠른 이동 <kbd>⌘K</kbd></button>
+        <div id="profile-menu" class="profile-menu" hidden>
+          <button id="profile-toggle" type="button" aria-expanded="false" aria-controls="profile-dropdown"><span id="profile-avatar">U</span><span id="profile-name">내 프로필</span></button>
+          <div id="profile-dropdown" class="profile-dropdown" hidden>
+            <button type="button" data-profile-target="account">프로필</button>
+            <button type="button" data-profile-target="connections">MCP 연결</button>
+            <button type="button" data-profile-target="keys">API 키 관리</button>
+            <button type="button" data-profile-target="activity">내 활동·저장소</button>
+            <hr />
+            <button id="profile-logout" type="button" class="danger-text">로그아웃</button>
+          </div>
+        </div>
+        <button id="login">Keycloak 로그인</button><button id="logout" hidden>로그아웃</button>
       </nav>
     </header>
     <main>
-      <section>
+      <section class="welcome-panel">
         <h1>Context7 호환 사내 문서 검색</h1>
         <p>
           Bitbucket과 GitLab 문서를 저장소 권한에 맞게 검색하고 AI 개발 도구에
           연결합니다.
         </p>
         <p id="login-version" class="version-text">서비스 버전 확인 중…</p>
-        <div id="status" class="notice">서버 상태 확인 중…</div>
-        <div id="database-status" class="notice">메타 DB 연결 확인 중…</div>
-        <div id="service-notice" class="notice" hidden></div>
+        <div class="status-row" aria-live="polite">
+          <div id="status" class="notice">서버 상태 확인 중…</div>
+          <div id="database-status" class="notice">메타 DB 연결 확인 중…</div>
+          <div id="service-notice" class="notice" hidden></div>
+        </div>
       </section>
-      <section id="account" hidden>
+      <nav id="workspace-menu" class="workspace-menu" aria-label="업무 영역" hidden>
+        <button type="button" data-workspace="personal">내 공간</button>
+        <button id="admin-workspace-button" type="button" data-workspace="admin" hidden>관리자</button>
+      </nav>
+      <div id="personal-workspace" class="workspace" hidden>
+      <nav id="personal-menu" class="personal-menu" aria-label="개인화 메뉴">
+        <button type="button" data-personal-target="account">프로필</button>
+        <button type="button" data-personal-target="connections">MCP 연결</button>
+        <button type="button" data-personal-target="keys">API 키</button>
+        <button type="button" data-personal-target="activity">내 활동</button>
+      </nav>
+      <section id="account" class="personal-panel" hidden>
         <h2>내 계정</h2>
         <p id="identity"></p>
         <p id="profile-version" class="version-text"></p>
       </section>
-      <section class="grid">
+      <section id="connections" class="grid personal-panel" hidden>
         <article>
           <h2>내 MCP 연결</h2>
           <pre>{
@@ -60,7 +84,7 @@
           </dl>
         </article>
       </section>
-      <section id="keys" hidden>
+      <section id="keys" class="personal-panel" hidden>
         <div class="section-title">
           <div>
             <h2>내 MCP API 키</h2>
@@ -122,7 +146,7 @@
         <div id="secret" class="secret" hidden></div>
         <div id="key-list" class="table-wrap"></div>
       </section>
-      <section id="activity" hidden>
+      <section id="activity" class="personal-panel" hidden>
         <h2>내 저장소와 MCP 사용량</h2>
         <h3>알림</h3>
         <div id="my-notifications" class="table-wrap"></div>
@@ -133,6 +157,7 @@
         <h3>최근 호출</h3>
         <div id="my-calls" class="table-wrap"></div>
       </section>
+      </div>
       <section id="admin" hidden>
         <div class="admin-heading">
           <div><h2>git-ctx 관리자</h2><p>연동, 검색, 보안과 운영 상태를 메뉴별로 관리합니다.</p></div>
@@ -148,6 +173,7 @@
           <div class="admin-editor">
             <select id="category" hidden aria-hidden="true"></select>
             <div id="setting-context" class="wide setting-context"></div>
+            <div id="keycloak-runtime-status" class="wide notice" hidden></div>
             <label
               >변경 사유<input id="reason" placeholder="변경 사유"
             /></label>
@@ -165,6 +191,10 @@
               <button id="rollback-setting" class="danger">
                 이전 버전 복구
               </button>
+            </div>
+            <div class="wide">
+              <h3>설정 버전 이력</h3>
+              <div id="setting-versions" class="table-wrap"></div>
             </div>
           </div>
         </div>
@@ -348,6 +378,12 @@
         </div>
       </section>
     </main>
+    <dialog id="quick-nav-dialog" class="quick-nav-dialog">
+      <div class="quick-nav-head"><strong>빠른 이동</strong><button id="quick-nav-close" type="button" aria-label="닫기">×</button></div>
+      <input id="quick-nav-query" type="search" placeholder="메뉴 검색…" autocomplete="off" />
+      <div id="quick-nav-results" class="quick-nav-results"></div>
+      <small>↑↓ 이동 · Enter 선택 · Esc 닫기</small>
+    </dialog>
     <script src="/roles.js"></script>
     <script src="/app.js"></script>
   </body>

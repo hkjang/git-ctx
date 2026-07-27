@@ -7,6 +7,7 @@ go test -race ./...
 go vet ./...
 node --check web/app.js
 node test/web/roles.test.js
+node test/web/admin-ui.test.js
 kubectl kustomize deploy/kubernetes/base
 docker build -t git-ctx:verify .
 ```
@@ -15,6 +16,15 @@ docker build -t git-ctx:verify .
 6.9.1/GitLab API 계약, ACL 비노출, MCP 세션·도구 계약, 50개 동시 호출, Webhook
 중복, Worker 재시도, Secret Scan, SQLite migration, OTLP protobuf export와 W3C
 trace context 전파, 모델 실호출 검증, source query API와 품질 지표를 포함한다.
+MCP GET은 initialize로 발급된 session에서 SSE 연결을 유지하고 DELETE가 stream과 session을
+함께 종료하는지도 검증한다.
+
+오프라인 파일명과 archive 무결성은 다음처럼 검증한다. 산출물 이름에는 플랫폼 접미사를
+붙이지 않는다.
+
+```bash
+scripts/package-offline-image.sh 0.7.0 git-ctx:v0.7.0
+```
 
 실제 PostgreSQL 백업·복원 계약 시험은 격리된 빈 시험 DB DSN을 명시해서 실행한다.
 시험은 대상 DB의 데이터를 삭제하므로 운영 DB에는 절대 지정하지 않는다.

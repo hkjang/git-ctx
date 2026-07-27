@@ -7,15 +7,15 @@
 
 | 영역 | 상태 | 구현·검증 증거 |
 |---|---|---|
-| Context7 MCP | 완료 | `/mcp` GET/POST/DELETE, initialize, session, tools/list, tools/call 및 두 호환 도구의 통합 시험 |
+| Context7 MCP | 완료 | `/mcp` GET/POST/DELETE, initialize, 세션형 SSE heartbeat·DELETE 종료, tools/list, tools/call 및 두 호환 도구의 통합 시험 |
 | 인증과 API 키 | 완료 | OIDC/JWKS, PKCE, HMAC 키 저장, 1회 노출, 회전·중지·폐기, CIDR·도구·저장소·호출량 제한 |
 | 권한 | 완료 | 사용자/그룹/키 제한을 후보 SQL 단계에서 적용하고 미인가 저장소를 일반화된 오류로 처리 |
 | Bitbucket/GitLab 어댑터 | 완료 | Bitbucket Server REST 1.0 및 GitLab API v4 계약 시험, webhook 검증·중복 제거 |
 | 색인 | 완료 | ref별 작업, 저장소 정책, Markdown/코드 청킹, Secret 차단·마스킹, 재시도·polling |
 | 검색 | 완료 | DB BM25·벡터와 선택적 OpenSearch projection, 후보 질의 ACL 필터, DB 원문 재검증, 사내 `/v1/rerank`와 장애 fallback |
 | 모델 미설정 검색 | 완료 | ACL 검증 뒤 Bitbucket/GitLab source query API, Context7 출력 조립과 안전한 BM25 fallback 계약 시험 |
-| 사용자 기능 | 완료 | 저장소·키·제한·사용량·호출·알림·MCP 설정·도구 시험 UI/API |
-| 관리자 기능 | 완료(구현 범위) | 설정·연결시험·버전·rollback, 저장소·정책·작업, MCP 도구, 키·감사·보안·상태 UI/API와 역할별 메뉴·쓰기 통제 |
+| 사용자 기능 | 완료 | 우측 상단 프로필 메뉴와 Ctrl/Cmd+K 빠른 이동, 관리자와 분리된 내 공간, 저장소·키·제한·사용량·호출·알림·MCP 설정 UI/API |
+| 관리자 기능 | 완료(구현 범위) | 설정·연결시험·비밀 없는 버전 이력·선택 rollback, 저장소·정책·작업, MCP 도구, 키·감사·보안·상태 UI/API와 역할별 메뉴·쓰기 통제 |
 | 데이터베이스 | 완료 | SQLite 회귀 시험 및 빈 PostgreSQL 16에서 001~013 migration/readiness와 암호화 백업·복원 실검증 |
 | 배포 | 완료 | 비루트 Docker 이미지 실행, Compose, Kubernetes Kustomize와 기본 NetworkPolicy 렌더링 |
 | 관측성 | 완료 | JSON 요청 로그, request ID, health/readiness, Prometheus와 동적 OTLP HTTP tracing |
@@ -26,8 +26,8 @@
 | 최초 관리자 세션 | 완료 | 일회용 토큰을 30분 HttpOnly·SameSite 세션으로 교환, Origin 검증, Keycloak 저장 시 세션·키 전역 폐기 |
 | 버전 표시 | 완료 | 공개 설정과 `/api/v1/me` 버전 제공, 로그인 전 상단·안내와 로그인 후 프로필 표시 |
 | 비밀정보 관리 | 완료(계약 시험) | 암호화 DB/Vault KV v2 backend, 등록·회전·중지, 원문 비노출, `secret://` 동적 참조와 Fail Closed |
-| 관리자 UI 구조 | 완료 | 역할별 대메뉴, 설정 종류별 탭, 고급 JSON 접기, TLS 토글·CA 조건부 표시, 저장 진행·오류 상태 |
-| Keycloak 설정 안정성 | 완료 | Base URL+Realm 정규화, Redirect 기본값, OAuth 저장 전 검증, 실제 platform-admin 로그인 뒤 Bootstrap 폐기 |
+| 관리자 UI 구조 | 완료 | 개인화 영역과 분리된 권한 기반 관리자 진입, 역할별 대메뉴, 설정 종류별 탭, 고급 JSON 접기, TLS 토글·CA 조건부 표시, 저장 진행·오류 상태 |
+| Keycloak 설정 안정성 | 완료 | 자동/직접 Issuer·Redirect 모드, Base URL/Realm 수정 재계산, 저장 후 적용 상태, Discovery/JWKS/token exchange 공통 TLS·CA·proxy, PKCE callback·세션 E2E, 실제 platform-admin 로그인 뒤 Bootstrap 폐기 |
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 
 2026-07-27 로컬 검증 결과:
@@ -44,6 +44,7 @@ PostgreSQL 16 quality benchmark contract    PASS
 PostgreSQL 16 DSN-only application startup PASS
 PostgreSQL 실패→SQLite 복구→PostgreSQL 논리 이전·재기동 PASS
 node test/web/admin-ui.test.js              PASS
+scripts/package-offline-image.sh            PASS (`git-ctx-vX.Y.Z.tar.gz`)
 Docker build + UID 10001 readiness/UI       PASS
 OpenSearch auth/mapping/bulk/ACL contract   PASS
 Default listen address :4747 readiness      PASS

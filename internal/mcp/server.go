@@ -26,9 +26,13 @@ type Server struct {
 	search   *search.Service
 	store    *store.Store
 	mu       sync.Mutex
-	sessions map[string]time.Time
+	sessions map[string]*session
 	cacheMu  sync.Mutex
 	cache    map[string]cacheEntry
+}
+type session struct {
+	expires time.Time
+	done    chan struct{}
 }
 type cacheEntry struct {
 	text    string
@@ -36,7 +40,7 @@ type cacheEntry struct {
 }
 
 func New(s *search.Service, db *store.Store) *Server {
-	return &Server{search: s, store: db, sessions: map[string]time.Time{}, cache: map[string]cacheEntry{}}
+	return &Server{search: s, store: db, sessions: map[string]*session{}, cache: map[string]cacheEntry{}}
 }
 
 type request struct {
@@ -68,16 +72,50 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
+		if sessionID == "" {
+			http.Error(w, "Mcp-Session-Id is required for an SSE stream", http.StatusBadRequest)
+			return
+		}
+		if !strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+			http.Error(w, "Accept must include text/event-stream", http.StatusNotAcceptable)
+			return
+		}
+		done, ok := s.sessionDone(sessionID)
+		if !ok {
+			http.Error(w, "MCP session not found", http.StatusNotFound)
+			return
+		}
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming is unsupported", http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
 		w.WriteHeader(http.StatusOK)
-		return
+		_, _ = w.Write([]byte(": git-ctx stream ready\n\n"))
+		flusher.Flush()
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				if _, err := w.Write([]byte(": keepalive\n\n")); err != nil {
+					return
+				}
+				flusher.Flush()
+			}
+		}
 	}
 	if r.Method == http.MethodDelete {
 		if sessionID != "" {
-			s.mu.Lock()
-			delete(s.sessions, sessionID)
-			s.mu.Unlock()
+			s.closeSession(sessionID)
 		}
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -152,27 +190,53 @@ func (s *Server) newSession() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
-	for key, expires := range s.sessions {
-		if now.After(expires) {
+	for key, current := range s.sessions {
+		if now.After(current.expires) {
+			close(current.done)
 			delete(s.sessions, key)
 		}
 	}
-	s.sessions[id] = now.Add(30 * time.Minute)
+	s.sessions[id] = &session{expires: now.Add(30 * time.Minute), done: make(chan struct{})}
 	return id
 }
 func (s *Server) validSession(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	expires, ok := s.sessions[id]
+	current, ok := s.sessions[id]
 	if !ok {
 		return false
 	}
-	if time.Now().After(expires) {
+	if time.Now().After(current.expires) {
+		close(current.done)
 		delete(s.sessions, id)
 		return false
 	}
-	s.sessions[id] = time.Now().Add(30 * time.Minute)
+	current.expires = time.Now().Add(30 * time.Minute)
 	return true
+}
+
+func (s *Server) sessionDone(id string) (<-chan struct{}, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.sessions[id]
+	if !ok || time.Now().After(current.expires) {
+		if ok {
+			close(current.done)
+			delete(s.sessions, id)
+		}
+		return nil, false
+	}
+	current.expires = time.Now().Add(30 * time.Minute)
+	return current.done, true
+}
+
+func (s *Server) closeSession(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if current, ok := s.sessions[id]; ok {
+		close(current.done)
+		delete(s.sessions, id)
+	}
 }
 
 func Catalog() []map[string]any {

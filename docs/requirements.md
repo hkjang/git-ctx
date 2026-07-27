@@ -24,7 +24,7 @@ Go 모듈형 모놀리스로 시작하되 API/MCP/indexer/scheduler 프로세스
 
 | 요구사항 | 상태 | 근거/남은 작업 |
 |---|---|---|
-| MCP initialize/list/call | 완료 | `internal/mcp`, 계약 테스트 |
+| MCP initialize/list/call | 완료 | `internal/mcp`, 계약 테스트, 세션형 GET/SSE heartbeat와 DELETE 종료 |
 | Context7 도구명·입력·텍스트 출력 | 완료 | 두 도구 스키마 및 `content[type=text]` |
 | API 키 HMAC 저장·1회 표시·회전·중지·폐기 | 완료 | 중복 유효기간, CIDR·도구·저장소·분/시/일 제한 포함 |
 | ACL 선필터와 버전별 문서 조회 | 완료 | `internal/search` SQL ACL join |
@@ -37,8 +37,8 @@ Go 모듈형 모놀리스로 시작하되 API/MCP/indexer/scheduler 프로세스
 | 하이브리드 검색 | 완료 | 동적 BM25+로컬/사내 임베딩, ACL 이후 사내 API Reranker, 장애 fallback 구현 |
 | 모델 미설정 검색 | 완료 | ACL 선검사 후 Bitbucket 6.9.1/GitLab 서버측 Query Search API, 장애·비기본 ref의 로컬 BM25 fallback |
 | 검색 품질 벤치마크 | 완료 | ACL principal별 정답 파일, Recall@K·MRR·nDCG@K 회귀 판정과 관리자 UI/API |
-| 사용자/관리자 UI | 완료 | SSO, 키·사용량, MCP 연결과 세분화 관리자 역할별 설정·소스·도구·보안·감사 화면 |
-| 관리자 동적 설정 | 완료 | DB DSN 외 전체 범주, 전용 연동 폼, 암호화·버전·마스킹, 실제 연결시험, rollback 및 즉시 반영 |
+| 사용자/관리자 UI | 완료 | 우측 상단 프로필 메뉴의 전체 개인화 기능, Ctrl/Cmd+K 빠른 이동, 권한 기반 상단 관리자 영역 분리, SSO, 키·사용량, MCP 연결과 세분화 관리자 역할별 화면 |
+| 관리자 동적 설정 | 완료 | 전체 범주와 복구 DB DSN 전환, 전용 연동 폼, 암호화·버전 이력·마스킹, 실제 연결시험, rollback 및 즉시 반영 |
 | 저장소·색인 운영 UI | 완료 | 탐색, 등록, 초기/수동/주기 색인, 작업 조회·재시도 |
 | Secret Scan | 완료 | 개인키 차단, 자격증명·클라우드 키 마스킹, 보안 이벤트 이력 |
 | 그룹 ACL | 완료 | Keycloak→Bitbucket 그룹 매핑을 사용자·API 키 후보 검색에 적용 |

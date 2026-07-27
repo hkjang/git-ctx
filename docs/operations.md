@@ -28,6 +28,12 @@ Store에 보관한다.
 ## 장애 확인
 
 - `/healthz`와 DB 연결 상태를 먼저 확인한다.
+- Keycloak 저장 후 로그인이 이전 Realm으로 이동하면 `issuerMode=auto`와 Base URL/Realm을
+  확인하고 관리자 Keycloak 탭의 적용 상태에서 최종 Issuer·Authorization·Token·JWKS
+  endpoint를 확인한다. `custom` 모드에서는 Issuer와 Redirect를 직접 갱신해야 한다.
+- 사내 CA 환경에서 Discovery는 성공하지만 callback의 token exchange만 실패하는 경우에도
+  같은 Keycloak TLS/CA/proxy 설정이 적용된다. 관리자 상태가 정상인데 실패하면 Keycloak
+  Client의 Valid Redirect URI와 Web Origin이 표시된 최종 Redirect와 정확히 같은지 확인한다.
 - 로그인 전 `/api/v1/public/status`에서 DB 연결 여부·driver·Ping 지연을 확인한다.
 - 관리자는 “데이터베이스” 메뉴 또는 `/api/v1/admin/database/status`에서 현재 DB 이름,
   서버 버전, 접속 사용자, connection pool과 최신 migration을 확인한다. DSN 원문과

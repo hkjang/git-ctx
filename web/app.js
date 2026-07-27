@@ -21,11 +21,13 @@ const categories = [
 ];
 const integrationSettingFields = {
   keycloak: [
+    ["issuerMode", "Issuer 구성 방식", "select:auto|custom", "auto"],
     ["baseUrl", "Keycloak Base URL", "url", ""],
     ["realm", "Realm", "text", ""],
     ["issuerUrl", "OIDC Issuer URL (자동 생성 또는 직접 입력)", "url", ""],
     ["clientId", "Client ID", "text", "git-ctx"],
     ["clientSecret", "Client Secret", "password", ""],
+    ["redirectMode", "Redirect 구성 방식", "select:auto|custom", "auto"],
     ["redirectUrl", "Redirect URL", "url", ""],
     ["postLogoutRedirectUrl", "Logout Redirect URL", "url", ""],
     ["scopes", "Scopes (쉼표 구분)", "array", "openid,profile,email,groups"],
@@ -233,7 +235,7 @@ $("#login").onclick = () => {
       $("#status").classList.remove("ok");
     });
 };
-$("#logout").onclick = async () => {
+const performLogout = async () => {
   const result = await api("/auth/logout", { method: "POST" });
   if (result?.logoutUrl) {
     location.href = result.logoutUrl;
@@ -241,32 +243,178 @@ $("#logout").onclick = async () => {
     location.reload();
   }
 };
+$("#logout").onclick = performLogout;
+$("#profile-logout").onclick = performLogout;
 async function boot() {
   try {
     const me = await api("/api/v1/me");
     $("#status").textContent = "Keycloak 인증이 완료되었습니다.";
     $("#status").classList.add("ok");
     $("#login").hidden = true;
-    $("#logout").hidden = false;
-    $("#account").hidden = false;
-    $("#keys").hidden = false;
-    $("#activity").hidden = false;
+    $("#logout").hidden = true;
+    $("#profile-menu").hidden = false;
+    $("#quick-nav-button").hidden = false;
+    $("#profile-name").textContent = me.Username || "내 프로필";
+    $("#profile-avatar").textContent = (me.Username || "U").slice(0, 1).toUpperCase();
     $("#identity").textContent =
       `${me.Username} · 역할: ${(me.Roles || []).join(", ")} · ACL: ${me.ACLPrincipal || "매핑되지 않음(Fail Closed)"}`;
     $("#profile-version").textContent = `서비스 버전 v${me.Version || "unknown"}`;
     const roles = new Set(me.Roles || []);
     const capabilities = GitCtxRoles.capabilitiesFor(me.Roles || []);
-    if (Object.values(capabilities).some(Boolean)) {
-      $("#admin").hidden = false;
+    const hasAdmin = Object.values(capabilities).some(Boolean);
+    if (hasAdmin) {
       setupAdmin(roles, capabilities);
       setupOps(capabilities);
     }
+    setupWorkspaceNavigation(hasAdmin);
+    setupProfileMenu();
+    setupQuickNavigation(capabilities);
+    applyInitialNavigation(hasAdmin);
     loadKeys();
     loadActivity();
   } catch (e) {
     $("#status").textContent =
       "Keycloak으로 로그인하면 개인 MCP 키와 관리자 기능을 사용할 수 있습니다.";
   }
+}
+let openWorkspaceView = () => {};
+let openPersonalView = () => {};
+function setupWorkspaceNavigation(hasAdmin) {
+  $("#workspace-menu").hidden = false;
+  $("#admin-workspace-button").hidden = !hasAdmin;
+  setupPersonalNavigation();
+  openWorkspaceView = (workspace) => {
+    const admin = workspace === "admin" && hasAdmin;
+    $("#personal-workspace").hidden = admin;
+    $("#admin").hidden = !admin;
+    document.querySelectorAll("[data-workspace]").forEach((button) => {
+      const active = button.dataset.workspace === (admin ? "admin" : "personal");
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-current", active ? "page" : "false");
+    });
+  };
+  document.querySelectorAll("[data-workspace]").forEach(
+    (button) => (button.onclick = () => openWorkspaceView(button.dataset.workspace)),
+  );
+  openWorkspaceView("personal");
+}
+function applyInitialNavigation(hasAdmin) {
+  if (location.hash === "#admin/keycloak" && hasAdmin) {
+    openWorkspaceView("admin");
+    document.querySelector('[data-admin-target="settings-admin"]')?.click();
+    document.querySelector('[data-setting-tab="keycloak"]')?.click();
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+}
+function setupPersonalNavigation() {
+  openPersonalView = (target) => {
+    document.querySelectorAll(".personal-panel").forEach(
+      (panel) => (panel.hidden = panel.id !== target),
+    );
+    document.querySelectorAll("[data-personal-target]").forEach((button) => {
+      const active = button.dataset.personalTarget === target;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-current", active ? "page" : "false");
+    });
+  };
+  document.querySelectorAll("[data-personal-target]").forEach(
+    (button) => (button.onclick = () => openPersonalView(button.dataset.personalTarget)),
+  );
+  openPersonalView("account");
+}
+function navigatePersonal(target) {
+  openWorkspaceView("personal");
+  openPersonalView(target);
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+function setupProfileMenu() {
+  const toggle = $("#profile-toggle");
+  const dropdown = $("#profile-dropdown");
+  const close = () => {
+    dropdown.hidden = true;
+    toggle.setAttribute("aria-expanded", "false");
+  };
+  toggle.onclick = (event) => {
+    event.stopPropagation();
+    dropdown.hidden = !dropdown.hidden;
+    toggle.setAttribute("aria-expanded", String(!dropdown.hidden));
+  };
+  document.querySelectorAll("[data-profile-target]").forEach((button) => {
+    button.onclick = () => {
+      navigatePersonal(button.dataset.profileTarget);
+      close();
+    };
+  });
+  document.addEventListener("click", (event) => {
+    if (!$("#profile-menu").contains(event.target)) close();
+  });
+}
+function setupQuickNavigation(capabilities) {
+  const dialog = $("#quick-nav-dialog");
+  const query = $("#quick-nav-query");
+  const personal = [
+    ["프로필", "내 공간", () => navigatePersonal("account")],
+    ["MCP 연결", "내 공간", () => navigatePersonal("connections")],
+    ["API 키 관리", "내 공간", () => navigatePersonal("keys")],
+    ["내 활동·저장소", "내 공간", () => navigatePersonal("activity")],
+  ];
+  const admin = [
+    ["관리자 설정", "관리자", "settings-admin", capabilities.settings],
+    ["MCP 도구 운영", "관리자", "mcp-admin-section", capabilities.mcp],
+    ["소스·색인", "관리자", "source-admin-section", capabilities.source],
+    ["검색 품질", "관리자", "quality-admin-section", capabilities.quality],
+    ["보안·Secret", "관리자", "security-admin-section", capabilities.security || capabilities.securityEvents],
+    ["감사 로그", "관리자", "audit-admin-section", capabilities.audit],
+    ["데이터베이스", "관리자", "database-admin-section", capabilities.status],
+    ["운영 상태", "관리자", "status-admin-section", capabilities.status],
+    ["백업·복구", "관리자", "backup-admin-section", capabilities.backup],
+  ].filter((entry) => entry[3]).map(([label, group, target]) => [label, group, () => {
+    openWorkspaceView("admin");
+    document.querySelector(`[data-admin-target="${target}"]`)?.click();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }]);
+  const entries = [...personal, ...admin];
+  let selected = 0;
+  const render = () => {
+    const needle = query.value.trim().toLowerCase();
+    const filtered = entries.filter(([label, group]) => `${label} ${group}`.toLowerCase().includes(needle));
+    selected = 0;
+    $("#quick-nav-results").innerHTML = filtered.map(([label, group], index) => `<button type="button" class="${index === 0 ? "active" : ""}" data-quick-index="${entries.indexOf(filtered[index])}"><span>${esc(label)}</span><small>${esc(group)}</small></button>`).join("") || '<div class="empty">일치하는 메뉴가 없습니다.</div>';
+    document.querySelectorAll("[data-quick-index]").forEach((button) => {
+      button.onclick = () => {
+        entries[Number(button.dataset.quickIndex)][2]();
+        dialog.close();
+      };
+    });
+  };
+  const open = () => {
+    query.value = "";
+    render();
+    dialog.showModal();
+    query.focus();
+  };
+  $("#quick-nav-button").onclick = open;
+  $("#quick-nav-close").onclick = () => dialog.close();
+  query.oninput = render;
+  query.onkeydown = (event) => {
+    const buttons = [...document.querySelectorAll("[data-quick-index]")];
+    if (!buttons.length) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      selected = (selected + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+      buttons.forEach((button, index) => button.classList.toggle("active", index === selected));
+      buttons[selected].scrollIntoView({ block: "nearest" });
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      buttons[selected].click();
+    }
+  };
+  document.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      dialog.open ? dialog.close() : open();
+    }
+  });
 }
 async function loadActivity() {
   try {
@@ -452,12 +600,14 @@ function renderSettingFields(category, value) {
           $("#setting-json").value = JSON.stringify(next, null, 2);
           field.setCustomValidity("");
           if (field.dataset.settingKey === "tlsVerify") applyTLSFieldState();
+          if (category === "keycloak") applyKeycloakModeState();
         } catch {
           field.setCustomValidity("올바른 JSON을 입력하세요.");
         }
       }),
   );
   applyTLSFieldState();
+  if (category === "keycloak") applyKeycloakModeState();
 }
 function applyTLSFieldState() {
   const toggle = document.querySelector('[data-setting-key="tlsVerify"]');
@@ -470,6 +620,40 @@ function applyTLSFieldState() {
     caField.hidden = !enabled;
     caField.querySelectorAll("input,textarea").forEach((field) => (field.disabled = !enabled));
   }
+}
+function applyKeycloakModeState() {
+  const issuerMode = document.querySelector('[data-setting-key="issuerMode"]')?.value || "auto";
+  const redirectMode = document.querySelector('[data-setting-key="redirectMode"]')?.value || "auto";
+  const base = document.querySelector('[data-setting-key="baseUrl"]');
+  const realm = document.querySelector('[data-setting-key="realm"]');
+  const issuer = document.querySelector('[data-setting-key="issuerUrl"]');
+  const redirect = document.querySelector('[data-setting-key="redirectUrl"]');
+  const logout = document.querySelector('[data-setting-key="postLogoutRedirectUrl"]');
+  if (issuer) {
+    issuer.readOnly = issuerMode === "auto";
+    if (issuerMode === "auto" && base?.value && realm?.value) {
+      try {
+        issuer.value = `${new URL(base.value).toString().replace(/\/$/, "")}/realms/${encodeURIComponent(realm.value.trim())}`;
+      } catch {}
+    }
+  }
+  if (redirect) {
+    redirect.readOnly = redirectMode === "auto";
+    if (redirectMode === "auto") redirect.value = `${location.origin}/auth/callback`;
+  }
+  if (logout) {
+    logout.readOnly = redirectMode === "auto";
+    if (redirectMode === "auto") logout.value = `${location.origin}/`;
+  }
+  try {
+    const value = JSON.parse($("#setting-json").value || "{}");
+    value.issuerMode = issuerMode;
+    value.redirectMode = redirectMode;
+    if (issuer) value.issuerUrl = issuer.value;
+    if (redirect) value.redirectUrl = redirect.value;
+    if (logout) value.postLogoutRedirectUrl = logout.value;
+    $("#setting-json").value = JSON.stringify(value, null, 2);
+  } catch {}
 }
 function setupAdmin(roles, capabilities) {
   const allowedCategories = GitCtxRoles.categoriesFor(categories, [...roles]);
@@ -491,6 +675,7 @@ function setupAdmin(roles, capabilities) {
     const meta = settingCategoryMeta[category] || [category, "동적 운영 설정"];
     $("#setting-context").innerHTML = `<strong>${esc(meta[0])}</strong><span>${esc(meta[1])}</span>`;
     $("#login-keycloak").hidden = category !== "keycloak";
+    $("#keycloak-runtime-status").hidden = category !== "keycloak";
     $("#load-setting").click();
   };
   document.querySelectorAll("[data-setting-tab]").forEach(
@@ -502,6 +687,8 @@ function setupAdmin(roles, capabilities) {
       const x = await api(`/api/v1/admin/settings/${$("#category").value}`);
       $("#setting-json").value = JSON.stringify(x.value, null, 2);
       renderSettingFields($("#category").value, x.value);
+      refreshSettingVersions($("#category").value);
+      if ($("#category").value === "keycloak") refreshKeycloakStatus();
       showAdmin(
         `버전 ${x.version}을 불러왔습니다. 마스킹 값은 새 Secret으로 교체하지 않으면 기존 값이 보존됩니다.`,
         true,
@@ -514,6 +701,8 @@ function setupAdmin(roles, capabilities) {
       const defaults = settingDefaults($("#category").value);
       $("#setting-json").value = JSON.stringify(defaults, null, 2);
       renderSettingFields($("#category").value, defaults);
+      refreshSettingVersions($("#category").value);
+      if ($("#category").value === "keycloak") refreshKeycloakStatus();
       showAdmin(
         "아직 저장되지 않은 영역입니다. 기본 템플릿을 불러왔습니다.",
         true,
@@ -566,7 +755,7 @@ function setupAdmin(roles, capabilities) {
   };
   $("#login-keycloak").onclick = () => {
     if ($("#category").value !== "keycloak") return;
-    location.href = "/auth/login?return_to=/";
+    location.href = `/auth/login?return_to=${encodeURIComponent("/#admin/keycloak")}`;
   };
   $("#save-setting").onclick = async () => {
     const button = $("#save-setting");
@@ -593,6 +782,7 @@ function setupAdmin(roles, capabilities) {
           true,
         );
       } else showAdmin(`버전 ${x.version} 저장 완료`, true);
+      if ($("#category").value === "keycloak") refreshKeycloakStatus();
       $("#reason").value = "";
     } catch (e) {
       showAdmin(`저장하지 못했습니다: ${e.message}`, false);
@@ -623,6 +813,52 @@ function setupAdmin(roles, capabilities) {
       showAdmin(e.message, false);
     }
   };
+}
+async function refreshKeycloakStatus() {
+  const target = $("#keycloak-runtime-status");
+  target.hidden = false;
+  target.className = "notice";
+  target.textContent = "저장된 OIDC 설정의 실제 Discovery 상태를 확인하고 있습니다…";
+  try {
+    const status = await api("/api/v1/admin/settings/keycloak/status");
+    target.className = "notice ok";
+    target.innerHTML = `<strong>OIDC v${status.version} 적용됨</strong><br>${esc(status.issuerUrl)}<br><small>Client ${esc(status.clientId)} · Redirect ${esc(status.redirectUrl)} · TLS 검증 ${status.tlsVerify ? "사용" : "미사용"}<br>Authorization ${esc(status.metadata?.authorizationEndpoint || "-")}<br>Token ${esc(status.metadata?.tokenEndpoint || "-")}<br>JWKS ${esc(status.metadata?.jwksUri || "-")}</small>`;
+  } catch (error) {
+    target.className = "notice error";
+    target.textContent = error.status === 404 ? "저장된 Keycloak OIDC 설정이 없습니다." : `저장된 OIDC 설정을 적용할 수 없습니다: ${error.message}`;
+  }
+}
+async function refreshSettingVersions(category) {
+  try {
+    const versions = await api(`/api/v1/admin/settings/${category}/versions`);
+    if (!versions.length) {
+      $("#setting-versions").innerHTML = '<div class="empty">저장된 버전이 없습니다.</div>';
+      return;
+    }
+    $("#setting-versions").innerHTML = `<table><thead><tr><th>버전</th><th>변경자</th><th>변경 사유</th><th>변경 시각</th><th></th></tr></thead><tbody>${versions.map((item) => `<tr><td>v${item.version}${item.current ? " · 현재" : ""}</td><td>${esc(item.changedBy)}</td><td>${esc(item.reason || "-")}</td><td>${esc(new Date(item.createdAt).toLocaleString())}</td><td>${item.current ? "" : `<button type="button" data-setting-version="${item.version}">복구</button>`}</td></tr>`).join("")}</tbody></table>`;
+    document.querySelectorAll("[data-setting-version]").forEach((button) => {
+      button.onclick = async () => {
+        const reason = prompt(`v${button.dataset.settingVersion} 값으로 복구하는 사유`);
+        if (!reason) return;
+        try {
+          const restored = await api(`/api/v1/admin/settings/${category}/rollback`, {
+            method: "POST",
+            body: JSON.stringify({ targetVersion: Number(button.dataset.settingVersion), reason }),
+          });
+          showAdmin(`v${restored.restoredFrom} 값으로 새 버전 v${restored.version}을 생성했습니다.`, true);
+          $("#load-setting").click();
+        } catch (error) {
+          showAdmin(error.message, false);
+        }
+      };
+    });
+  } catch (error) {
+    if (error.status === 404) {
+      $("#setting-versions").innerHTML = '<div class="empty">저장된 버전이 없습니다.</div>';
+    } else {
+      $("#setting-versions").innerHTML = `<div class="notice error">${esc(error.message)}</div>`;
+    }
+  }
 }
 let discovered = [];
 let activeCapabilities = {};

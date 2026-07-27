@@ -1,11 +1,14 @@
 package mcp
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"git-ctx/internal/auth"
@@ -89,6 +92,58 @@ func TestInitializeNegotiatesProtocolAndSessionLifecycle(t *testing.T) {
 	s.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("deleted session status=%d", rec.Code)
+	}
+}
+
+func TestStreamableHTTPGETKeepsSSEOpenUntilSessionDelete(t *testing.T) {
+	s := fixture(t)
+	httpServer := httptest.NewServer(s)
+	defer httpServer.Close()
+	initialize, err := http.Post(httpServer.URL, "application/json", bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, initialize.Body)
+	initialize.Body.Close()
+	sessionID := initialize.Header.Get("Mcp-Session-Id")
+	if sessionID == "" {
+		t.Fatal("missing session id")
+	}
+	request, _ := http.NewRequest(http.MethodGet, httpServer.URL, nil)
+	request.Header.Set("Mcp-Session-Id", sessionID)
+	request.Header.Set("Accept", "text/event-stream")
+	stream, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Body.Close()
+	if stream.StatusCode != http.StatusOK || !strings.HasPrefix(stream.Header.Get("Content-Type"), "text/event-stream") || stream.Header.Get("X-Accel-Buffering") != "no" {
+		t.Fatalf("status=%d headers=%v", stream.StatusCode, stream.Header)
+	}
+	line, err := bufio.NewReader(stream.Body).ReadString('\n')
+	if err != nil || line != ": git-ctx stream ready\n" {
+		t.Fatalf("line=%q err=%v", line, err)
+	}
+	deleteRequest, _ := http.NewRequest(http.MethodDelete, httpServer.URL, nil)
+	deleteRequest.Header.Set("Mcp-Session-Id", sessionID)
+	deleted, err := http.DefaultClient.Do(deleteRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleted.Body.Close()
+	if deleted.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete=%d", deleted.StatusCode)
+	}
+	request, _ = http.NewRequest(http.MethodGet, httpServer.URL, nil)
+	request.Header.Set("Mcp-Session-Id", sessionID)
+	request.Header.Set("Accept", "text/event-stream")
+	rejected, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejected.Body.Close()
+	if rejected.StatusCode != http.StatusNotFound {
+		t.Fatalf("deleted session GET=%d", rejected.StatusCode)
 	}
 }
 

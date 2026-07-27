@@ -6,6 +6,9 @@
 * {
   box-sizing: border-box;
 }
+[hidden] {
+  display: none !important;
+}
 body {
   margin: 0;
 }
@@ -74,6 +77,7 @@ header nav {
 header nav button {
   background: #eef2ff;
   color: #20366b;
+  white-space: nowrap;
 }
 main {
   max-width: 1120px;
@@ -137,6 +141,173 @@ pre {
 .notice.error {
   background: #fee4e2;
   color: #9b1c14;
+}
+.status-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.status-row .notice {
+  display: block;
+}
+.workspace-menu {
+  display: flex;
+  gap: 8px;
+  margin: 22px 0;
+  padding: 7px;
+  border: 1px solid #cad5e5;
+  border-radius: 12px;
+  background: #f3f6fb;
+}
+.header-actions {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.header-actions kbd {
+  padding: 1px 5px;
+  border: 1px solid #93a4bd;
+  border-radius: 5px;
+  font-size: 11px;
+}
+.profile-menu {
+  position: relative;
+}
+#profile-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #fff;
+  color: #172b4d;
+}
+#profile-avatar {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #203f9a;
+  color: #fff;
+  font-weight: 700;
+}
+.profile-dropdown {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 220px;
+  padding: 8px;
+  border: 1px solid #cad5e5;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 14px 40px rgb(20 44 82 / 18%);
+}
+.profile-dropdown button {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: #344054;
+}
+.profile-dropdown button:hover {
+  background: #eef3fa;
+}
+.profile-dropdown hr {
+  border: 0;
+  border-top: 1px solid #e1e7ef;
+}
+.profile-dropdown .danger-text {
+  color: #a4322b;
+}
+.quick-nav-dialog {
+  width: min(560px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid #aebbd0;
+  border-radius: 14px;
+  box-shadow: 0 22px 70px rgb(12 30 60 / 30%);
+}
+.quick-nav-dialog::backdrop {
+  background: rgb(15 25 45 / 48%);
+}
+.quick-nav-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px 8px;
+}
+.quick-nav-head button {
+  padding: 4px 9px;
+  background: transparent;
+  color: #526079;
+  font-size: 22px;
+}
+#quick-nav-query {
+  width: calc(100% - 32px);
+  margin: 0 16px 10px;
+  font-size: 16px;
+}
+.quick-nav-results {
+  max-height: 360px;
+  overflow: auto;
+  padding: 0 8px 8px;
+}
+.quick-nav-results button {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  background: transparent;
+  color: #344054;
+  text-align: left;
+}
+.quick-nav-results button:hover,
+.quick-nav-results button.active {
+  background: #e8efff;
+  color: #203f9a;
+}
+.quick-nav-dialog > small {
+  display: block;
+  padding: 8px 16px 14px;
+  color: #667085;
+}
+.workspace-menu button {
+  flex: 1;
+  background: transparent;
+  color: #526079;
+  border: 1px solid transparent;
+}
+.workspace-menu button.active {
+  background: #fff;
+  border-color: #a9bbd5;
+  color: #172b4d;
+  box-shadow: 0 2px 8px rgb(20 44 82 / 10%);
+  font-weight: 700;
+}
+#admin-workspace-button.active {
+  border-color: #9eb1ed;
+  color: #203f9a;
+}
+.personal-menu {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  margin-bottom: 20px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #dce3ed;
+}
+.personal-menu button {
+  flex: 0 0 auto;
+  background: transparent;
+  color: #526079;
+  border: 1px solid transparent;
+}
+.personal-menu button.active {
+  background: #e8f5f2;
+  border-color: #acd5cb;
+  color: #176b5b;
+  font-weight: 700;
 }
 .admin-heading {
   display: flex;
@@ -354,10 +525,43 @@ textarea {
   main {
     padding: 24px 14px;
   }
+  header {
+    height: 60px;
+    padding: 0 14px;
+    gap: 8px;
+  }
+  header .header-logo {
+    width: 132px;
+    height: 34px;
+  }
+  header nav button {
+    padding: 8px 10px;
+    font-size: 14px;
+  }
+  .welcome-panel {
+    padding: 24px 20px;
+  }
+  .status-row {
+    align-items: stretch;
+  }
+  .status-row .notice {
+    width: 100%;
+  }
   h1 {
     font-size: 27px;
   }
   header span {
     display: none;
+  }
+  header #profile-avatar {
+    display: inline-grid;
+  }
+  #quick-nav-button {
+    padding-inline: 10px;
+    font-size: 0;
+  }
+  #quick-nav-button kbd {
+    display: inline-block;
+    font-size: 11px;
   }
 }

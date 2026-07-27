@@ -6,6 +6,29 @@
 
 ## Keycloak
 
+Keycloak 설정은 Issuer와 Redirect 각각 `auto` 또는 `custom` 모드를 사용한다. `auto`
+Issuer는 Base URL과 Realm을 저장할 때마다 다시 계산하므로 Realm을 수정해도 과거
+`issuerUrl`이 남지 않는다. `auto` Redirect는 현재 `ui.publicUrl`에서 callback과 logout
+URI를 다시 계산한다. 별도 프록시 경로나 전용 callback을 쓸 때만 `custom`을 선택한다.
+
+저장 전 Discovery, Authorization/Token endpoint와 OAuth client 설정을 검증하며 저장
+응답은 `applied=true`, 적용 버전, 최종 Issuer와 Redirect를 반환한다. 저장 후 관리자
+화면의 “OIDC 적용됨” 상태는 저장된 암호문을 다시 동적 로드해서 Discovery/JWKS/Token
+endpoint를 표시하므로 입력값 시험과 실제 적용 상태를 구분할 수 있다. 사내 CA,
+`tlsVerify`, proxy 설정은 Discovery와 JWKS뿐 아니라 Authorization Code token exchange에도
+동일하게 적용된다.
+
+```json
+{
+  "issuerMode": "auto",
+  "baseUrl": "https://sso.company.local",
+  "realm": "company",
+  "clientId": "git-ctx",
+  "redirectMode": "auto",
+  "tlsVerify": true
+}
+```
+
 ```json
 {
   "issuerUrl": "https://sso.company/realms/company",
