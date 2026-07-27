@@ -37,6 +37,7 @@ import (
 	"git-ctx/internal/indexer"
 	"git-ctx/internal/mcp"
 	"git-ctx/internal/observability"
+	"git-ctx/internal/opensearch"
 	"git-ctx/internal/quality"
 	"git-ctx/internal/rerank"
 	"git-ctx/internal/scheduler"
@@ -138,6 +139,7 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 		return provider
 	})
 	a.search.SetSourceLoader(a.sourceAdapter)
+	a.search.SetKeywordLoader(a.openSearchCandidates)
 	a.quality = quality.New(s, a.search)
 	a.mcp = mcp.New(a.search, s)
 	a.routes()
@@ -151,6 +153,7 @@ func (a *App) startBackground() {
 	a.cancel = cancel
 	backgroundWorker := worker.New(a.store, indexer.New(a.store, indexer.DefaultPolicy()), a.sourceAdapter)
 	backgroundWorker.SetEmbeddingFactory(a.embeddingProvider)
+	backgroundWorker.SetProjection(a.projectOpenSearch)
 	backgroundScheduler := scheduler.New(a.store, a.pollingInterval)
 	a.wg.Add(3)
 	go func() {
@@ -591,7 +594,7 @@ func roleAllowed(p auth.Principal, roles ...string) bool {
 func settingRoleAllowed(p auth.Principal, category string) bool {
 	required := map[string][]string{
 		"bitbucket": {"source-admin"}, "gitlab": {"source-admin"}, "index": {"source-admin"},
-		"mcp": {"mcp-admin"}, "search": {"search-admin"}, "model": {"search-admin"},
+		"mcp": {"mcp-admin"}, "search": {"search-admin"}, "model": {"search-admin"}, "opensearch": {"search-admin"},
 		"security": {"security-admin"}, "permissions": {"security-admin"},
 	}
 	return roleAllowed(p, required[category]...)
@@ -933,7 +936,7 @@ func (a *App) putSetting(w http.ResponseWriter, r *http.Request) {
 func (a *App) testIntegrationSetting(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
 	category := r.PathValue("category")
-	allowed := map[string]bool{"keycloak": true, "bitbucket": true, "gitlab": true, "model": true, "observability": true, "backup": true}
+	allowed := map[string]bool{"keycloak": true, "bitbucket": true, "gitlab": true, "model": true, "opensearch": true, "observability": true, "backup": true}
 	if !allowed[category] {
 		problem(w, 400, "setting_test_unsupported", "This setting category has no external or storage connection test")
 		return
@@ -1256,6 +1259,19 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 				return fmt.Errorf("reranker connection test: %w", err)
 			}
 		}
+	case "opensearch":
+		cfg, err := openSearchConfigFromMap(value)
+		if err != nil {
+			return err
+		}
+		if !cfg.Enabled {
+			return nil
+		}
+		client, err := opensearch.New(cfg)
+		if err != nil {
+			return err
+		}
+		return client.Validate(ctx)
 	case "observability":
 		return observability.Validate(ctx, observabilityConfigFromMap(value))
 	case "backup":
@@ -1511,6 +1527,67 @@ func (a *App) embeddingProvider(ctx context.Context) (embedding.Provider, error)
 	}
 	return embeddingProviderFromMap(settings)
 }
+
+func openSearchConfigFromMap(settings map[string]any) (opensearch.Config, error) {
+	cfg := opensearch.Config{Index: "git-ctx-chunks", Timeout: 30 * time.Second}
+	cfg.Enabled, _ = settings["enabled"].(bool)
+	cfg.BaseURL, _ = settings["baseUrl"].(string)
+	if value, ok := settings["index"].(string); ok && value != "" {
+		cfg.Index = value
+	}
+	cfg.Username, _ = settings["username"].(string)
+	cfg.Password, _ = settings["password"].(string)
+	cfg.APIKey, _ = settings["apiKey"].(string)
+	if seconds, ok := settings["timeoutSeconds"].(float64); ok && seconds > 0 {
+		cfg.Timeout = time.Duration(seconds * float64(time.Second))
+	}
+	if value, ok := settings["tlsVerify"].(bool); ok {
+		cfg.TLSVerify = &value
+	}
+	cfg.CACertificate, _ = settings["caCertificate"].(string)
+	cfg.ProxyURL, _ = settings["proxyUrl"].(string)
+	if cfg.Enabled && strings.TrimSpace(cfg.BaseURL) == "" {
+		return cfg, errors.New("opensearch.baseUrl is required when enabled")
+	}
+	return cfg, nil
+}
+
+func (a *App) openSearchClient(ctx context.Context) (*opensearch.Client, bool, error) {
+	settings, err := a.loadSettingMap(ctx, "opensearch")
+	if err != nil {
+		return nil, false, nil
+	}
+	cfg, err := openSearchConfigFromMap(settings)
+	if err != nil || !cfg.Enabled {
+		return nil, cfg.Enabled, err
+	}
+	client, err := opensearch.New(cfg)
+	return client, true, err
+}
+
+func (a *App) projectOpenSearch(ctx context.Context, repositoryID, ref string) error {
+	client, enabled, err := a.openSearchClient(ctx)
+	if err != nil || !enabled {
+		return err
+	}
+	return client.SyncRef(ctx, a.store, repositoryID, ref)
+}
+
+func (a *App) openSearchCandidates(ctx context.Context, repositoryID, ref string, principals []string, query string, limit int) ([]search.KeywordCandidate, error) {
+	client, enabled, err := a.openSearchClient(ctx)
+	if err != nil || !enabled {
+		return nil, err
+	}
+	candidates, err := client.Search(ctx, repositoryID, ref, principals, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]search.KeywordCandidate, len(candidates))
+	for i, candidate := range candidates {
+		out[i] = search.KeywordCandidate{ID: candidate.ID, Score: candidate.Score}
+	}
+	return out, nil
+}
 func embeddingProviderFromMap(settings map[string]any) (embedding.Provider, error) {
 	provider, _ := settings["provider"].(string)
 	if provider == "" || provider == "local" {
@@ -1537,7 +1614,7 @@ func embeddingProviderFromMap(settings map[string]any) (embedding.Provider, erro
 func settingCategories() map[string]bool {
 	return map[string]bool{
 		"keycloak": true, "bitbucket": true, "gitlab": true, "mcp": true,
-		"search": true, "model": true, "index": true, "permissions": true,
+		"search": true, "model": true, "opensearch": true, "index": true, "permissions": true,
 		"security": true, "notifications": true, "logging": true,
 		"operations": true, "ui": true,
 		"observability": true, "backup": true, "retention": true,

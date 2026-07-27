@@ -8,6 +8,7 @@ const categories = [
   "mcp",
   "search",
   "model",
+  "opensearch",
   "index",
   "permissions",
   "security",
@@ -21,6 +22,7 @@ assert.deepEqual(categoriesFor(categories, ["source-admin"]), [
 assert.deepEqual(categoriesFor(categories, ["search-admin"]), [
   "search",
   "model",
+  "opensearch",
 ]);
 assert.deepEqual(categoriesFor(categories, ["auditor"]), []);
 assert.deepEqual(categoriesFor(categories, ["platform-admin"]), categories);

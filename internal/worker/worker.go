@@ -21,6 +21,7 @@ import (
 
 type SourceFactory func(context.Context, string) (source.RepositorySource, error)
 type EmbeddingFactory func(context.Context) (embedding.Provider, error)
+type Projection func(context.Context, string, string) error
 type Worker struct {
 	store            *store.Store
 	indexer          *indexer.Indexer
@@ -28,9 +29,11 @@ type Worker struct {
 	poll             time.Duration
 	maxAttempts      int
 	embeddingFactory EmbeddingFactory
+	projection       Projection
 }
 
 func (w *Worker) SetEmbeddingFactory(factory EmbeddingFactory) { w.embeddingFactory = factory }
+func (w *Worker) SetProjection(projection Projection)          { w.projection = projection }
 
 func New(s *store.Store, idx *indexer.Indexer, f SourceFactory) *Worker {
 	return &Worker{store: s, indexer: idx, factory: f, poll: 2 * time.Second, maxAttempts: 5}
@@ -173,7 +176,15 @@ func (w *Worker) execute(ctx context.Context, j job) (err error) {
 		}
 		activeIndexer = indexer.NewWithEmbedder(w.store, policy, provider)
 	}
-	return activeIndexer.ApplyPendingJob(ctx, adapter, r.SourceType, r.Repository, []source.Reference{*selected})
+	if err := activeIndexer.ApplyPendingJob(ctx, adapter, r.SourceType, r.Repository, []source.Reference{*selected}); err != nil {
+		return err
+	}
+	if w.projection != nil {
+		if err := w.projection(ctx, j.RepositoryID, selected.Name); err != nil {
+			return fmt.Errorf("search projection: %w", err)
+		}
+	}
+	return nil
 }
 func truncate(s string, n int) string {
 	if len(s) > n {

@@ -134,7 +134,7 @@ paths:
   /api/v1/admin/settings/{category}/test:
     post:
       {
-        summary: Test and validate Keycloak source model telemetry or backup connectivity without saving,
+        summary: Test and validate Keycloak source model OpenSearch telemetry or backup connectivity without saving,
         parameters: [{ $ref: "#/components/parameters/Category" }],
         responses: { "200": { description: Verified } },
       }

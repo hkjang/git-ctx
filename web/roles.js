@@ -10,6 +10,7 @@
     mcp: "mcp-admin",
     search: "search-admin",
     model: "search-admin",
+    opensearch: "search-admin",
     permissions: "security-admin",
     security: "security-admin",
   };

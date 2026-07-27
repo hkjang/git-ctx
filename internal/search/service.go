@@ -30,13 +30,21 @@ type Config struct {
 type ConfigLoader func(context.Context) Config
 type EmbeddingLoader func(context.Context) embedding.Provider
 type RerankerLoader func(context.Context) rerank.Provider
+type KeywordCandidate struct {
+	ID    string
+	Score float64
+}
+type KeywordLoader func(context.Context, string, string, []string, string, int) ([]KeywordCandidate, error)
 type Service struct {
 	store    *store.Store
 	load     ConfigLoader
 	embedder EmbeddingLoader
 	reranker RerankerLoader
 	sources  func(context.Context, string) (source.RepositorySource, error)
+	keyword  KeywordLoader
 }
+
+func (s *Service) SetKeywordLoader(loader KeywordLoader) { s.keyword = loader }
 
 func (s *Service) SetRerankerLoader(loader RerankerLoader) {
 	if loader != nil {
@@ -214,9 +222,26 @@ WHERE r.library_id=? AND r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p
 			}
 		}
 	}
-	candidateSQL := `SELECT content,file_path,line_start,line_end,commit_id,heading,embedding FROM document_chunks WHERE repository_id=? AND ref_name=?`
+	keywordScores := map[string]float64{}
+	var keywordIDs []string
+	if s.keyword != nil {
+		if candidates, keywordErr := s.keyword(ctx, repoID, ref, principals, query, cfg.CandidateLimit); keywordErr == nil {
+			for _, candidate := range candidates {
+				if candidate.ID != "" {
+					keywordIDs = append(keywordIDs, candidate.ID)
+					keywordScores[candidate.ID] = candidate.Score
+				}
+			}
+		}
+	}
+	candidateSQL := `SELECT id,content,file_path,line_start,line_end,commit_id,heading,embedding FROM document_chunks WHERE repository_id=? AND ref_name=?`
 	args = []any{repoID, ref}
-	if len(terms) > 0 {
+	if len(keywordIDs) > 0 {
+		candidateSQL += " AND id IN (" + strings.TrimSuffix(strings.Repeat("?,", len(keywordIDs)), ",") + ")"
+		for _, id := range keywordIDs {
+			args = append(args, id)
+		}
+	} else if len(terms) > 0 {
 		candidateSQL += " AND ("
 		limit := min(len(terms), 5)
 		for n, term := range terms[:limit] {
@@ -235,18 +260,18 @@ WHERE r.library_id=? AND r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p
 	}
 	defer rows.Close()
 	type hit struct {
-		content, path, commit, heading string
-		start, end                     int
-		score                          float64
-		tokens                         []string
-		vector                         []byte
+		id, content, path, commit, heading string
+		start, end                         int
+		score                              float64
+		tokens                             []string
+		vector                             []byte
 	}
 	var hits []hit
 	df := map[string]int{}
 	totalLength := 0
 	for rows.Next() {
 		var h hit
-		if err := rows.Scan(&h.content, &h.path, &h.start, &h.end, &h.commit, &h.heading, &h.vector); err != nil {
+		if err := rows.Scan(&h.id, &h.content, &h.path, &h.start, &h.end, &h.commit, &h.heading, &h.vector); err != nil {
 			return "", err
 		}
 		h.tokens = embedding.Tokens(h.heading + " " + h.content)
@@ -291,8 +316,12 @@ WHERE r.library_id=? AND r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p
 		if cfg.VectorWeight > 0 {
 			vectorScore = embedding.Cosine(queryVector, embedding.Decode(hits[n].vector))
 		}
-		hits[n].score = cfg.KeywordWeight*bm25 + cfg.VectorWeight*math.Max(0, vectorScore)
-		if bm25 > 0 || vectorScore > 0.18 {
+		keywordScore := bm25
+		if score, ok := keywordScores[hits[n].id]; ok {
+			keywordScore = score
+		}
+		hits[n].score = cfg.KeywordWeight*keywordScore + cfg.VectorWeight*math.Max(0, vectorScore)
+		if keywordScore > 0 || vectorScore > 0.18 {
 			filtered = append(filtered, hits[n])
 		}
 	}

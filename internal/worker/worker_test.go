@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"git-ctx/internal/indexer"
@@ -83,6 +84,11 @@ func TestRunOnceClaimsAndCompletesPendingJob(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := New(db, indexer.New(db, indexer.DefaultPolicy()), func(context.Context, string) (source.RepositorySource, error) { return fakeSource{}, nil })
+	projected := false
+	w.SetProjection(func(_ context.Context, repositoryID, ref string) error {
+		projected = repositoryID == "bitbucket:7" && ref == "main"
+		return nil
+	})
 	ok, err := w.RunOnce(ctx)
 	if err != nil || !ok {
 		t.Fatalf("ok=%v err=%v", ok, err)
@@ -99,5 +105,28 @@ func TestRunOnceClaimsAndCompletesPendingJob(t *testing.T) {
 	_ = db.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id='bitbucket:7'`).Scan(&chunks)
 	if chunks != 1 {
 		t.Fatalf("chunks=%d", chunks)
+	}
+	if !projected {
+		t.Fatal("completed job did not update the search projection")
+	}
+}
+
+func TestProjectionFailureRetriesIndexJob(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:projection-failure?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('bitbucket:8','KCB','demo','Demo','bitbucket','8','/kcb/demo','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO index_jobs(id,repository_id,ref_name,kind,status) VALUES('j2','bitbucket:8','main','manual','pending')`)
+	w := New(db, indexer.New(db, indexer.DefaultPolicy()), func(context.Context, string) (source.RepositorySource, error) { return fakeSource{}, nil })
+	w.SetProjection(func(context.Context, string, string) error { return errors.New("opensearch unavailable") })
+	if ok, runErr := w.RunOnce(ctx); !ok || runErr == nil || !strings.Contains(runErr.Error(), "search projection") {
+		t.Fatalf("ok=%v err=%v", ok, runErr)
+	}
+	var status string
+	if err = db.DB.QueryRow(`SELECT status FROM index_jobs WHERE id='j2'`).Scan(&status); err != nil || status != "pending" {
+		t.Fatalf("status=%s err=%v", status, err)
 	}
 }

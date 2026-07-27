@@ -6,6 +6,7 @@ const categories = [
   "mcp",
   "search",
   "model",
+  "opensearch",
   "index",
   "permissions",
   "security",
@@ -85,6 +86,18 @@ const integrationSettingFields = {
     ["tlsVerify", "TLS 인증서 검증", "boolean", true],
     ["caCertificate", "사내 CA PEM", "textarea", ""],
     ["proxyUrl", "Proxy URL", "url", ""],
+  ],
+  opensearch: [
+    ["enabled", "OpenSearch 사용", "boolean", false],
+    ["baseUrl", "OpenSearch URL", "url", ""],
+    ["index", "청크 인덱스", "text", "git-ctx-chunks"],
+    ["username", "Username", "text", ""],
+    ["password", "Password", "password", ""],
+    ["apiKey", "API Key (Basic 인증 대체)", "password", ""],
+    ["tlsVerify", "TLS 인증서 검증", "boolean", true],
+    ["caCertificate", "사내 CA PEM", "textarea", ""],
+    ["proxyUrl", "Proxy URL", "url", ""],
+    ["timeoutSeconds", "Timeout(초)", "number", 30],
   ],
 };
 const settingDefaults = (category) =>
@@ -311,6 +324,7 @@ function renderSettingFields(category, value) {
     "bitbucket",
     "gitlab",
     "model",
+    "opensearch",
     "observability",
     "backup",
   ].includes(category);

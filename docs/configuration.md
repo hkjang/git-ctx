@@ -191,6 +191,7 @@ Proxy와 Timeout 전용 필드를 제공하고 알 수 없는 확장 필드는 �
 - GitLab: 인증된 Group API 조회
 - Embedding: OpenAI 호환 `/v1/embeddings` 실제 벡터 응답
 - Reranker: `/v1/rerank` 문서 index와 score 완전성
+- OpenSearch: 인증된 cluster 조회, 청크 index 존재 확인 또는 mapping 생성
 - OpenTelemetry: 실제 시험 span export
 - Backup: 전용 경로 생성·쓰기와 정책 검증
 
@@ -208,6 +209,31 @@ Scan·경로 정책을 통과한 로컬 청크로 대체한다. 검색 API가 �
 색인의 BM25 키워드 검색으로 Fail Safe fallback한다.
 Bitbucket code search는 기본 브랜치 계약이므로 비기본 branch/tag 질의는 버전별 로컬
 색인만 사용한다.
+
+## OpenSearch 키워드 검색
+
+`opensearch` 설정은 선택 사항이다. 관리자 화면에서 사용 여부, Base URL, index,
+Basic 인증 또는 인코딩된 API Key, TLS 검증, 사내 CA, Proxy와 Timeout을 입력하고
+저장 전에 실제 연결과 index mapping 생성을 시험한다.
+
+```json
+{
+  "enabled": true,
+  "baseUrl": "https://opensearch.company.local:9200",
+  "index": "git-ctx-chunks",
+  "username": "git-ctx",
+  "password": "********",
+  "tlsVerify": true,
+  "timeoutSeconds": 30
+}
+```
+
+활성화 뒤 저장소를 재색인하면 Worker가 해당 ref의 기존 projection을 삭제하고 Bulk
+API로 현재 청크와 ACL principal을 함께 기록한다. Projection 실패는 색인 작업 실패로
+처리되어 지수 Backoff 재시도 대상이 된다. 검색 요청은 repository, ref와 호출자
+principal을 OpenSearch `bool.filter`에 넣는다. OpenSearch에서는 청크 ID와 점수만
+받으며 출력 본문·경로·출처는 PostgreSQL의 승인된 청크에서 다시 읽는다. 장애이거나
+아직 projection이 없는 경우 기존 DB BM25 검색으로 안전하게 전환한다.
 
 ## 검색 품질 회귀 게이트
 

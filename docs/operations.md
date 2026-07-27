@@ -25,6 +25,8 @@ DSN 문자열은 설정 암호문과 API 키 검증 재료에 포함되므로 �
 - 권한 동기화가 실패하면 새 권한을 추정하지 않고 이전 캐시 만료 후 Fail Closed한다.
 - Bitbucket 장애 중에는 마지막 검증된 색인만 읽고 UI에 색인 시각을 표시한다.
 - Worker는 작업을 원자적으로 claim하고 최대 5회 지수 백오프로 재시도한다.
+- OpenSearch가 활성화되면 DB 색인 뒤 ref projection까지 성공해야 작업이 완료된다.
+  장애 시 DB의 마지막 승인 청크로 검색하고 작업은 재시도된다.
 - 15분 이상 `running`인 작업은 Scheduler가 lease 만료로 판단해 다시 대기시킨다.
 - `index.pollingMinutes` 기본값은 30분이며 Webhook 누락을 커밋/ref 재색인으로 보정한다.
 
@@ -57,6 +59,10 @@ API 키, Keycloak secret, Bitbucket PAT, 문서 전체 원문은 로그에 남�
 개인키 블록은 파일 전체를 차단하고 자격증명 대입문과 클라우드 접근 키는 청크 저장
 전에 `[REDACTED]`로 치환한다. 탐지 경로와 조치는 `index_security_events`에
 기록되지만 탐지된 원문은 기록하지 않는다.
+
+OpenSearch `_source`는 MCP 응답 원문으로 사용하지 않는다. 저장소·ref·principal ACL은
+OpenSearch 후보 질의에 포함되며, 후보 ID는 현재 DB에서 다시 조회한다. 권한 회수는 DB의
+저장소 ACL 검사에서 즉시 차단되고 다음 projection에서 검색 index ACL도 갱신된다.
 
 ## DB migration
 

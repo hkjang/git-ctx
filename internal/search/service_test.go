@@ -113,6 +113,34 @@ func TestSourceQueryAPIUsedWithoutRemoteModelsAfterACL(t *testing.T) {
 	}
 }
 
+func TestOpenSearchCandidatesAreHydratedFromIndexedDatabase(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:keyword-candidate?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r','core','demo','Demo','gitlab','1','/core/demo','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r','alice','read')`)
+	_, _ = db.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('safe','r','main','abc','docs/safe.md',1,3,'Unrelated heading','document','authoritative database content','hash')`)
+	service := New(db)
+	service.SetConfigLoader(func(context.Context) Config {
+		return Config{KeywordWeight: 1, VectorWeight: 0, FinalK: 8, CandidateLimit: 100}
+	})
+	called := false
+	service.SetKeywordLoader(func(_ context.Context, repo, ref string, principals []string, query string, limit int) ([]KeywordCandidate, error) {
+		called = repo == "r" && ref == "main" && len(principals) == 1 && principals[0] == "alice"
+		return []KeywordCandidate{{ID: "safe", Score: 9}}, nil
+	})
+	result, err := service.Query(ctx, []string{"alice"}, "/core/demo/main", "term absent from local content")
+	if err != nil || !called || !strings.Contains(result, "authoritative database content") {
+		t.Fatalf("result=%s called=%v err=%v", result, called, err)
+	}
+	if _, err = service.Query(ctx, []string{"mallory"}, "/core/demo/main", "anything"); err == nil {
+		t.Fatal("repository ACL was not enforced before OpenSearch")
+	}
+}
+
 type fixedReranker struct {
 	scores []float64
 	err    error
