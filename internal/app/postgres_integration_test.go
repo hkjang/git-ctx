@@ -48,7 +48,7 @@ func TestPostgresDSNOnlyBootstrapIntegration(t *testing.T) {
 	adminRequest.Header.Set("Authorization", "Bearer "+a.bootstrapAdminToken())
 	admin := httptest.NewRecorder()
 	a.Handler().ServeHTTP(admin, adminRequest)
-	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"database"`) || !strings.Contains(admin.Body.String(), `"latest":"016_notification_deliveries.sql"`) {
+	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"database"`) || !strings.Contains(admin.Body.String(), `"latest":"017_admin_recovery_tokens.sql"`) {
 		t.Fatalf("admin DB status=%d body=%s", admin.Code, admin.Body.String())
 	}
 }

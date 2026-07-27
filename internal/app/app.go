@@ -43,6 +43,7 @@ import (
 	"git-ctx/internal/observability"
 	"git-ctx/internal/opensearch"
 	"git-ctx/internal/quality"
+	"git-ctx/internal/recovery"
 	"git-ctx/internal/rerank"
 	"git-ctx/internal/scheduler"
 	"git-ctx/internal/search"
@@ -321,7 +322,7 @@ func (a *App) maintenanceMode(ctx context.Context) (bool, string) {
 func maintenanceAllowedPath(path string) bool {
 	return path == "/healthz" || path == "/readyz" || path == "/metrics" ||
 		path == "/api/v1/public/config" || path == "/api/v1/public/status" ||
-		path == "/api/v1/bootstrap/login" || strings.HasPrefix(path, "/auth/") ||
+		path == "/api/v1/bootstrap/login" || path == "/api/v1/recovery/login" || strings.HasPrefix(path, "/auth/") ||
 		path == "/admin" || strings.HasPrefix(path, "/admin/") ||
 		strings.HasPrefix(path, "/api/v1/admin/") ||
 		(!strings.HasPrefix(path, "/api/") && path != "/mcp")
@@ -335,6 +336,7 @@ func (a *App) routes() {
 	a.mux.HandleFunc("GET /api/v1/public/config", a.publicUIConfig)
 	a.mux.HandleFunc("GET /api/v1/public/status", a.publicDatabaseStatus)
 	a.mux.HandleFunc("POST /api/v1/bootstrap/login", a.bootstrapLogin)
+	a.mux.HandleFunc("POST /api/v1/recovery/login", a.recoveryLogin)
 	a.mux.HandleFunc("GET /auth/login", a.login)
 	a.mux.HandleFunc("GET /auth/callback", a.callback)
 	a.mux.HandleFunc("POST /auth/logout", a.logout)
@@ -523,6 +525,72 @@ func (a *App) bootstrapLogin(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: "git_ctx_session", Value: rawSession, Path: "/", HttpOnly: true, Secure: strings.HasPrefix(a.publicURL(r.Context()), "https://"), SameSite: http.SameSiteStrictMode, Expires: expires})
 	a.audit(r, auth.Principal{UserID: id}, "bootstrap.login", "session", "bootstrap", "success", nil)
 	jsonOut(w, http.StatusOK, map[string]any{"status": "authenticated", "expiresAt": expires})
+}
+func (a *App) recoveryLogin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if origin := r.Header.Get("Origin"); origin != "" {
+		requestOrigin, err := url.Parse(origin)
+		if err != nil || (requestOrigin.Scheme != "http" && requestOrigin.Scheme != "https") || !strings.EqualFold(requestOrigin.Host, r.Host) {
+			problem(w, http.StatusForbidden, "origin_not_allowed", "Recovery login Origin is not allowed")
+			return
+		}
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var in struct {
+		Token string `json:"token"`
+	}
+	if decodeErr := decode(r, &in); decodeErr != nil {
+		a.audit(r, auth.Principal{UserID: "anonymous"}, "recovery.login", "session", "break-glass", "failure", nil)
+		problem(w, http.StatusUnauthorized, "invalid_recovery_token", "Recovery token is invalid, expired, or already used")
+		return
+	}
+	tokenHash, tokenExpires, err := recovery.Verify(strings.TrimSpace(in.Token), a.cfg.KeyPepper, time.Now().UTC())
+	if err != nil {
+		a.audit(r, auth.Principal{UserID: "anonymous"}, "recovery.login", "session", "break-glass", "failure", nil)
+		problem(w, http.StatusUnauthorized, "invalid_recovery_token", "Recovery token is invalid, expired, or already used")
+		return
+	}
+	rawSession, err := randomToken(32)
+	if err != nil {
+		problem(w, http.StatusInternalServerError, "recovery_login_failed", "Unable to create recovery session")
+		return
+	}
+	now := time.Now().UTC()
+	sessionExpires := now.Add(30 * time.Minute)
+	tx, err := a.store.DB.BeginTx(r.Context(), nil)
+	if err != nil {
+		problem(w, http.StatusInternalServerError, "recovery_login_failed", "Unable to start recovery session")
+		return
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(r.Context(), a.store.Rebind(`INSERT INTO admin_recovery_tokens(token_hash,expires_at,used_at) VALUES(?,?,?) ON CONFLICT(token_hash) DO NOTHING`), tokenHash, tokenExpires, now)
+	if err != nil {
+		problem(w, http.StatusInternalServerError, "recovery_login_failed", "Unable to consume recovery token")
+		return
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		_ = tx.Rollback()
+		a.audit(r, auth.Principal{UserID: "anonymous"}, "recovery.login", "session", "break-glass", "failure", nil)
+		problem(w, http.StatusUnauthorized, "invalid_recovery_token", "Recovery token is invalid, expired, or already used")
+		return
+	}
+	const id = "break-glass-admin"
+	if _, err = tx.ExecContext(r.Context(), a.store.Rebind(`INSERT INTO users(id,subject,username,email,status) VALUES(?,?,?,?,'active') ON CONFLICT(id) DO UPDATE SET status='active'`), id, id, id, ""); err == nil {
+		_, err = tx.ExecContext(r.Context(), a.store.Rebind(`INSERT INTO user_roles(user_id,role_code) VALUES(?,'platform-admin') ON CONFLICT(user_id,role_code) DO NOTHING`), id)
+	}
+	if err == nil {
+		_, err = tx.ExecContext(r.Context(), a.store.Rebind(`DELETE FROM user_sessions WHERE user_id=?`), id)
+	}
+	if err == nil {
+		_, err = tx.ExecContext(r.Context(), a.store.Rebind(`INSERT INTO user_sessions(id_hash,user_id,expires_at,last_seen_at) VALUES(?,?,?,?)`), sessionHash(rawSession), id, sessionExpires, now)
+	}
+	if err != nil || tx.Commit() != nil {
+		problem(w, http.StatusInternalServerError, "recovery_login_failed", "Unable to persist recovery session")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: "git_ctx_session", Value: rawSession, Path: "/", HttpOnly: true, Secure: strings.HasPrefix(a.publicURL(r.Context()), "https://"), SameSite: http.SameSiteStrictMode, Expires: sessionExpires})
+	a.audit(r, auth.Principal{UserID: id}, "recovery.login", "session", "break-glass", "success", map[string]any{"expiresAt": sessionExpires})
+	jsonOut(w, http.StatusOK, map[string]any{"status": "authenticated", "expiresAt": sessionExpires})
 }
 func (a *App) mcpAccess(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -884,6 +952,10 @@ func (a *App) listKeys(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) createKey(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
+	if p.UserID == "break-glass-admin" {
+		problem(w, http.StatusForbidden, "recovery_session_restricted", "Recovery sessions cannot create persistent MCP API keys")
+		return
+	}
 	var in struct {
 		Name         string              `json:"name"`
 		Scopes       []string            `json:"scopes"`
@@ -2340,7 +2412,7 @@ type adminUserInput struct {
 }
 
 func (a *App) adminUsers(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.store.DB.QueryContext(r.Context(), `SELECT id,subject,username,email,status,created_at FROM users WHERE id <> 'bootstrap-admin' ORDER BY username`)
+	rows, err := a.store.DB.QueryContext(r.Context(), `SELECT id,subject,username,email,status,created_at FROM users WHERE id NOT IN ('bootstrap-admin','break-glass-admin') ORDER BY username`)
 	if err != nil {
 		problem(w, 500, "internal_error", err.Error())
 		return
@@ -2454,7 +2526,7 @@ func (a *App) writeAdminUser(ctx context.Context, id string, in adminUserInput, 
 	if create {
 		_, err = tx.ExecContext(ctx, a.store.Rebind(`INSERT INTO users(id,subject,username,email,status,roles_managed) VALUES(?,?,?,?,?,1)`), id, in.Subject, in.Username, in.Email, in.Status)
 	} else {
-		result, updateErr := tx.ExecContext(ctx, a.store.Rebind(`UPDATE users SET username=?,email=?,status=?,roles_managed=1 WHERE id=? AND id <> 'bootstrap-admin'`), in.Username, in.Email, in.Status, id)
+		result, updateErr := tx.ExecContext(ctx, a.store.Rebind(`UPDATE users SET username=?,email=?,status=?,roles_managed=1 WHERE id=? AND id NOT IN ('bootstrap-admin','break-glass-admin')`), in.Username, in.Email, in.Status, id)
 		err = updateErr
 		if err == nil {
 			if affected, _ := result.RowsAffected(); affected == 0 {
@@ -2493,7 +2565,7 @@ func (a *App) deleteAdminUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(r.Context(), a.store.Rebind(`UPDATE users SET status='deleted' WHERE id=? AND id <> 'bootstrap-admin'`), id)
+	result, err := tx.ExecContext(r.Context(), a.store.Rebind(`UPDATE users SET status='deleted' WHERE id=? AND id NOT IN ('bootstrap-admin','break-glass-admin')`), id)
 	if err != nil {
 		problem(w, 500, "internal_error", err.Error())
 		return

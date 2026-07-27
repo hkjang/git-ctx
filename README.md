@@ -58,6 +58,18 @@ curl -H "Authorization: Bearer $(cat backups/bootstrap-admin.token)" \
   http://localhost:4747/api/v1/admin/settings
 ```
 
+Keycloak 장애나 잘못된 설정으로 모든 관리자가 잠긴 경우 서버 콘솔에서 1회용 복구
+토큰을 생성합니다. 토큰 원문은 저장되지 않고 기본 15분 뒤 만료되며 한 번 소비하면
+재사용할 수 없습니다.
+
+```bash
+GIT_CTX_DB_DSN='postgres://...' ./git-ctx recovery-token --ttl 15m
+```
+
+출력된 토큰을 `/admin?recovery=1`에서 입력하면 30분짜리 제한된 최고관리자 세션이
+생성됩니다. 이 세션은 영구 MCP API 키를 만들 수 없으며 Keycloak 설정 복구 후 즉시
+로그아웃해야 합니다.
+
 Keycloak 설정은 먼저 Discovery 연결을 시험한 뒤 저장됩니다.
 
 ```bash

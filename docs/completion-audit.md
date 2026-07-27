@@ -17,14 +17,14 @@
 | 모델 미설정 검색 | 완료 | ACL 검증 뒤 Bitbucket/GitLab source query API, Context7 출력 조립과 안전한 BM25 fallback 계약 시험 |
 | 사용자 기능 | 완료 | 우측 상단 프로필 메뉴와 Ctrl/Cmd+K 빠른 이동, 관리자와 분리된 내 공간, 저장소·키·제한·사용량·호출·알림·MCP 설정 UI/API |
 | 관리자 기능 | 완료(구현 범위) | 설정 자동 조회·시험·저장·삭제 CRUD, 저장소·정책·작업, MCP 도구, 키·감사·보안·상태 UI/API와 역할별 메뉴·쓰기 통제 |
-| 데이터베이스 | 완료 | SQLite 회귀 시험 및 빈 PostgreSQL 16에서 001~016 migration/readiness와 암호화 백업·복원 실검증 |
+| 데이터베이스 | 완료 | SQLite 회귀 시험 및 빈 PostgreSQL 16에서 001~017 migration/readiness와 암호화 백업·복원 실검증 |
 | 배포 | 완료 | 비루트 Docker 이미지 실행, Compose, Kubernetes Kustomize와 기본 NetworkPolicy 렌더링 |
 | 관측성 | 완료 | JSON 요청 로그, 동적 로그 레벨, request ID, health/readiness, Prometheus와 동적 OTLP HTTP tracing |
 | 백업·복구 | 완료(애플리케이션 범위) | SQLite/PostgreSQL 공통 암호화 아카이브, 주기·보존, 무결성 검증, 트랜잭션 복원, 세션 무효화와 관리자 UI/API |
 | 검색 품질 평가 | 완료 | ACL 적용 정답 사례, Recall@K·MRR·nDCG@K, 임계값 회귀 판정, 이력·상세 UI/API |
 | 관리자 연동 설정 | 완료 | Keycloak·Bitbucket·GitLab·Embedding·Reranker 전용 필드, 실제 호출 시험, 마스킹·암호화 저장 |
 | OpenSearch | 완료(계약 시험) | 관리자 연결·index mapping 시험, ref별 delete/bulk projection, repository·ref·principal 선필터, DB 청크 hydration, Worker 재시도 |
-| 최초 관리자 세션 | 완료 | 일회용 토큰을 30분 HttpOnly·SameSite 세션으로 교환, Origin 검증, 실제 `platform-admin` SSO 로그인 성공 시 세션·키·토큰 전역 폐기 |
+| 최초·복구 관리자 세션 | 완료 | 최초 일회용 토큰을 30분 HttpOnly·SameSite 세션으로 교환하고 실제 `platform-admin` SSO 로그인 성공 시 전역 폐기. 이후 CLI 서명 복구 토큰의 1회 소비·만료·Origin 검증·영구 MCP 키 생성 차단 |
 | 버전 표시 | 완료 | 공개 설정과 `/api/v1/me` 버전 제공, 로그인 전 상단·안내와 로그인 후 프로필 표시 |
 | 비밀정보 관리 | 완료(계약 시험) | 암호화 DB/Vault KV v2 backend, 등록·회전·중지, 원문 비노출, `secret://` 동적 참조와 Fail Closed |
 | 관리자 UI 구조 | 완료 | 개인화 영역과 분리된 권한 기반 관리자 진입, 역할별 대메뉴, 설정 종류별 탭, 저장 진행·오류 상태 |
@@ -44,7 +44,7 @@ go vet ./...                                PASS
 node --check web/app.js                     PASS
 node test/web/roles.test.js                 PASS
 kubectl kustomize deploy/kubernetes/base    PASS
-PostgreSQL 16 migration 001..016            PASS
+PostgreSQL 16 migration 001..017            PASS
 PostgreSQL 16 backup/restore round trip     PASS
 PostgreSQL 16 quality benchmark contract    PASS
 PostgreSQL 16 notification outbox delivery  PASS
@@ -81,7 +81,7 @@ Claude Code 2.1.218 resolve-library-id       PASS
 4. 권한 부여·회수 전후 저장소 이름, ID, 캐시, 오류 내용의 완전 비노출 시험
 5. 목표 데이터량과 50개 동시 호출에서 P95 및 오류율 측정
 6. PostgreSQL 백업/복원, 원래 DSN Secret 분리 복구, Keycloak 설정 삭제·재구성과
-   break-glass 운영 훈련
+   `recovery-token` break-glass 운영 훈련
 7. 운영 NetworkPolicy를 실제 Keycloak·Bitbucket·GitLab·DB CIDR로 제한하고
    사내 CA·프록시 장애/복구 시험
 8. 실제 운영 대상 OpenSearch 버전에서 mapping, Bulk 재색인, 장애 복구와 목표 규모

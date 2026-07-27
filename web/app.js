@@ -217,6 +217,8 @@ const settingDefaults = (category) => {
 };
 let bootstrapInfo = { required: false, tokenFile: "", ssoConfigured: false };
 const isAdminEntry = location.pathname === "/admin" || location.pathname.startsWith("/admin/");
+const isRecoveryEntry =
+  isAdminEntry && new URLSearchParams(location.search).get("recovery") === "1";
 const api = async (url, options = {}) => {
   const bootstrapToken = sessionStorage.getItem("git_ctx_bootstrap_token");
   const response = await fetch(url, {
@@ -263,6 +265,7 @@ async function loadBranding() {
     // The one-time bootstrap credential is an administrative recovery path.
     // Never expose it on the regular user sign-in page.
     $("#bootstrap-login").hidden = !isAdminEntry || !bootstrapInfo.required;
+    $("#recovery-login").hidden = !isRecoveryEntry;
     $("#entry-description").textContent = isAdminEntry
       ? "관리 설정과 사용자·역할을 운영합니다. 일반 사용자는 서비스 홈에서 Keycloak SSO로 로그인하세요."
       : "Keycloak SSO로 로그인하여 접근 가능한 Bitbucket·GitLab 문서를 검색하고 MCP 키를 관리하세요.";
@@ -312,6 +315,24 @@ $("#bootstrap-login").onclick = () => {
       $("#status").classList.remove("ok");
     });
 };
+$("#recovery-login").onclick = () => {
+  const token = prompt(
+    "서버에서 `git-ctx recovery-token` 명령으로 생성한 짧은 만료시간의 일회용 복구 토큰을 입력하세요.",
+  );
+  if (!token) return;
+  api("/api/v1/recovery/login", {
+    method: "POST",
+    body: JSON.stringify({ token: token.trim() }),
+  })
+    .then(() => {
+      history.replaceState(null, "", "/admin");
+      boot();
+    })
+    .catch((e) => {
+      $("#status").textContent = e.message;
+      $("#status").classList.remove("ok");
+    });
+};
 const performLogout = async () => {
   const result = await api("/auth/logout", { method: "POST" });
   if (result?.logoutUrl) {
@@ -329,6 +350,7 @@ async function boot() {
     $("#status").classList.add("ok");
     $("#login").hidden = true;
     $("#bootstrap-login").hidden = true;
+    $("#recovery-login").hidden = true;
     $("#logout").hidden = true;
     $("#profile-menu").hidden = false;
     $("#quick-nav-button").hidden = false;
@@ -354,7 +376,7 @@ async function boot() {
   } catch (e) {
     $("#status").textContent =
       "Keycloak으로 로그인하면 개인 MCP 키와 관리자 기능을 사용할 수 있습니다.";
-    if (isAdminEntry && !bootstrapInfo.required) {
+    if (isAdminEntry && !bootstrapInfo.required && !isRecoveryEntry) {
       location.href = `/auth/login?return_to=${encodeURIComponent("/admin")}`;
     }
   }

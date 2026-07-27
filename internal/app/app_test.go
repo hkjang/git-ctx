@@ -20,6 +20,7 @@ import (
 	"git-ctx/internal/config"
 	runtimelogging "git-ctx/internal/logging"
 	"git-ctx/internal/observability"
+	"git-ctx/internal/recovery"
 	"git-ctx/internal/version"
 )
 
@@ -469,6 +470,64 @@ func TestBootstrapLoginCreatesHttpOnlySessionForMeAndRevokesIt(t *testing.T) {
 	}
 }
 
+func TestOneTimeRecoveryTokenCreatesRestrictedAdminSession(t *testing.T) {
+	pepper := strings.Repeat("p", 32)
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:recovery-login?mode=memory&cache=shared&_foreign_keys=on",
+		KeyPepper: pepper, MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	token, _, err := recovery.Generate(pepper, 15*time.Minute, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := func(origin string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/recovery/login", strings.NewReader(`{"token":"`+token+`"}`))
+		req.Host = "localhost:4747"
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", origin)
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	if crossOrigin := login("https://evil.example"); crossOrigin.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin status=%d body=%s", crossOrigin.Code, crossOrigin.Body.String())
+	}
+	authenticated := login("http://localhost:4747")
+	if authenticated.Code != http.StatusOK {
+		t.Fatalf("login status=%d body=%s", authenticated.Code, authenticated.Body.String())
+	}
+	cookies := authenticated.Result().Cookies()
+	if len(cookies) != 1 || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
+		t.Fatalf("unexpected recovery cookie: %#v", cookies)
+	}
+	meRequest := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+	meRequest.AddCookie(cookies[0])
+	me := httptest.NewRecorder()
+	a.Handler().ServeHTTP(me, meRequest)
+	if me.Code != http.StatusOK || !strings.Contains(me.Body.String(), `"UserID":"break-glass-admin"`) || !strings.Contains(me.Body.String(), `"Roles":["platform-admin"]`) {
+		t.Fatalf("me status=%d body=%s", me.Code, me.Body.String())
+	}
+	if replay := login("http://localhost:4747"); replay.Code != http.StatusUnauthorized {
+		t.Fatalf("replay status=%d body=%s", replay.Code, replay.Body.String())
+	}
+	keyRequest := httptest.NewRequest(http.MethodPost, "/api/v1/me/api-keys", strings.NewReader(`{"name":"persistent-recovery-key","scopes":["query-docs"]}`))
+	keyRequest.Header.Set("Content-Type", "application/json")
+	keyRequest.AddCookie(cookies[0])
+	key := httptest.NewRecorder()
+	a.Handler().ServeHTTP(key, keyRequest)
+	if key.Code != http.StatusForbidden || !strings.Contains(key.Body.String(), "recovery_session_restricted") {
+		t.Fatalf("key status=%d body=%s", key.Code, key.Body.String())
+	}
+	var consumed int
+	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM admin_recovery_tokens`).Scan(&consumed); err != nil || consumed != 1 {
+		t.Fatalf("consumed=%d err=%v", consumed, err)
+	}
+}
+
 func TestManagedSecretAdminAPIAndSettingReference(t *testing.T) {
 	a, err := New(context.Background(), config.Config{
 		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "managed-secret-api.db") + "?_foreign_keys=on&_busy_timeout=5000",
@@ -717,7 +776,7 @@ func TestPublicAndAdminDatabaseStatus(t *testing.T) {
 	adminRequest.Header.Set("Authorization", "Bearer bootstrap")
 	admin := httptest.NewRecorder()
 	a.Handler().ServeHTTP(admin, adminRequest)
-	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"latest":"016_notification_deliveries.sql"`) || !strings.Contains(admin.Body.String(), `"pool"`) {
+	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"latest":"017_admin_recovery_tokens.sql"`) || !strings.Contains(admin.Body.String(), `"pool"`) {
 		t.Fatalf("admin status=%d body=%s", admin.Code, admin.Body.String())
 	}
 }

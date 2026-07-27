@@ -26,6 +26,7 @@ for (const id of [
   "migrate-database",
   "login-keycloak",
   "bootstrap-login",
+  "recovery-login",
   "admin-entry-link",
   "entry-description",
   "users-admin-section",
@@ -54,6 +55,8 @@ assert.match(html, /search-repositories/);
 assert.match(html, /reindex-repository/);
 assert.match(script, /const isAdminEntry = location\.pathname === "\/admin"/);
 assert.match(script, /!isAdminEntry \|\| !bootstrapInfo\.required/);
+assert.match(script, /api\/v1\/recovery\/login/);
+assert.match(script, /isRecoveryEntry/);
 assert.match(script, /return_to=\$\{encodeURIComponent\(returnTo\)\}/);
 assert.match(html, /Keycloak SSO 로그인/);
 assert.match(html, /최고관리자는 모든 관리자 설정과 운영 기능/);

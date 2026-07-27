@@ -359,6 +359,11 @@ Bootstrap PostgreSQL에 연결할 수 없으면 `backups/recovery.db` SQLite로 
 뒤 PostgreSQL 연결이 다시 실패하면 기존 recovery SQLite로 Fail Safe 복귀한다. 이 모드는
 장기 운영 DB가 아니므로 Kubernetes에서는 단일 replica로 연결 복구와 이전만 수행한다.
 
+최초 Bootstrap이 폐기된 뒤 Keycloak 설정 장애로 관리자 로그인이 불가능하면
+`git-ctx recovery-token --ttl 15m`으로 일회용 복구 토큰을 생성하고
+`/admin?recovery=1`에서 소비한다. 복구 토큰은 DSN에서 파생한 키로 서명되고 원문을
+저장하지 않으며, 1회 사용·최대 1시간 만료·영구 MCP 키 생성 금지를 적용한다.
+
 ## 모델 미설정 검색 모드
 
 `model.provider`가 없거나 `local`이면 벡터와 Reranker 점수를 사용하지 않는다. 저장소

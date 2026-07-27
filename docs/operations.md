@@ -25,6 +25,25 @@ Store에 보관한다.
 키의 도구·CIDR·저장소·호출량 제한과 만료일을 상속하며 원문은 한 번만 표시된다.
 보안 관리자는 전체 키 목록에서 즉시 강제 폐기할 수 있다.
 
+## Keycloak 잠금 복구
+
+실제 `platform-admin` SSO 로그인이 한 번 성공하면 최초 Bootstrap 토큰은 전역
+폐기된다. 이후 Keycloak 장애, Realm 변경 또는 잘못된 Client 설정으로 관리자가
+잠겼을 때 서버 콘솔에서 다음 명령을 실행한다.
+
+```bash
+GIT_CTX_DB_DSN='postgres://...' /app/git-ctx recovery-token --ttl 15m
+```
+
+명령은 현재 Bootstrap DSN에서 파생한 서명키로 짧은 만료시간의 토큰을 생성하며
+DB나 로그에 토큰 원문을 기록하지 않는다. 허용 TTL은 1분 이상 1시간 이하이다.
+운영자는 `/admin?recovery=1`에서 토큰을 한 번 입력한다. 서버는 서명과 만료를
+확인하고 토큰 해시를 원자적으로 소비하므로 재사용할 수 없다.
+
+복구 세션은 30분 후 만료되고 `platform-admin` 설정 권한을 갖지만 영구 MCP API 키
+생성은 금지된다. Keycloak 설정을 시험·저장하고 정상 SSO 로그인을 확인한 뒤
+복구 세션에서 로그아웃한다. `recovery.login` 성공·실패는 감사 로그에 기록된다.
+
 ## 장애 확인
 
 - `/healthz`와 DB 연결 상태를 먼저 확인한다.
