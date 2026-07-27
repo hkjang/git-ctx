@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -48,6 +49,62 @@ func TestHTTPTraceContextPropagation(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestAdministrativeBackupRestoreFlow(t *testing.T) {
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "app-backup.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(t.TempDir(), "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	_, _ = a.store.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r1','KCB','demo','Demo','bitbucket','1','/kcb/demo','main')`)
+	_, _ = a.store.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('c1','r1','main','abc','README.md',1,1,'Demo','document','original','hash')`)
+	request := func(method, path string, headers map[string]string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		req.Header.Set("Authorization", "Bearer bootstrap")
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	created := request(http.MethodPost, "/api/v1/admin/backups", nil)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	var record struct {
+		ID string `json:"id"`
+	}
+	if err = json.Unmarshal(created.Body.Bytes(), &record); err != nil || record.ID == "" {
+		t.Fatalf("record=%#v err=%v", record, err)
+	}
+	_, _ = a.store.DB.Exec(`UPDATE document_chunks SET content='mutated' WHERE id='c1'`)
+	denied := request(http.MethodPost, "/api/v1/admin/backups/"+record.ID+"/restore", nil)
+	if denied.Code != http.StatusBadRequest {
+		t.Fatalf("restore without confirmation status=%d", denied.Code)
+	}
+	restored := request(http.MethodPost, "/api/v1/admin/backups/"+record.ID+"/restore", map[string]string{"X-Restore-Confirmation": "RESTORE " + record.ID, "X-Change-Reason": "integration test"})
+	if restored.Code != http.StatusOK {
+		t.Fatalf("restore status=%d body=%s", restored.Code, restored.Body.String())
+	}
+	var content string
+	if err = a.store.DB.QueryRow(`SELECT content FROM document_chunks WHERE id='c1'`).Scan(&content); err != nil || content != "original" {
+		t.Fatalf("content=%q err=%v", content, err)
+	}
+	download := request(http.MethodGet, "/api/v1/admin/backups/"+record.ID+"/download", nil)
+	if download.Code != http.StatusOK || download.Header().Get("Cache-Control") != "no-store" || download.Header().Get("X-Content-SHA256") == "" || !strings.HasPrefix(download.Body.String(), magicForTest()) {
+		t.Fatalf("download status=%d headers=%v", download.Code, download.Header())
+	}
+	var restoreAudits int
+	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE action='backup.restore' AND outcome='success'`).Scan(&restoreAudits); err != nil || restoreAudits != 1 {
+		t.Fatalf("restore audits=%d err=%v", restoreAudits, err)
+	}
+}
+
+func magicForTest() string { return "GCTXBACKUP1\n" }
 
 func TestAdministrativeRoleMatrix(t *testing.T) {
 	principal := func(role string) auth.Principal { return auth.Principal{Roles: []string{role}} }

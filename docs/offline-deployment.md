@@ -1,15 +1,15 @@
 # 오프라인 Docker 이미지 배포
 
-GitHub Release의 `git-ctx-v0.2.0-linux-amd64.tar.gz`는 네트워크가 없는 Linux
+GitHub Release의 `git-ctx-v0.3.0-linux-amd64.tar.gz`는 네트워크가 없는 Linux
 AMD64 환경으로 반입할 수 있는 Docker/OCI 이미지 보관 파일이다. 같은 릴리스의
 `.sha256` 파일과 함께 내려받는다.
 
 ## 무결성 확인과 Docker 로드
 
 ```bash
-sha256sum -c git-ctx-v0.2.0-linux-amd64.tar.gz.sha256
-gzip -dc git-ctx-v0.2.0-linux-amd64.tar.gz | docker load
-docker image inspect git-ctx:v0.2.0 --format '{{.Id}} {{.Architecture}} {{.Os}}'
+sha256sum -c git-ctx-v0.3.0-linux-amd64.tar.gz.sha256
+gzip -dc git-ctx-v0.3.0-linux-amd64.tar.gz | docker load
+docker image inspect git-ctx:v0.3.0 --format '{{.Id}} {{.Architecture}} {{.Os}}'
 ```
 
 애플리케이션 이미지만 포함되므로 PostgreSQL, Keycloak과 사내 CA는 대상 망에서
@@ -24,7 +24,7 @@ docker run -d --name git-ctx \
   -e GIT_CTX_API_KEY_PEPPER='32자 이상의 별도 난수' \
   -e GIT_CTX_MASTER_KEY='정확히 32자인 별도 암호화 키' \
   -e GIT_CTX_BOOTSTRAP_ADMIN='최초 설정 후 제거할 복구 토큰' \
-  git-ctx:v0.2.0
+  git-ctx:v0.3.0
 
 curl --fail http://127.0.0.1:4747/readyz
 ```
@@ -39,12 +39,12 @@ Docker Secret, Kubernetes Secret 또는 사내 Vault/KMS를 사용한다. Bootst
 같다.
 
 ```bash
-gzip -dc git-ctx-v0.2.0-linux-amd64.tar.gz \
+gzip -dc git-ctx-v0.3.0-linux-amd64.tar.gz \
   | sudo ctr --namespace k8s.io images import -
 sudo ctr --namespace k8s.io images list | grep git-ctx
 ```
 
-`deploy/kubernetes/base/deployment.yaml`의 이미지 이름을 `git-ctx:v0.2.0` 또는
+`deploy/kubernetes/base/deployment.yaml`의 이미지 이름을 `git-ctx:v0.3.0` 또는
 사내 registry 주소로 바꾸고 `imagePullPolicy: IfNotPresent`를 유지한다. Bootstrap
 Secret, 사내 CA, 실제 egress CIDR과 Ingress는 환경 overlay에서 제공한다.
 

@@ -306,12 +306,25 @@ function setupOps(capabilities) {
   $("#mcp-admin-section").hidden = !capabilities.mcp;
   $("#source-admin-section").hidden = !capabilities.source;
   $("#status-admin-section").hidden = !capabilities.status;
+  $("#backup-admin-section").hidden = !capabilities.backup;
   $("#security-admin-section").hidden = !(
     capabilities.security || capabilities.securityEvents
   );
   $("#security-keys-section").hidden = !capabilities.security;
   $("#security-events-section").hidden = !capabilities.securityEvents;
   $("#audit-admin-section").hidden = !capabilities.audit;
+  $("#create-backup").hidden = !capabilities.backupWrite;
+  if (capabilities.backupWrite) {
+    $("#create-backup").onclick = async () => {
+      try {
+        await api("/api/v1/admin/backups", { method: "POST" });
+        showAdmin("암호화 백업을 생성했습니다.", true);
+        refreshBackups(capabilities);
+      } catch (e) {
+        showAdmin(e.message, false);
+      }
+    };
+  }
   if (capabilities.sourceWrite) $("#discover").onclick = discover;
   else $("#discover").hidden = true;
   $("#refresh-ops").onclick = () => {
@@ -320,6 +333,48 @@ function setupOps(capabilities) {
   };
   refreshOps(capabilities);
   refreshSecurity(capabilities);
+  refreshBackups(capabilities);
+}
+async function refreshBackups(capabilities = activeCapabilities) {
+  if (!capabilities.backup) return;
+  try {
+    const records = await api("/api/v1/admin/backups");
+    $("#backups").innerHTML =
+      `<table><thead><tr><th>생성 시각</th><th>유형/상태</th><th>크기</th><th>SHA-256</th><th></th></tr></thead><tbody>${records.map((record) => `<tr><td>${date(record.createdAt)}<br><small>${esc(record.createdBy)}</small></td><td>${esc(record.triggerType)} / ${esc(record.status)}<br><small>${esc(record.errorMessage)}</small></td><td>${Math.ceil((record.sizeBytes || 0) / 1024)} KiB</td><td><code>${esc(record.sha256 || "-")}</code></td><td>${record.status === "completed" ? `<a class="button-link" href="/api/v1/admin/backups/${encodeURIComponent(record.id)}/download">다운로드</a> ${capabilities.backupWrite ? `<button class="danger" data-restore="${esc(record.id)}">복원</button>` : ""}` : ""}</td></tr>`).join("")}</tbody></table>`;
+    document.querySelectorAll("[data-restore]").forEach(
+      (button) =>
+        (button.onclick = async () => {
+          const id = button.dataset.restore;
+          const confirmation = prompt(
+            `복원하려면 정확히 입력하세요: RESTORE ${id}`,
+          );
+          if (confirmation !== `RESTORE ${id}`) return;
+          const reason = prompt("복원 사유를 입력하세요.");
+          if (!reason) return;
+          try {
+            await api(
+              `/api/v1/admin/backups/${encodeURIComponent(id)}/restore`,
+              {
+                method: "POST",
+                headers: {
+                  "X-Restore-Confirmation": confirmation,
+                  "X-Change-Reason": reason,
+                },
+              },
+            );
+            showAdmin(
+              "백업 복원이 완료됐고 기존 세션이 폐기되었습니다. 다시 로그인해야 할 수 있습니다.",
+              true,
+            );
+            refreshBackups(capabilities);
+          } catch (e) {
+            showAdmin(e.message, false);
+          }
+        }),
+    );
+  } catch (e) {
+    showAdmin(e.message, false);
+  }
 }
 async function discover() {
   try {

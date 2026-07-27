@@ -22,6 +22,7 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - 저장소 발견·등록·재색인 및 작업 운영 화면
 - Readiness, Prometheus 지표와 hardened Kubernetes Kustomize 배포
 - 관리자 설정 기반 OTLP HTTP tracing과 W3C trace context 전파
+- SQLite/PostgreSQL 공통 암호화 예약 백업, 보존 및 트랜잭션 복원 UI/API
 - BM25와 256차원 로컬 벡터 결합 검색, 색인 전 Secret 차단·마스킹
 - ACL 필터 이후 사내 `/v1/rerank` 재순위화와 장애 시 하이브리드 점수 fallback
 - 버전형 DB migration 및 PostgreSQL 다중 Worker `SKIP LOCKED`

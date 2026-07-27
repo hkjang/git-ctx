@@ -175,3 +175,23 @@ attribute에 기록하지 않는다.
 `headers.Authorization`, Token, API Key 필드는 재조회 시 마스킹되며 원문은 암호화된
 설정에만 보관된다. 평문 HTTP endpoint는 기본 거부한다. 로컬 Collector 시험에서만
 `allowInsecureLocalhost: true`로 localhost HTTP를 허용할 수 있다.
+
+## 백업
+
+애플리케이션 백업은 SQLite와 PostgreSQL에서 동일한 논리 형식으로 생성되고 gzip 뒤
+bootstrap `GIT_CTX_MASTER_KEY`에서 파생한 AES-256-GCM 키로 인증 암호화된다. 여러
+Pod가 같은 DB와 RWX 볼륨을 사용할 때도 schedule slot 고유 제약으로 한 번만 실행된다.
+
+```json
+{
+  "enabled": true,
+  "directory": "/var/lib/git-ctx/backups",
+  "intervalHours": 24,
+  "retentionCount": 7,
+  "maxBytes": 536870912
+}
+```
+
+저장 시 전용 디렉터리의 생성·쓰기 가능 여부를 검사한다. `directory`는 애플리케이션
+전용 경로여야 하며 파일시스템 루트는 거부한다. 백업 암호화 키와 아카이브를 같은
+스토리지에 보관하지 않는다.

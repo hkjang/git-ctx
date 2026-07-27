@@ -15,9 +15,10 @@
 | 검색 | 완료 | BM25·벡터 동적 결합, 버전·ACL 필터, 출처 조립, 사내 `/v1/rerank` 재순위화와 장애 fallback |
 | 사용자 기능 | 완료 | 저장소·키·제한·사용량·호출·알림·MCP 설정·도구 시험 UI/API |
 | 관리자 기능 | 완료(구현 범위) | 설정·연결시험·버전·rollback, 저장소·정책·작업, MCP 도구, 키·감사·보안·상태 UI/API와 역할별 메뉴·쓰기 통제 |
-| 데이터베이스 | 완료 | SQLite 회귀 시험 및 빈 PostgreSQL 16에서 001~009 migration/readiness 실검증 |
+| 데이터베이스 | 완료 | SQLite 회귀 시험 및 빈 PostgreSQL 16에서 001~010 migration/readiness와 암호화 백업·복원 실검증 |
 | 배포 | 완료 | 비루트 Docker 이미지 실행, Compose, Kubernetes Kustomize와 기본 NetworkPolicy 렌더링 |
 | 관측성 | 완료 | JSON 요청 로그, request ID, health/readiness, Prometheus와 동적 OTLP HTTP tracing |
+| 백업·복구 | 완료(애플리케이션 범위) | SQLite/PostgreSQL 공통 암호화 아카이브, 주기·보존, 무결성 검증, 트랜잭션 복원, 세션 무효화와 관리자 UI/API |
 
 2026-07-27 로컬 검증 결과:
 
@@ -27,7 +28,8 @@ go vet ./...                                PASS
 node --check web/app.js                     PASS
 node test/web/roles.test.js                 PASS
 kubectl kustomize deploy/kubernetes/base    PASS
-PostgreSQL 16 migration 001..009            PASS
+PostgreSQL 16 migration 001..010            PASS
+PostgreSQL 16 backup/restore round trip     PASS
 Docker build + UID 10001 readiness/UI       PASS
 Default listen address :4747 readiness      PASS
 ```
@@ -38,7 +40,6 @@ Default listen address :4747 readiness      PASS
 |---|---|---|
 | 검색 품질 자동 벤치마크 | 미구현 | 사내 정답 데이터셋으로 Recall@K·MRR·nDCG 회귀 게이트 구축 |
 | OpenSearch | 미구현 | 2단계 고도화 시 BM25 인덱스와 ACL 필터 계약 구현 |
-| 자동 백업·복원 실행기 | 미구현 | PostgreSQL/Object Storage 백업 작업과 복원 검증 자동화 |
 | Vault/KMS 직접 어댑터 | 미구현 | 현재 bootstrap master key와 암호화 DB 방식 대신 사내 Secret Store 연동 |
 | 레거시 MCP SSE endpoint | 미구현(선택) | 승인 대상 구형 클라이언트가 요구할 때 추가 |
 | Confluence/PDF 등 확장 소스 | 미구현(3단계) | SourceRepository 플러그인과 파서 구현 |

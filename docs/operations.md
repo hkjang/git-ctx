@@ -35,11 +35,18 @@ API 키 pepper를 바꾸면 기존 키를 검증할 수 없으므로 이중 pepp
 
 ## 백업과 복구
 
-PostgreSQL 운영 환경은 매일 `pg_dump --format=custom` 백업을 암호화 저장소로
-전송하고 주기적으로 별도 DB에 `pg_restore` 검증한다. SQLite 단일 노드는 WAL
-checkpoint 이후 SQLite online backup API 또는 스토리지 스냅샷을 사용한다.
-DB에는 설정 암호문이 저장되므로 `GIT_CTX_MASTER_KEY`는 DB 백업과 분리하여 KMS에
-보관한다. 목표는 RPO 24시간, RTO 4시간이며 분기별 복구 훈련으로 입증한다.
+관리자 `백업과 복구` 화면에서 즉시 백업, 암호화 아카이브 다운로드와 복원을 수행한다.
+기본 주기는 24시간, 보존 개수는 7개이며 `backup` 동적 설정으로 변경한다. SQLite와
+PostgreSQL 모두 일관된 트랜잭션 스냅샷을 사용한다. 복원은 현재 실행 버전과 migration
+및 테이블 스키마가 정확히 같은 백업만 허용하고 전체 쓰기를 하나의 트랜잭션으로
+적용한다. 성공하면 기존 웹 세션을 모두 무효화하고 Worker와 Scheduler를 재시작한다.
+
+복원에는 `platform-admin` 재인증과 `RESTORE <백업 ID>` 확인문, 변경 사유가 필요하다.
+사전에 별도 환경에서 아카이브 SHA-256, master key, 복원 후 readiness와 Keycloak
+로그인을 검증한다. DB에는 설정 암호문이 저장되므로 `GIT_CTX_MASTER_KEY`는 백업
+볼륨과 분리해 KMS에 보관한다. 목표는 RPO 24시간, RTO 4시간이며 분기별 복구
+훈련으로 입증한다. 인프라 전체 재해 복구에는 PostgreSQL 물리/`pg_dump` 백업과
+스토리지 스냅샷을 추가 계층으로 함께 유지한다.
 
 ## 데이터 보호
 

@@ -146,7 +146,8 @@
                 rows="16"
                 spellcheck="false"
               >
-{}</textarea>
+{}</textarea
+              >
             </label>
             <div>
               <button id="load-setting">불러오기</button>
@@ -194,6 +195,20 @@
           <hr />
           <h2>운영 상태</h2>
           <div id="system-health" class="notice"></div>
+        </div>
+        <div id="backup-admin-section" hidden>
+          <hr />
+          <div class="section-title">
+            <div>
+              <h2>백업과 복구</h2>
+              <p>
+                백업은 Master Key로 암호화되며 복원하면 모든 활성 세션이
+                폐기됩니다.
+              </p>
+            </div>
+            <button id="create-backup">지금 백업</button>
+          </div>
+          <div id="backups" class="table-wrap"></div>
         </div>
         <div id="security-admin-section" hidden>
           <h2>보안</h2>

@@ -4,5 +4,6 @@ metadata:
   name: git-ctx
 data:
   GIT_CTX_LISTEN: ":4747"
+  GIT_CTX_BACKUP_DIR: "/var/lib/git-ctx/backups"
   GIT_CTX_DB_DRIVER: "postgres"
   GIT_CTX_PUBLIC_URL: "https://git-ctx.company.local"

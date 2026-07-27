@@ -18,6 +18,8 @@ services:
       postgres:
         condition: service_healthy
     ports: ["4747:4747"]
+    volumes:
+      - backup-data:/var/lib/git-ctx/backups
     environment:
       GIT_CTX_DB_DRIVER: postgres
       GIT_CTX_DB_DSN: postgres://gitctx:${POSTGRES_PASSWORD}@postgres:5432/gitctx?sslmode=disable
@@ -26,3 +28,4 @@ services:
       GIT_CTX_BOOTSTRAP_ADMIN: ${GIT_CTX_BOOTSTRAP_ADMIN:-}
 volumes:
   postgres-data:
+  backup-data:

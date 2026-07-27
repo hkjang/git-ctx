@@ -32,6 +32,8 @@
       security: has("security-admin"),
       securityEvents: has("security-admin") || roles.has("readonly-operator"),
       audit: has("security-admin") || roles.has("auditor"),
+      backup: has("readonly-operator"),
+      backupWrite: roles.has("platform-admin"),
     };
   }
 

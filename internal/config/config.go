@@ -7,24 +7,26 @@ import (
 )
 
 type Config struct {
-	ListenAddress  string
-	DatabaseDriver string
-	DatabaseDSN    string
-	KeyPepper      string
-	MasterKey      string
-	BootstrapAdmin string
-	PublicURL      string
+	ListenAddress   string
+	DatabaseDriver  string
+	DatabaseDSN     string
+	KeyPepper       string
+	MasterKey       string
+	BootstrapAdmin  string
+	PublicURL       string
+	BackupDirectory string
 }
 
 func FromEnv() (Config, error) {
 	c := Config{
-		ListenAddress:  env("GIT_CTX_LISTEN", ":4747"),
-		DatabaseDriver: strings.ToLower(env("GIT_CTX_DB_DRIVER", "postgres")),
-		DatabaseDSN:    os.Getenv("GIT_CTX_DB_DSN"),
-		KeyPepper:      os.Getenv("GIT_CTX_API_KEY_PEPPER"),
-		MasterKey:      os.Getenv("GIT_CTX_MASTER_KEY"),
-		BootstrapAdmin: os.Getenv("GIT_CTX_BOOTSTRAP_ADMIN"),
-		PublicURL:      env("GIT_CTX_PUBLIC_URL", "http://localhost:4747"),
+		ListenAddress:   env("GIT_CTX_LISTEN", ":4747"),
+		DatabaseDriver:  strings.ToLower(env("GIT_CTX_DB_DRIVER", "postgres")),
+		DatabaseDSN:     os.Getenv("GIT_CTX_DB_DSN"),
+		KeyPepper:       os.Getenv("GIT_CTX_API_KEY_PEPPER"),
+		MasterKey:       os.Getenv("GIT_CTX_MASTER_KEY"),
+		BootstrapAdmin:  os.Getenv("GIT_CTX_BOOTSTRAP_ADMIN"),
+		PublicURL:       env("GIT_CTX_PUBLIC_URL", "http://localhost:4747"),
+		BackupDirectory: env("GIT_CTX_BACKUP_DIR", "backups"),
 	}
 	if c.DatabaseDSN == "" {
 		if c.DatabaseDriver == "sqlite" {

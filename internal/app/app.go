@@ -27,6 +27,7 @@ import (
 
 	"git-ctx/internal/apikey"
 	"git-ctx/internal/auth"
+	"git-ctx/internal/backup"
 	bitbucketv6 "git-ctx/internal/bitbucket/v6"
 	"git-ctx/internal/config"
 	"git-ctx/internal/embedding"
@@ -51,18 +52,22 @@ import (
 )
 
 type App struct {
-	cfg    config.Config
-	store  *store.Store
-	keys   *apikey.Service
-	mcp    *mcp.Server
-	search *search.Service
-	mux    *http.ServeMux
-	aead   cipher.AEAD
-	oidc   *auth.OIDCVerifier
-	hooks  *webhook.Service
-	traces *observability.Manager
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	cfg          config.Config
+	store        *store.Store
+	keys         *apikey.Service
+	mcp          *mcp.Server
+	search       *search.Service
+	mux          *http.ServeMux
+	aead         cipher.AEAD
+	oidc         *auth.OIDCVerifier
+	hooks        *webhook.Service
+	traces       *observability.Manager
+	backup       *backup.Service
+	rootCtx      context.Context
+	requestGate  sync.RWMutex
+	backgroundMu sync.Mutex
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
 }
 
 func New(ctx context.Context, c config.Config) (*App, error) {
@@ -78,7 +83,8 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &App{cfg: c, store: s, keys: apikey.New(s, c.KeyPepper), aead: aead, mux: http.NewServeMux(), traces: observability.New()}
+	a := &App{cfg: c, store: s, keys: apikey.New(s, c.KeyPepper), aead: aead, mux: http.NewServeMux(), traces: observability.New(), rootCtx: ctx}
+	a.backup = backup.New(s, aead, a.backupConfig)
 	if settings, loadErr := a.loadSettingMap(ctx, "observability"); loadErr == nil {
 		if applyErr := a.traces.Apply(ctx, observabilityConfigFromMap(settings)); applyErr != nil {
 			slog.Warn("stored observability setting could not be applied", "error", applyErr)
@@ -104,12 +110,18 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 	})
 	a.mcp = mcp.New(a.search, s)
 	a.routes()
-	workerCtx, cancel := context.WithCancel(ctx)
+	a.startBackground()
+	return a, nil
+}
+func (a *App) startBackground() {
+	a.backgroundMu.Lock()
+	defer a.backgroundMu.Unlock()
+	workerCtx, cancel := context.WithCancel(a.rootCtx)
 	a.cancel = cancel
-	backgroundWorker := worker.New(s, indexer.New(s, indexer.DefaultPolicy()), a.sourceAdapter)
+	backgroundWorker := worker.New(a.store, indexer.New(a.store, indexer.DefaultPolicy()), a.sourceAdapter)
 	backgroundWorker.SetEmbeddingFactory(a.embeddingProvider)
-	backgroundScheduler := scheduler.New(s, a.pollingInterval)
-	a.wg.Add(2)
+	backgroundScheduler := scheduler.New(a.store, a.pollingInterval)
+	a.wg.Add(3)
 	go func() {
 		defer a.wg.Done()
 		backgroundWorker.Run(workerCtx)
@@ -118,19 +130,40 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 		defer a.wg.Done()
 		backgroundScheduler.Run(workerCtx)
 	}()
-	return a, nil
+	go func() {
+		defer a.wg.Done()
+		a.backup.Run(workerCtx)
+	}()
+}
+func (a *App) stopBackground() {
+	a.backgroundMu.Lock()
+	cancel := a.cancel
+	a.cancel = nil
+	a.backgroundMu.Unlock()
+	if cancel != nil {
+		cancel()
+		a.wg.Wait()
+	}
 }
 func (a *App) Close() {
-	if a.cancel != nil {
-		a.cancel()
-	}
-	a.wg.Wait()
+	a.stopBackground()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = a.traces.Shutdown(shutdownCtx)
 	_ = a.store.DB.Close()
 }
-func (a *App) Handler() http.Handler { return tracing(requestLogging(securityHeaders(a.mux))) }
+func (a *App) Handler() http.Handler { return tracing(requestLogging(a.gate(securityHeaders(a.mux)))) }
+func (a *App) gate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/admin/backups/") && strings.HasSuffix(r.URL.Path, "/restore") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		a.requestGate.RLock()
+		defer a.requestGate.RUnlock()
+		next.ServeHTTP(w, r)
+	})
+}
 func (a *App) routes() {
 	a.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -180,6 +213,10 @@ func (a *App) routes() {
 	a.mux.Handle("GET /api/v1/admin/index-jobs", a.authorize(http.HandlerFunc(a.indexJobs), "source-admin", "readonly-operator"))
 	a.mux.Handle("POST /api/v1/admin/index-jobs/{id}/retry", a.authorize(http.HandlerFunc(a.retryIndexJob), "source-admin"))
 	a.mux.Handle("GET /api/v1/admin/health", a.authorize(http.HandlerFunc(a.adminHealth), "readonly-operator"))
+	a.mux.Handle("GET /api/v1/admin/backups", a.authorize(http.HandlerFunc(a.listBackups), "readonly-operator"))
+	a.mux.Handle("POST /api/v1/admin/backups", a.admin(http.HandlerFunc(a.createBackup)))
+	a.mux.Handle("GET /api/v1/admin/backups/{id}/download", a.authorize(http.HandlerFunc(a.downloadBackup), "readonly-operator"))
+	a.mux.Handle("POST /api/v1/admin/backups/{id}/restore", a.admin(http.HandlerFunc(a.restoreBackup)))
 	a.mux.Handle("GET /api/v1/admin/mcp/tools", a.authorize(http.HandlerFunc(a.mcpTools), "mcp-admin", "readonly-operator"))
 	a.mux.Handle("PUT /api/v1/admin/mcp/tools/{id}", a.authorize(http.HandlerFunc(a.updateMCPTool), "mcp-admin"))
 	a.mux.Handle("/", http.FileServer(http.Dir("web")))
@@ -810,7 +847,7 @@ func (a *App) putSetting(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	if err := validateSetting(ctx, category, value); err != nil {
+	if err := a.validateSetting(ctx, category, value); err != nil {
 		problem(w, 400, "setting_validation_failed", err.Error())
 		return
 	}
@@ -899,7 +936,7 @@ func (a *App) rollbackSetting(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	if err := validateSetting(ctx, category, value); err != nil {
+	if err := a.validateSetting(ctx, category, value); err != nil {
 		problem(w, 400, "rollback_validation_failed", err.Error())
 		return
 	}
@@ -1120,7 +1157,7 @@ func sourceAdapterFromMap(sourceType string, settings map[string]any) (source.Re
 		return nil, errors.New("unsupported source type")
 	}
 }
-func validateSetting(ctx context.Context, category string, value map[string]any) error {
+func (a *App) validateSetting(ctx context.Context, category string, value map[string]any) error {
 	switch category {
 	case "keycloak":
 		raw, _ := json.Marshal(value)
@@ -1192,8 +1229,34 @@ func validateSetting(ctx context.Context, category string, value map[string]any)
 		}
 	case "observability":
 		return observability.Validate(ctx, observabilityConfigFromMap(value))
+	case "backup":
+		return backup.ValidateStorage(backupConfigFromMap(value, a.cfg.BackupDirectory))
 	}
 	return nil
+}
+func (a *App) backupConfig(ctx context.Context) backup.Config {
+	settings, err := a.loadSettingMap(ctx, "backup")
+	if err != nil {
+		settings = map[string]any{}
+	}
+	return backupConfigFromMap(settings, a.cfg.BackupDirectory)
+}
+func backupConfigFromMap(settings map[string]any, defaultDirectory string) backup.Config {
+	cfg := backup.Config{Directory: defaultDirectory, Interval: 24 * time.Hour, RetentionCount: 7, MaxBytes: 512 << 20}
+	cfg.Enabled, _ = settings["enabled"].(bool)
+	if value, ok := settings["directory"].(string); ok && value != "" {
+		cfg.Directory = value
+	}
+	if value, ok := settings["intervalHours"].(float64); ok && value > 0 {
+		cfg.Interval = time.Duration(value * float64(time.Hour))
+	}
+	if value, ok := settings["retentionCount"].(float64); ok {
+		cfg.RetentionCount = int(value)
+	}
+	if value, ok := settings["maxBytes"].(float64); ok {
+		cfg.MaxBytes = int64(value)
+	}
+	return cfg
 }
 func observabilityConfigFromMap(settings map[string]any) observability.Config {
 	cfg := observability.Config{ServiceName: "git-ctx", SampleRatio: 1, Timeout: 10 * time.Second, Headers: map[string]string{}}
@@ -1761,6 +1824,12 @@ func boolInt(value bool) int {
 	}
 	return 0
 }
+func truncateText(value string, limit int) string {
+	if len(value) > limit {
+		return value[:limit]
+	}
+	return value
+}
 func stringContains(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
@@ -1806,6 +1875,61 @@ func (a *App) adminHealth(w http.ResponseWriter, r *http.Request) {
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
 	jsonOut(w, 200, map[string]any{"status": "ok", "version": version.Version, "database": "ok", "repositories": repositories, "chunks": chunks, "indexJobs": map[string]int64{"pending": pending, "failed": failed}, "activeApiKeys": activeKeys, "observability": map[string]bool{"tracingEnabled": a.traces.Enabled()}, "go": map[string]any{"goroutines": runtime.NumGoroutine(), "allocatedBytes": memory.Alloc}})
+}
+func (a *App) listBackups(w http.ResponseWriter, r *http.Request) {
+	records, err := a.backup.List(r.Context())
+	if err != nil {
+		problem(w, 500, "backup_list_failed", err.Error())
+		return
+	}
+	jsonOut(w, http.StatusOK, records)
+}
+func (a *App) createBackup(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	record, err := a.backup.Create(r.Context(), p.UserID, "manual")
+	if err != nil {
+		a.audit(r, p, "backup.create", "backup", "", "failure", map[string]any{"error": truncateText(err.Error(), 500)})
+		problem(w, 500, "backup_create_failed", err.Error())
+		return
+	}
+	a.audit(r, p, "backup.create", "backup", record.ID, "success", map[string]any{"sizeBytes": record.SizeBytes, "sha256": record.SHA256})
+	jsonOut(w, http.StatusCreated, record)
+}
+func (a *App) downloadBackup(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	file, record, err := a.backup.Open(r.Context(), r.PathValue("id"))
+	if err != nil {
+		problem(w, 404, "backup_unavailable", "Backup does not exist or failed integrity verification")
+		return
+	}
+	defer file.Close()
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+record.Filename+`"`)
+	w.Header().Set("X-Content-SHA256", record.SHA256)
+	w.Header().Set("Cache-Control", "no-store")
+	a.audit(r, p, "backup.download", "backup", record.ID, "success", map[string]any{"sizeBytes": record.SizeBytes})
+	http.ServeContent(w, r, record.Filename, record.CreatedAt, file)
+}
+func (a *App) restoreBackup(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	id := r.PathValue("id")
+	reason := strings.TrimSpace(r.Header.Get("X-Change-Reason"))
+	if r.Header.Get("X-Restore-Confirmation") != "RESTORE "+id || reason == "" {
+		problem(w, 400, "restore_confirmation_required", "Exact restore confirmation and change reason are required")
+		return
+	}
+	a.requestGate.Lock()
+	a.stopBackground()
+	err := a.backup.Restore(r.Context(), id)
+	a.startBackground()
+	a.requestGate.Unlock()
+	if err != nil {
+		a.audit(r, p, "backup.restore", "backup", id, "failure", map[string]any{"reason": reason, "error": truncateText(err.Error(), 500)})
+		problem(w, 400, "backup_restore_failed", err.Error())
+		return
+	}
+	a.audit(r, p, "backup.restore", "backup", id, "success", map[string]any{"reason": reason})
+	jsonOut(w, http.StatusOK, map[string]any{"id": id, "status": "restored", "sessionsInvalidated": true})
 }
 func (a *App) metrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")

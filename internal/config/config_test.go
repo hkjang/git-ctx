@@ -16,4 +16,7 @@ func TestDefaultPortIs4747(t *testing.T) {
 	if cfg.ListenAddress != ":4747" || cfg.PublicURL != "http://localhost:4747" {
 		t.Fatalf("unexpected defaults: listen=%q publicURL=%q", cfg.ListenAddress, cfg.PublicURL)
 	}
+	if cfg.BackupDirectory != "backups" {
+		t.Fatalf("unexpected backup directory: %q", cfg.BackupDirectory)
+	}
 }
