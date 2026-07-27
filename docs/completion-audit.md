@@ -16,7 +16,7 @@
 | 모델 미설정 검색 | 완료 | ACL 검증 뒤 Bitbucket/GitLab source query API, Context7 출력 조립과 안전한 BM25 fallback 계약 시험 |
 | 사용자 기능 | 완료 | 저장소·키·제한·사용량·호출·알림·MCP 설정·도구 시험 UI/API |
 | 관리자 기능 | 완료(구현 범위) | 설정·연결시험·버전·rollback, 저장소·정책·작업, MCP 도구, 키·감사·보안·상태 UI/API와 역할별 메뉴·쓰기 통제 |
-| 데이터베이스 | 완료 | SQLite 회귀 시험 및 빈 PostgreSQL 16에서 001~012 migration/readiness와 암호화 백업·복원 실검증 |
+| 데이터베이스 | 완료 | SQLite 회귀 시험 및 빈 PostgreSQL 16에서 001~013 migration/readiness와 암호화 백업·복원 실검증 |
 | 배포 | 완료 | 비루트 Docker 이미지 실행, Compose, Kubernetes Kustomize와 기본 NetworkPolicy 렌더링 |
 | 관측성 | 완료 | JSON 요청 로그, request ID, health/readiness, Prometheus와 동적 OTLP HTTP tracing |
 | 백업·복구 | 완료(애플리케이션 범위) | SQLite/PostgreSQL 공통 암호화 아카이브, 주기·보존, 무결성 검증, 트랜잭션 복원, 세션 무효화와 관리자 UI/API |
@@ -25,6 +25,10 @@
 | OpenSearch | 완료(계약 시험) | 관리자 연결·index mapping 시험, ref별 delete/bulk projection, repository·ref·principal 선필터, DB 청크 hydration, Worker 재시도 |
 | 최초 관리자 세션 | 완료 | 일회용 토큰을 30분 HttpOnly·SameSite 세션으로 교환, Origin 검증, Keycloak 저장 시 세션·키 전역 폐기 |
 | 버전 표시 | 완료 | 공개 설정과 `/api/v1/me` 버전 제공, 로그인 전 상단·안내와 로그인 후 프로필 표시 |
+| 비밀정보 관리 | 완료(계약 시험) | 암호화 DB/Vault KV v2 backend, 등록·회전·중지, 원문 비노출, `secret://` 동적 참조와 Fail Closed |
+| 관리자 UI 구조 | 완료 | 역할별 대메뉴, 설정 종류별 탭, 고급 JSON 접기, TLS 토글·CA 조건부 표시, 저장 진행·오류 상태 |
+| Keycloak 설정 안정성 | 완료 | Base URL+Realm 정규화, Redirect 기본값, OAuth 저장 전 검증, 실제 platform-admin 로그인 뒤 Bootstrap 폐기 |
+| DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 
 2026-07-27 로컬 검증 결과:
 
@@ -34,10 +38,12 @@ go vet ./...                                PASS
 node --check web/app.js                     PASS
 node test/web/roles.test.js                 PASS
 kubectl kustomize deploy/kubernetes/base    PASS
-PostgreSQL 16 migration 001..012            PASS
+PostgreSQL 16 migration 001..013            PASS
 PostgreSQL 16 backup/restore round trip     PASS
 PostgreSQL 16 quality benchmark contract    PASS
 PostgreSQL 16 DSN-only application startup PASS
+PostgreSQL 실패→SQLite 복구→PostgreSQL 논리 이전·재기동 PASS
+node test/web/admin-ui.test.js              PASS
 Docker build + UID 10001 readiness/UI       PASS
 OpenSearch auth/mapping/bulk/ACL contract   PASS
 Default listen address :4747 readiness      PASS
@@ -47,7 +53,6 @@ Default listen address :4747 readiness      PASS
 
 | 항목 | 현재 상태 | 완료에 필요한 작업 |
 |---|---|---|
-| Vault/KMS 직접 어댑터 | 미구현 | 현재 DSN 단일 Secret 주입을 사내 Secret Store 동적 credential/lease API로 확장 |
 | 레거시 MCP SSE endpoint | 미구현(선택) | 승인 대상 구형 클라이언트가 요구할 때 추가 |
 | Confluence/PDF 등 확장 소스 | 미구현(3단계) | SourceRepository 플러그인과 파서 구현 |
 
@@ -68,6 +73,8 @@ Default listen address :4747 readiness      PASS
    사내 CA·프록시 장애/복구 시험
 8. 실제 운영 대상 OpenSearch 버전에서 mapping, Bulk 재색인, 장애 복구와 목표 규모
    repository/ref/principal 필터 성능 시험
+9. 실제 사내 Vault에서 최소 권한 KV v2 정책, Token TTL·회전·폐기, HA standby,
+   seal/unseal 장애와 Vault backup/DR 복구 시험
 
 따라서 현재 산출물은 실행 가능한 MVP 기반과 2단계 일부 기능까지 구현됐지만,
 요건서 전체의 최종 제품 완료 판정은 위 미구현 항목의 범위 결정과 사내 승인 시험 후에

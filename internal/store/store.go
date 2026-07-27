@@ -23,11 +23,49 @@ type Store struct {
 
 func (s *Store) Driver() string { return s.driver }
 
+func DriverForDSN(dsn string) string {
+	if strings.HasPrefix(strings.TrimSpace(dsn), "file:") || strings.TrimSpace(dsn) == ":memory:" {
+		return "sqlite"
+	}
+	return "postgres"
+}
+
+// TestConnection verifies a DSN without creating or migrating application
+// tables. Administrative connection tests must remain read-only.
+func TestConnection(ctx context.Context, dsn string) (map[string]string, error) {
+	driver := DriverForDSN(dsn)
+	sqlDriver := map[string]string{"postgres": "pgx", "sqlite": "sqlite3"}[driver]
+	db, err := sql.Open(sqlDriver, dsn)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	if err = db.PingContext(ctx); err != nil {
+		return nil, err
+	}
+	result := map[string]string{"driver": driver}
+	if driver == "postgres" {
+		var database, user, serverVersion string
+		if err = db.QueryRowContext(ctx, `SELECT current_database(),current_user,current_setting('server_version')`).Scan(&database, &user, &serverVersion); err != nil {
+			return nil, err
+		}
+		result["database"], result["user"], result["serverVersion"] = database, user, serverVersion
+	}
+	return result, nil
+}
+
 func Open(ctx context.Context, driver, dsn string) (*Store, error) {
 	sqlDriver := map[string]string{"postgres": "pgx", "sqlite": "sqlite3"}[driver]
 	db, err := sql.Open(sqlDriver, dsn)
 	if err != nil {
 		return nil, err
+	}
+	if driver == "sqlite" {
+		// SQLite has a single writer. Serializing the application pool prevents
+		// background workers and administrative setting transactions from racing
+		// into SQLITE_BUSY while retaining PostgreSQL concurrency unchanged.
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
 	}
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()

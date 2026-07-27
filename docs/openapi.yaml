@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.5.1
+  version: 0.6.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -14,6 +14,13 @@ paths:
         summary: Public non-secret UI branding,
         security: [],
         responses: { "200": { description: Branding configuration } },
+      }
+  /api/v1/public/status:
+    get:
+      {
+        summary: Public non-secret metadata database connectivity and latency,
+        security: [],
+        responses: { "200": { description: Connected }, "503": { description: Database unavailable } },
       }
   /api/v1/bootstrap/login:
     post:
@@ -145,6 +152,24 @@ paths:
         parameters: [{ $ref: "#/components/parameters/Category" }],
         responses: { "200": { description: Verified } },
       }
+  /api/v1/admin/database/status:
+    get:
+      {
+        summary: Metadata database identity pool migration and connectivity diagnostics without DSN disclosure,
+        responses: { "200": { description: Database diagnostics }, "503": { description: Database unavailable } },
+      }
+  /api/v1/admin/database/test:
+    post:
+      {
+        summary: Read-only PostgreSQL DSN connectivity and server identity test,
+        responses: { "200": { description: Verified }, "400": { description: Connection failed } },
+      }
+  /api/v1/admin/database/migrate:
+    post:
+      {
+        summary: Migrate recovery SQLite durable data to PostgreSQL and require restart,
+        responses: { "200": { description: Migrated and restart required }, "400": { description: Validation or migration failed } },
+      }
   /api/v1/admin/settings/keycloak/test:
     post:
       {
@@ -243,6 +268,31 @@ paths:
         summary: Security administrator key revocation,
         parameters: [{ $ref: "#/components/parameters/Id" }],
         responses: { "204": { description: Revoked } },
+      }
+  /api/v1/admin/secrets:
+    get:
+      {
+        summary: List managed secret metadata without plaintext values,
+        responses: { "200": { description: Secret metadata } },
+      }
+    post:
+      {
+        summary: Create or rotate an encrypted database or Vault KV v2 secret,
+        responses: { "201": { description: Secret metadata } },
+      }
+  /api/v1/admin/secrets/{name}/rotate:
+    post:
+      {
+        summary: Rotate a managed secret while retaining encrypted version history,
+        parameters: [{ name: name, in: path, required: true, schema: { type: string } }],
+        responses: { "201": { description: Rotated secret metadata } },
+      }
+  /api/v1/admin/secrets/{name}/disable:
+    post:
+      {
+        summary: Disable a managed secret and fail closed for future references,
+        parameters: [{ name: name, in: path, required: true, schema: { type: string } }],
+        responses: { "204": { description: Disabled } },
       }
   /api/v1/admin/audit-logs:
     get:

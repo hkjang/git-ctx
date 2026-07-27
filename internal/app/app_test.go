@@ -206,6 +206,186 @@ func TestBootstrapLoginCreatesHttpOnlySessionForMeAndRevokesIt(t *testing.T) {
 	}
 }
 
+func TestManagedSecretAdminAPIAndSettingReference(t *testing.T) {
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "managed-secret-api.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(t.TempDir(), "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer bootstrap")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	created := request(http.MethodPost, "/api/v1/admin/secrets", `{"name":"bitbucket-pat","backend":"database","value":"pat-secret","reason":"initial"}`)
+	if created.Code != http.StatusCreated || strings.Contains(created.Body.String(), "pat-secret") {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	listed := request(http.MethodGet, "/api/v1/admin/secrets", "")
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"name":"bitbucket-pat"`) || strings.Contains(listed.Body.String(), "pat-secret") {
+		t.Fatalf("list status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	raw, _ := json.Marshal(map[string]any{"baseUrl": "https://bitbucket.company", "pat": "secret://bitbucket-pat"})
+	sealed, err := a.seal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = a.store.DB.Exec(a.store.Rebind(`INSERT INTO system_settings(category,version,value_encrypted,updated_by) VALUES('bitbucket',1,?,'admin')`), sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := a.loadSettingMap(context.Background(), "bitbucket")
+	if err != nil || resolved["pat"] != "pat-secret" {
+		t.Fatalf("resolved=%#v err=%v", resolved, err)
+	}
+	disabled := request(http.MethodPost, "/api/v1/admin/secrets/bitbucket-pat/disable", "")
+	if disabled.Code != http.StatusNoContent {
+		t.Fatalf("disable status=%d body=%s", disabled.Code, disabled.Body.String())
+	}
+	if _, err = a.loadSettingMap(context.Background(), "bitbucket"); err == nil {
+		t.Fatal("disabled secret reference was not fail-closed")
+	}
+}
+
+func TestVaultAdminConnectionTest(t *testing.T) {
+	vault := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/auth/token/lookup-self" || r.Header.Get("X-Vault-Token") != "vault-token" {
+			http.Error(w, "unexpected Vault request", http.StatusForbidden)
+			return
+		}
+		io.WriteString(w, `{"data":{"policies":["git-ctx"]}}`)
+	}))
+	defer vault.Close()
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "vault-admin-test.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(t.TempDir(), "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	body := fmt.Sprintf(`{"enabled":true,"baseUrl":%q,"token":"vault-token","mount":"secret","prefix":"git-ctx","tlsVerify":true}`, vault.URL)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/settings/vault/test", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer bootstrap")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "vault-token") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var audits int
+	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE action='settings.test' AND resource_id='vault' AND outcome='success'`).Scan(&audits); err != nil || audits != 1 {
+		t.Fatalf("audits=%d err=%v", audits, err)
+	}
+}
+
+func TestKeycloakBaseRealmSaveNormalizesAndKeepsBootstrapUntilAdminLogin(t *testing.T) {
+	var issuer string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/realms/company/.well-known/openid-configuration" {
+			http.NotFound(w, r)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"issuer": issuer, "authorization_endpoint": issuer + "/protocol/openid-connect/auth",
+			"token_endpoint": issuer + "/protocol/openid-connect/token", "jwks_uri": issuer + "/protocol/openid-connect/certs",
+		})
+	}))
+	defer server.Close()
+	issuer = server.URL + "/realms/company"
+	directory := filepath.Join(t.TempDir(), "backups")
+	cfg := config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "keycloak-save.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), PublicURL: "http://git-ctx.internal:4747", BackupDirectory: directory,
+	}
+	a, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := a.bootstrapAdminToken()
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/admin/settings/keycloak", strings.NewReader(fmt.Sprintf(`{"baseUrl":%q,"realm":"company","clientId":"git-ctx","clientSecret":"client-secret","realmRoleMappings":{"ctx-admin":"platform-admin"},"tlsVerify":false}`, server.URL)))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Change-Reason", "configure SSO")
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, request)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	stored, err := a.loadSettingMapRaw(context.Background(), "keycloak")
+	if err != nil || stored["issuerUrl"] != issuer || stored["redirectUrl"] != "http://git-ctx.internal:4747/auth/callback" || stored["tlsVerify"] != false {
+		t.Fatalf("stored=%#v err=%v", stored, err)
+	}
+	if !a.validBootstrapToken(context.Background(), token) {
+		t.Fatal("bootstrap was revoked before a successful Keycloak platform-admin login")
+	}
+	a.Close()
+	b, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if !b.validBootstrapToken(context.Background(), token) {
+		t.Fatal("bootstrap recovery did not survive restart before activation")
+	}
+	b.disableBootstrapAdmin()
+}
+
+func TestPublicAndAdminDatabaseStatus(t *testing.T) {
+	a, err := New(context.Background(), config.Config{DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "db-status.db") + "?_foreign_keys=on", KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(t.TempDir(), "backups")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	public := httptest.NewRecorder()
+	a.Handler().ServeHTTP(public, httptest.NewRequest(http.MethodGet, "/api/v1/public/status", nil))
+	if public.Code != http.StatusOK || !strings.Contains(public.Body.String(), `"status":"connected"`) || strings.Contains(public.Body.String(), "db-status.db") {
+		t.Fatalf("public status=%d body=%s", public.Code, public.Body.String())
+	}
+	adminRequest := httptest.NewRequest(http.MethodGet, "/api/v1/admin/database/status", nil)
+	adminRequest.Header.Set("Authorization", "Bearer bootstrap")
+	admin := httptest.NewRecorder()
+	a.Handler().ServeHTTP(admin, adminRequest)
+	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"latest":"013_managed_secrets.sql"`) || !strings.Contains(admin.Body.String(), `"pool"`) {
+		t.Fatalf("admin status=%d body=%s", admin.Code, admin.Body.String())
+	}
+}
+
+func TestPostgresStartupFailureFallsBackToSQLiteRecovery(t *testing.T) {
+	directory := t.TempDir()
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "postgres",
+		DatabaseDSN:    "postgres://gitctx:invalid@127.0.0.1:1/gitctx?sslmode=disable&connect_timeout=1",
+		KeyPepper:      strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32),
+		BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747", BackupDirectory: directory,
+	})
+	if err != nil {
+		t.Fatalf("recovery startup failed: %v", err)
+	}
+	defer a.Close()
+	if !a.recoveryMode || a.store.Driver() != "sqlite" {
+		t.Fatalf("expected sqlite recovery mode, mode=%v driver=%s", a.recoveryMode, a.store.Driver())
+	}
+	info, err := os.Stat(filepath.Join(directory, "recovery.db"))
+	if err != nil {
+		t.Fatalf("recovery database missing: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("recovery database mode=%o", info.Mode().Perm())
+	}
+	recorder := httptest.NewRecorder()
+	a.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/public/status", nil))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"recoveryMode":true`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestAdministrativeSearchQualityBenchmarkFlow(t *testing.T) {
 	a, err := New(context.Background(), config.Config{
 		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "quality-api.db") + "?_foreign_keys=on&_busy_timeout=5000",

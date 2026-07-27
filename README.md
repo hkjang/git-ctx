@@ -10,7 +10,9 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - 검색 후보 단계의 저장소 ACL 적용과 브랜치·태그별 조회
 - 사용자 API 키 생성·목록·중지·폐기 및 HMAC 기반 비가역 저장
 - SQLite와 PostgreSQL 공통 스키마
+- PostgreSQL 기동 실패 시 SQLite 복구 모드와 관리자 연결 시험·논리 데이터 이전
 - 암호화된 동적 관리자 설정 및 불변 설정 이력·감사 로그
+- 암호화 DB 또는 Vault KV v2 기반 관리 Secret 등록·회전·중지와 `secret://` 설정 참조
 - Keycloak OIDC Discovery/JWKS 검증과 Realm·Client 역할 매핑
 - Keycloak Authorization Code+PKCE 사용자 로그인과 HttpOnly 서버 세션
 - Bitbucket Server 6.9.1 및 GitLab API v4 소스 어댑터
@@ -43,7 +45,8 @@ go run ./cmd/git-ctx
 실제 Bootstrap 입력은 `GIT_CTX_DB_DSN` 하나뿐이며 driver는 DSN에서 자동 판별됩니다.
 Keycloak이 설정되지 않은 최초 기동에는 `backups/bootstrap-admin.token`이 권한 0600으로
 한 번 생성됩니다. 화면의 `최초 관리자 설정`에서 입력하면 되고 Keycloak 설정 저장
-직후 서버가 토큰, 30분 HttpOnly 초기 설정 세션과 파일을 폐기합니다. 서비스 버전은
+후 실제 `platform-admin` Keycloak 로그인이 성공하면 토큰, 30분 HttpOnly 초기 설정
+세션과 파일을 폐기합니다. 서비스 버전은
 로그인 전 상단과 로그인 후 내 계정 화면에 표시됩니다.
 
 ```bash
@@ -64,15 +67,20 @@ curl -X POST -H "Authorization: Bearer $(cat backups/bootstrap-admin.token)" \
 
 ## 데이터베이스
 
-PostgreSQL은 `GIT_CTX_DB_DSN` 하나만으로 연결할 수 있습니다.
+PostgreSQL은 `GIT_CTX_DB_DSN` 하나만으로 최초 연결합니다.
 
 ```bash
 GIT_CTX_DB_DSN='postgres://gitctx:password@db:5432/gitctx?sslmode=require'
 ```
 
-마이그레이션은 시작할 때 멱등 실행됩니다. 설정 암호화 키와 API-key pepper는 DSN을
-도메인 분리해 파생하므로 별도 Bootstrap 환경변수가 필요하지 않습니다. 암호화된 DB와
-백업을 복원할 때는 원래 DSN 문자열이 필요하므로 DSN은 Secret Store에서 별도 보관합니다.
+마이그레이션은 시작할 때 멱등 실행됩니다. 연결에 실패하면
+`backups/recovery.db` SQLite로 복구 기동됩니다. 관리자는 “데이터베이스” 메뉴에서 새
+PostgreSQL DSN을 읽기 전용으로 시험한 뒤 명시적 확인과 사유를 입력해 스키마·데이터를
+논리 이전할 수 있습니다. 성공 후 재시작하면 암호화 저장된 검증 DSN을 활성화합니다.
+
+설정 암호화 키와 API-key pepper는 최초 Bootstrap DSN을 도메인 분리해 파생합니다.
+따라서 관리자 전환 뒤에도 환경의 Bootstrap DSN 문자열을 임의 변경하지 말고 Secret
+Store에 보관해야 합니다. 관리자 DSN 원문은 조회·로그·감사 기록에 남지 않습니다.
 
 상세 설계와 구현 상태는 [docs/requirements.md](docs/requirements.md) 및
 [docs/operations.md](docs/operations.md)를 참고하십시오. 구현 증거, 미구현 범위와

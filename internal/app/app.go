@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"git-ctx/internal/apikey"
@@ -42,6 +43,7 @@ import (
 	"git-ctx/internal/rerank"
 	"git-ctx/internal/scheduler"
 	"git-ctx/internal/search"
+	secretstore "git-ctx/internal/secret"
 	"git-ctx/internal/source"
 	"git-ctx/internal/store"
 	"git-ctx/internal/version"
@@ -68,21 +70,22 @@ type App struct {
 	traces             *observability.Manager
 	backup             *backup.Service
 	quality            *quality.Service
+	secrets            *secretstore.Service
 	rootCtx            context.Context
 	requestGate        sync.RWMutex
 	backgroundMu       sync.Mutex
 	bootstrapMu        sync.RWMutex
 	bootstrapPath      string
 	bootstrapPersisted bool
+	recoveryMode       bool
+	databaseStartupErr string
+	recoveryDatabase   string
+	databaseRestart    atomic.Bool
 	cancel             context.CancelFunc
 	wg                 sync.WaitGroup
 }
 
 func New(ctx context.Context, c config.Config) (*App, error) {
-	s, err := store.Open(ctx, c.DatabaseDriver, c.DatabaseDSN)
-	if err != nil {
-		return nil, err
-	}
 	block, err := aes.NewCipher([]byte(c.MasterKey))
 	if err != nil {
 		return nil, err
@@ -91,11 +94,47 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	if c.BackupDirectory == "" {
+		c.BackupDirectory = "backups"
+	}
+	s, openErr := store.Open(ctx, c.DatabaseDriver, c.DatabaseDSN)
+	recoveryMode, startupDBError, recoveryPath := false, "", ""
+	if openErr != nil && c.DatabaseDriver == "postgres" {
+		startupDBError = safeDatabaseError(openErr, c.DatabaseDSN)
+		recoveryPath = filepath.Join(c.BackupDirectory, "recovery.db")
+		if err = os.MkdirAll(c.BackupDirectory, 0700); err != nil {
+			return nil, fmt.Errorf("create recovery database directory: %w", err)
+		}
+		recoveryDSN := "file:" + recoveryPath + "?_foreign_keys=on&_busy_timeout=5000"
+		s, err = store.Open(ctx, "sqlite", recoveryDSN)
+		if err != nil {
+			return nil, fmt.Errorf("primary database unavailable (%s), recovery database failed: %w", safeDatabaseError(openErr, c.DatabaseDSN), err)
+		}
+		if err = os.Chmod(recoveryPath, 0600); err != nil {
+			s.DB.Close()
+			return nil, fmt.Errorf("protect recovery database: %w", err)
+		}
+		recoveryMode = true
+		if desired, loadErr := configuredDatabaseDSN(ctx, s, aead); loadErr == nil && desired != "" && desired != c.DatabaseDSN {
+			if target, targetErr := store.Open(ctx, store.DriverForDSN(desired), desired); targetErr == nil {
+				s.DB.Close()
+				s = target
+				c.DatabaseDSN, c.DatabaseDriver = desired, store.DriverForDSN(desired)
+				recoveryMode, startupDBError = false, ""
+			} else {
+				startupDBError = safeDatabaseError(targetErr, desired)
+			}
+		}
+		if recoveryMode {
+			slog.Warn("primary PostgreSQL is unavailable; SQLite recovery mode is active", "recovery_database", recoveryPath, "error", startupDBError)
+		} else {
+			slog.Info("configured PostgreSQL target activated after bootstrap DSN failure")
+		}
+	} else if openErr != nil {
+		return nil, openErr
+	}
 	bootstrapPath, bootstrapPersisted := "", false
 	if c.BootstrapAdmin == "" {
-		if c.BackupDirectory == "" {
-			c.BackupDirectory = "backups"
-		}
 		c.BootstrapAdmin, bootstrapPersisted, err = loadOrCreateBootstrapToken(ctx, s, aead)
 		if err != nil {
 			s.DB.Close()
@@ -113,7 +152,8 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 			slog.Warn("Keycloak is not configured; one-time bootstrap token is available", "token_file", bootstrapPath)
 		}
 	}
-	a := &App{cfg: c, store: s, keys: apikey.New(s, c.KeyPepper), aead: aead, mux: http.NewServeMux(), traces: observability.New(), rootCtx: ctx, bootstrapPath: bootstrapPath, bootstrapPersisted: bootstrapPersisted}
+	a := &App{cfg: c, store: s, keys: apikey.New(s, c.KeyPepper), aead: aead, mux: http.NewServeMux(), traces: observability.New(), rootCtx: ctx, bootstrapPath: bootstrapPath, bootstrapPersisted: bootstrapPersisted, recoveryMode: recoveryMode, databaseStartupErr: startupDBError, recoveryDatabase: recoveryPath}
+	a.secrets = secretstore.New(s, a.seal, a.open, a.vaultClient)
 	a.backup = backup.New(s, aead, a.backupConfig)
 	if settings, loadErr := a.loadSettingMap(ctx, "observability"); loadErr == nil {
 		if applyErr := a.traces.Apply(ctx, observabilityConfigFromMap(settings)); applyErr != nil {
@@ -189,7 +229,11 @@ func (a *App) Close() {
 func (a *App) Handler() http.Handler { return tracing(requestLogging(a.gate(securityHeaders(a.mux)))) }
 func (a *App) gate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/admin/backups/") && strings.HasSuffix(r.URL.Path, "/restore") {
+		if a.databaseRestart.Load() && r.URL.Path != "/healthz" && r.URL.Path != "/readyz" && r.URL.Path != "/api/v1/public/status" && r.URL.Path != "/api/v1/admin/database/status" {
+			problem(w, http.StatusServiceUnavailable, "database_restart_required", "PostgreSQL migration completed; restart the service to activate it")
+			return
+		}
+		if (r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/admin/backups/") && strings.HasSuffix(r.URL.Path, "/restore")) || r.URL.Path == "/api/v1/admin/database/migrate" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -205,6 +249,7 @@ func (a *App) routes() {
 	a.mux.HandleFunc("GET /readyz", a.readiness)
 	a.mux.HandleFunc("GET /metrics", a.metrics)
 	a.mux.HandleFunc("GET /api/v1/public/config", a.publicUIConfig)
+	a.mux.HandleFunc("GET /api/v1/public/status", a.publicDatabaseStatus)
 	a.mux.HandleFunc("POST /api/v1/bootstrap/login", a.bootstrapLogin)
 	a.mux.HandleFunc("GET /auth/login", a.login)
 	a.mux.HandleFunc("GET /auth/callback", a.callback)
@@ -235,6 +280,10 @@ func (a *App) routes() {
 	a.mux.Handle("GET /api/v1/admin/audit-logs", a.authorize(http.HandlerFunc(a.auditLogs), "auditor", "security-admin"))
 	a.mux.Handle("GET /api/v1/admin/api-keys", a.authorize(http.HandlerFunc(a.adminAPIKeys), "security-admin"))
 	a.mux.Handle("POST /api/v1/admin/api-keys/{id}/revoke", a.authorize(http.HandlerFunc(a.adminRevokeKey), "security-admin"))
+	a.mux.Handle("GET /api/v1/admin/secrets", a.authorize(http.HandlerFunc(a.listManagedSecrets), "security-admin"))
+	a.mux.Handle("POST /api/v1/admin/secrets", a.authorize(http.HandlerFunc(a.putManagedSecret), "security-admin"))
+	a.mux.Handle("POST /api/v1/admin/secrets/{name}/rotate", a.authorize(http.HandlerFunc(a.putManagedSecret), "security-admin"))
+	a.mux.Handle("POST /api/v1/admin/secrets/{name}/disable", a.authorize(http.HandlerFunc(a.disableManagedSecret), "security-admin"))
 	a.mux.Handle("GET /api/v1/admin/security-events", a.authorize(http.HandlerFunc(a.securityEvents), "security-admin", "readonly-operator"))
 	a.mux.Handle("POST /api/v1/admin/sources/{source}/discover", a.authorize(http.HandlerFunc(a.discoverSource), "source-admin"))
 	a.mux.Handle("GET /api/v1/admin/repositories", a.authorize(http.HandlerFunc(a.adminRepositories), "source-admin", "readonly-operator"))
@@ -246,6 +295,9 @@ func (a *App) routes() {
 	a.mux.Handle("GET /api/v1/admin/index-jobs", a.authorize(http.HandlerFunc(a.indexJobs), "source-admin", "readonly-operator"))
 	a.mux.Handle("POST /api/v1/admin/index-jobs/{id}/retry", a.authorize(http.HandlerFunc(a.retryIndexJob), "source-admin"))
 	a.mux.Handle("GET /api/v1/admin/health", a.authorize(http.HandlerFunc(a.adminHealth), "readonly-operator"))
+	a.mux.Handle("GET /api/v1/admin/database/status", a.authorize(http.HandlerFunc(a.adminDatabaseStatus), "readonly-operator"))
+	a.mux.Handle("POST /api/v1/admin/database/test", a.admin(http.HandlerFunc(a.testDatabaseTarget)))
+	a.mux.Handle("POST /api/v1/admin/database/migrate", a.admin(http.HandlerFunc(a.migrateDatabaseTarget)))
 	a.mux.Handle("GET /api/v1/admin/backups", a.authorize(http.HandlerFunc(a.listBackups), "readonly-operator"))
 	a.mux.Handle("POST /api/v1/admin/backups", a.admin(http.HandlerFunc(a.createBackup)))
 	a.mux.Handle("GET /api/v1/admin/backups/{id}/download", a.authorize(http.HandlerFunc(a.downloadBackup), "readonly-operator"))
@@ -497,6 +549,9 @@ func (a *App) callback(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{Name: "git_ctx_session", Value: rawSession, Path: "/", HttpOnly: true, Secure: strings.HasPrefix(a.publicURL(r.Context()), "https://"), SameSite: http.SameSiteLaxMode, Expires: sessionExpiry})
 	a.audit(r, auth.Principal{UserID: userID}, "login", "session", "browser", "success", nil)
+	if stringContains(identity.Roles, "platform-admin") {
+		a.disableBootstrapAdmin()
+	}
 	http.Redirect(w, r, returnTo, http.StatusFound)
 }
 func (a *App) logout(w http.ResponseWriter, r *http.Request) {
@@ -639,7 +694,7 @@ func settingRoleAllowed(p auth.Principal, category string) bool {
 	required := map[string][]string{
 		"bitbucket": {"source-admin"}, "gitlab": {"source-admin"}, "index": {"source-admin"},
 		"mcp": {"mcp-admin"}, "search": {"search-admin"}, "model": {"search-admin"}, "opensearch": {"search-admin"},
-		"security": {"security-admin"}, "permissions": {"security-admin"},
+		"security": {"security-admin"}, "permissions": {"security-admin"}, "vault": {"security-admin"},
 	}
 	return roleAllowed(p, required[category]...)
 }
@@ -914,6 +969,65 @@ func (a *App) listSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOut(w, 200, out)
 }
+
+func configuredDatabaseDSN(ctx context.Context, s *store.Store, aead cipher.AEAD) (string, error) {
+	var sealed []byte
+	if err := s.DB.QueryRowContext(ctx, s.Rebind(`SELECT value_encrypted FROM system_settings WHERE category=?`), "database").Scan(&sealed); err != nil {
+		return "", err
+	}
+	nonceSize := aead.NonceSize()
+	if len(sealed) < nonceSize {
+		return "", errors.New("stored database setting is truncated")
+	}
+	raw, err := aead.Open(nil, sealed[:nonceSize], sealed[nonceSize:], nil)
+	if err != nil {
+		return "", errors.New("stored database setting cannot be decrypted")
+	}
+	var value map[string]any
+	if err = json.Unmarshal(raw, &value); err != nil {
+		return "", err
+	}
+	dsn, _ := value["dsn"].(string)
+	return strings.TrimSpace(dsn), nil
+}
+
+func (a *App) saveDatabaseTarget(ctx context.Context, target *store.Store, dsn, actor, reason string) error {
+	raw, _ := json.Marshal(map[string]any{"dsn": dsn, "driver": "postgres", "activation": "restart"})
+	sealed, err := a.seal(raw)
+	if err != nil {
+		return err
+	}
+	// Write the target first. The recovery database is the activation source;
+	// updating it last prevents a partial target-setting failure from causing an
+	// unreported switch on the next restart.
+	for _, destination := range []*store.Store{target, a.store} {
+		tx, txErr := destination.DB.BeginTx(ctx, nil)
+		if txErr != nil {
+			return txErr
+		}
+		var version int
+		txErr = tx.QueryRowContext(ctx, destination.Rebind(`SELECT version FROM system_settings WHERE category=?`), "database").Scan(&version)
+		if errors.Is(txErr, sql.ErrNoRows) {
+			version, txErr = 0, nil
+		}
+		version++
+		if txErr == nil {
+			_, txErr = tx.ExecContext(ctx, destination.Rebind(`INSERT INTO setting_versions(category,version,value_encrypted,changed_by,reason) VALUES(?,?,?,?,?)`), "database", version, sealed, actor, reason)
+		}
+		if txErr == nil {
+			_, txErr = tx.ExecContext(ctx, destination.Rebind(`INSERT INTO system_settings(category,version,value_encrypted,updated_by,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(category) DO UPDATE SET version=excluded.version,value_encrypted=excluded.value_encrypted,updated_by=excluded.updated_by,updated_at=excluded.updated_at`), "database", version, sealed, actor, time.Now().UTC())
+		}
+		if txErr != nil {
+			tx.Rollback()
+			return txErr
+		}
+		if txErr = tx.Commit(); txErr != nil {
+			return txErr
+		}
+	}
+	return nil
+}
+
 func (a *App) putSetting(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
 	category := r.PathValue("category")
@@ -927,8 +1041,12 @@ func (a *App) putSetting(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "Invalid JSON")
 		return
 	}
-	if previous, err := a.loadSettingMap(r.Context(), category); err == nil {
+	if previous, err := a.loadSettingMapRaw(r.Context(), category); err == nil {
 		preserveMasked(previous, value)
+	}
+	if err := a.normalizeSetting(r.Context(), category, value); err != nil {
+		problem(w, 400, "setting_normalization_failed", err.Error())
+		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
@@ -974,16 +1092,13 @@ func (a *App) putSetting(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if category == "keycloak" {
-		a.disableBootstrapAdmin()
-	}
 	a.audit(r, p, "settings.update", category, category, "success", map[string]any{"version": version})
 	jsonOut(w, 200, map[string]any{"category": category, "version": version, "secretFields": "encrypted and masked"})
 }
 func (a *App) testIntegrationSetting(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
 	category := r.PathValue("category")
-	allowed := map[string]bool{"keycloak": true, "bitbucket": true, "gitlab": true, "model": true, "opensearch": true, "observability": true, "backup": true}
+	allowed := map[string]bool{"keycloak": true, "bitbucket": true, "gitlab": true, "model": true, "opensearch": true, "vault": true, "observability": true, "backup": true}
 	if !allowed[category] {
 		problem(w, 400, "setting_test_unsupported", "This setting category has no external or storage connection test")
 		return
@@ -993,8 +1108,12 @@ func (a *App) testIntegrationSetting(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "Invalid JSON")
 		return
 	}
-	if previous, err := a.loadSettingMap(r.Context(), category); err == nil {
+	if previous, err := a.loadSettingMapRaw(r.Context(), category); err == nil {
 		preserveMasked(previous, value)
+	}
+	if err := a.normalizeSetting(r.Context(), category, value); err != nil {
+		problem(w, 400, "setting_normalization_failed", err.Error())
+		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
@@ -1109,16 +1228,31 @@ func (a *App) getSetting(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) previewKeycloak(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Config auth.OIDCConfig `json:"config"`
-		Token  string          `json:"token"`
+		Config map[string]any `json:"config"`
+		Token  string         `json:"token"`
 	}
 	if decode(r, &in) != nil || in.Token == "" {
 		problem(w, 400, "invalid_request", "Candidate config and a short-lived test token are required")
 		return
 	}
-	verifier := auth.NewOIDCVerifier(func(context.Context) (auth.OIDCConfig, error) { return in.Config, nil })
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
+	if err := a.normalizeSetting(ctx, "keycloak", in.Config); err != nil {
+		problem(w, 400, "claim_preview_failed", err.Error())
+		return
+	}
+	resolved, err := a.secrets.Resolve(ctx, in.Config)
+	if err != nil {
+		problem(w, 400, "claim_preview_failed", err.Error())
+		return
+	}
+	raw, _ := json.Marshal(resolved)
+	var candidate auth.OIDCConfig
+	if err := json.Unmarshal(raw, &candidate); err != nil {
+		problem(w, 400, "claim_preview_failed", err.Error())
+		return
+	}
+	verifier := auth.NewOIDCVerifier(func(context.Context) (auth.OIDCConfig, error) { return candidate, nil })
 	identity, err := verifier.Verify(ctx, in.Token)
 	if err != nil {
 		problem(w, 400, "claim_preview_failed", err.Error())
@@ -1177,6 +1311,13 @@ func (a *App) receiveWebhook(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, status, result)
 }
 func (a *App) loadSettingMap(ctx context.Context, category string) (map[string]any, error) {
+	value, err := a.loadSettingMapRaw(ctx, category)
+	if err != nil || a.secrets == nil || category == "vault" {
+		return value, err
+	}
+	return a.secrets.Resolve(ctx, value)
+}
+func (a *App) loadSettingMapRaw(ctx context.Context, category string) (map[string]any, error) {
 	var sealed []byte
 	if err := a.store.DB.QueryRowContext(ctx, a.store.Rebind(`SELECT value_encrypted FROM system_settings WHERE category=?`), category).Scan(&sealed); err != nil {
 		return nil, err
@@ -1236,7 +1377,44 @@ func sourceAdapterFromMap(sourceType string, settings map[string]any) (source.Re
 		return nil, errors.New("unsupported source type")
 	}
 }
+func (a *App) normalizeSetting(ctx context.Context, category string, value map[string]any) error {
+	if category != "keycloak" {
+		return nil
+	}
+	issuer, _ := value["issuerUrl"].(string)
+	baseURL, _ := value["baseUrl"].(string)
+	realm, _ := value["realm"].(string)
+	if strings.TrimSpace(issuer) == "" && strings.TrimSpace(baseURL) != "" && strings.TrimSpace(realm) != "" {
+		parsed, err := url.Parse(strings.TrimSpace(baseURL))
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return errors.New("keycloak.baseUrl must be an absolute URL")
+		}
+		issuer = strings.TrimRight(parsed.String(), "/") + "/realms/" + url.PathEscape(strings.TrimSpace(realm))
+		value["issuerUrl"] = issuer
+	}
+	if strings.TrimSpace(issuer) == "" {
+		return errors.New("keycloak issuerUrl or both baseUrl and realm are required")
+	}
+	public := strings.TrimRight(a.publicURL(ctx), "/")
+	if redirect, _ := value["redirectUrl"].(string); strings.TrimSpace(redirect) == "" {
+		value["redirectUrl"] = public + "/auth/callback"
+	}
+	if redirect, _ := value["postLogoutRedirectUrl"].(string); strings.TrimSpace(redirect) == "" {
+		value["postLogoutRedirectUrl"] = public + "/"
+	}
+	if _, exists := value["tlsVerify"]; !exists {
+		value["tlsVerify"] = true
+	}
+	return nil
+}
 func (a *App) validateSetting(ctx context.Context, category string, value map[string]any) error {
+	if a.secrets != nil && category != "vault" {
+		resolved, err := a.secrets.Resolve(ctx, value)
+		if err != nil {
+			return err
+		}
+		value = resolved
+	}
 	switch category {
 	case "keycloak":
 		raw, _ := json.Marshal(value)
@@ -1244,7 +1422,11 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 		if err := json.Unmarshal(raw, &cfg); err != nil {
 			return err
 		}
-		return auth.ValidateOIDCConfig(ctx, cfg)
+		if err := auth.ValidateOIDCConfig(ctx, cfg); err != nil {
+			return err
+		}
+		_, err := auth.OAuthConfig(ctx, cfg)
+		return err
 	case "bitbucket", "gitlab":
 		adapter, err := sourceAdapterFromMap(category, value)
 		if err != nil {
@@ -1315,6 +1497,19 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 			return nil
 		}
 		client, err := opensearch.New(cfg)
+		if err != nil {
+			return err
+		}
+		return client.Validate(ctx)
+	case "vault":
+		cfg, err := vaultConfigFromMap(value)
+		if err != nil {
+			return err
+		}
+		if !cfg.Enabled {
+			return nil
+		}
+		client, err := secretstore.NewVault(cfg.VaultConfig)
 		if err != nil {
 			return err
 		}
@@ -1438,10 +1633,6 @@ func (a *App) bootstrapAvailable(ctx context.Context) bool {
 	return a.store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM platform_bootstrap WHERE id='initial-admin'`).Scan(&count) == nil && count == 1
 }
 func loadOrCreateBootstrapToken(ctx context.Context, s *store.Store, aead cipher.AEAD) (string, bool, error) {
-	var keycloakConfigured int
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM system_settings WHERE category='keycloak'`).Scan(&keycloakConfigured); err != nil || keycloakConfigured > 0 {
-		return "", false, err
-	}
 	decrypt := func(sealed []byte) (string, error) {
 		if len(sealed) < aead.NonceSize() {
 			return "", errors.New("stored bootstrap token is truncated")
@@ -1456,6 +1647,10 @@ func loadOrCreateBootstrapToken(ctx context.Context, s *store.Store, aead cipher
 		return token, true, openErr
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
+		return "", false, err
+	}
+	var keycloakConfigured int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM system_settings WHERE category='keycloak'`).Scan(&keycloakConfigured); err != nil || keycloakConfigured > 0 {
 		return "", false, err
 	}
 	raw := make([]byte, 32)
@@ -1615,6 +1810,52 @@ func openSearchConfigFromMap(settings map[string]any) (opensearch.Config, error)
 	return cfg, nil
 }
 
+type vaultSetting struct {
+	Enabled bool
+	secretstore.VaultConfig
+}
+
+func vaultConfigFromMap(settings map[string]any) (vaultSetting, error) {
+	cfg := vaultSetting{VaultConfig: secretstore.VaultConfig{Mount: "secret", Prefix: "git-ctx", Timeout: 30 * time.Second}}
+	cfg.Enabled, _ = settings["enabled"].(bool)
+	cfg.BaseURL, _ = settings["baseUrl"].(string)
+	cfg.Token, _ = settings["token"].(string)
+	cfg.Namespace, _ = settings["namespace"].(string)
+	if value, ok := settings["mount"].(string); ok && value != "" {
+		cfg.Mount = value
+	}
+	if value, ok := settings["prefix"].(string); ok && value != "" {
+		cfg.Prefix = value
+	}
+	if seconds, ok := settings["timeoutSeconds"].(float64); ok && seconds > 0 {
+		cfg.Timeout = time.Duration(seconds * float64(time.Second))
+	}
+	if value, ok := settings["tlsVerify"].(bool); ok {
+		cfg.TLSVerify = &value
+	}
+	cfg.CACertificate, _ = settings["caCertificate"].(string)
+	cfg.ProxyURL, _ = settings["proxyUrl"].(string)
+	if cfg.Enabled && (strings.TrimSpace(cfg.BaseURL) == "" || cfg.Token == "") {
+		return cfg, errors.New("vault.baseUrl and vault.token are required when enabled")
+	}
+	return cfg, nil
+}
+
+func (a *App) vaultClient(ctx context.Context) (*secretstore.Vault, error) {
+	settings, err := a.loadSettingMapRaw(ctx, "vault")
+	if err != nil {
+		return nil, errors.New("vault backend is not configured")
+	}
+	cfg, err := vaultConfigFromMap(settings)
+	if err != nil {
+		return nil, err
+	}
+	if !cfg.Enabled {
+		return nil, errors.New("vault backend is disabled")
+	}
+	return secretstore.NewVault(cfg.VaultConfig)
+}
+
 func (a *App) openSearchClient(ctx context.Context) (*opensearch.Client, bool, error) {
 	settings, err := a.loadSettingMap(ctx, "opensearch")
 	if err != nil {
@@ -1680,12 +1921,22 @@ func settingCategories() map[string]bool {
 		"search": true, "model": true, "opensearch": true, "index": true, "permissions": true,
 		"security": true, "notifications": true, "logging": true,
 		"operations": true, "ui": true,
-		"observability": true, "backup": true, "retention": true,
+		"observability": true, "backup": true, "retention": true, "vault": true,
+		"database": true,
 	}
 }
 func maskSecrets(value map[string]any) {
 	for key, item := range value {
+		if reference, ok := item.(string); ok && strings.HasPrefix(reference, "secret://") {
+			continue
+		}
 		lower := strings.ToLower(key)
+		if lower == "dsn" {
+			if item != nil && item != "" {
+				value[key] = "********"
+			}
+			continue
+		}
 		if strings.Contains(lower, "secret") || strings.Contains(lower, "password") ||
 			strings.Contains(lower, "token") || strings.Contains(lower, "apikey") ||
 			strings.Contains(lower, "api-key") || strings.Contains(lower, "authorization") ||
@@ -1782,6 +2033,47 @@ func (a *App) adminRevokeKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.audit(r, p, "api_key.admin_revoke", "api_key", r.PathValue("id"), "success", map[string]any{"reason": r.Header.Get("X-Revoke-Reason")})
+	w.WriteHeader(http.StatusNoContent)
+}
+func (a *App) listManagedSecrets(w http.ResponseWriter, r *http.Request) {
+	items, err := a.secrets.List(r.Context())
+	if err != nil {
+		problem(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	jsonOut(w, http.StatusOK, items)
+}
+func (a *App) putManagedSecret(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	var in struct {
+		Name, Backend, Value, Reason string
+	}
+	if decode(r, &in) != nil {
+		problem(w, http.StatusBadRequest, "invalid_request", "name, backend, and value are required")
+		return
+	}
+	if pathName := r.PathValue("name"); pathName != "" {
+		in.Name = pathName
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	item, err := a.secrets.Put(ctx, in.Name, in.Backend, in.Value, p.UserID, in.Reason)
+	if err != nil {
+		a.audit(r, p, "secret.write", "managed_secret", in.Name, "failure", map[string]any{"backend": in.Backend, "error": truncateText(err.Error(), 300)})
+		problem(w, http.StatusBadRequest, "secret_write_failed", err.Error())
+		return
+	}
+	a.audit(r, p, "secret.write", "managed_secret", in.Name, "success", map[string]any{"backend": item.Backend, "version": item.Version, "reason": in.Reason})
+	jsonOut(w, http.StatusCreated, item)
+}
+func (a *App) disableManagedSecret(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	name := r.PathValue("name")
+	if err := a.secrets.Disable(r.Context(), name, p.UserID); err != nil {
+		problem(w, http.StatusNotFound, "secret_not_found", err.Error())
+		return
+	}
+	a.audit(r, p, "secret.disable", "managed_secret", name, "success", map[string]any{"reason": r.Header.Get("X-Change-Reason")})
 	w.WriteHeader(http.StatusNoContent)
 }
 func (a *App) securityEvents(w http.ResponseWriter, r *http.Request) {
@@ -2127,6 +2419,10 @@ func aclPrincipals(primary string, groups []string) []string {
 	return out
 }
 func (a *App) readiness(w http.ResponseWriter, r *http.Request) {
+	if a.databaseRestart.Load() {
+		jsonOut(w, http.StatusServiceUnavailable, map[string]any{"status": "restart_required", "database": "migration_completed"})
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	if err := a.store.DB.PingContext(ctx); err != nil {
@@ -2135,16 +2431,167 @@ func (a *App) readiness(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"status": "ready", "database": "ok"})
 }
+func (a *App) publicDatabaseStatus(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	status, ok := a.databaseStatus(ctx, false)
+	code := http.StatusOK
+	if !ok {
+		code = http.StatusServiceUnavailable
+	}
+	jsonOut(w, code, status)
+}
+func (a *App) adminDatabaseStatus(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	status, ok := a.databaseStatus(ctx, true)
+	code := http.StatusOK
+	if !ok {
+		code = http.StatusServiceUnavailable
+	}
+	jsonOut(w, code, status)
+}
+func (a *App) databaseStatus(ctx context.Context, detailed bool) (map[string]any, bool) {
+	started := time.Now()
+	err := a.store.DB.PingContext(ctx)
+	result := map[string]any{
+		"status": "connected", "driver": a.store.Driver(),
+		"latencyMs": float64(time.Since(started).Microseconds()) / 1000, "checkedAt": time.Now().UTC(),
+		"recoveryMode":    a.recoveryMode,
+		"restartRequired": a.databaseRestart.Load(),
+	}
+	if err != nil {
+		result["status"] = "unavailable"
+		if detailed {
+			result["error"] = truncateText(err.Error(), 500)
+		}
+		return result, false
+	}
+	if !detailed {
+		return result, true
+	}
+	if a.recoveryMode {
+		result["startupError"] = a.databaseStartupErr
+		result["recoveryDatabase"] = a.recoveryDatabase
+		result["warning"] = "SQLite recovery mode is active; configure and migrate PostgreSQL before production use"
+	}
+	stats := a.store.DB.Stats()
+	result["pool"] = map[string]any{"open": stats.OpenConnections, "inUse": stats.InUse, "idle": stats.Idle, "waitCount": stats.WaitCount, "waitDurationMs": float64(stats.WaitDuration.Microseconds()) / 1000, "maxOpen": stats.MaxOpenConnections}
+	var migrationCount int
+	var latestMigration string
+	_ = a.store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations`).Scan(&migrationCount)
+	_ = a.store.DB.QueryRowContext(ctx, `SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&latestMigration)
+	result["migrations"] = map[string]any{"count": migrationCount, "latest": latestMigration}
+	if a.store.Driver() == "postgres" {
+		var database, user, serverVersion string
+		var databaseTime time.Time
+		if queryErr := a.store.DB.QueryRowContext(ctx, `SELECT current_database(),current_user,current_setting('server_version'),CURRENT_TIMESTAMP`).Scan(&database, &user, &serverVersion, &databaseTime); queryErr == nil {
+			result["database"] = database
+			result["user"] = user
+			result["serverVersion"] = serverVersion
+			result["databaseTime"] = databaseTime
+		}
+	} else {
+		var sqliteVersion string
+		if queryErr := a.store.DB.QueryRowContext(ctx, `SELECT sqlite_version()`).Scan(&sqliteVersion); queryErr == nil {
+			result["serverVersion"] = sqliteVersion
+		}
+	}
+	return result, true
+}
+
+func (a *App) testDatabaseTarget(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	var in struct {
+		DSN string `json:"dsn"`
+	}
+	if decode(r, &in) != nil || strings.TrimSpace(in.DSN) == "" {
+		problem(w, 400, "database_dsn_required", "PostgreSQL DSN is required")
+		return
+	}
+	if store.DriverForDSN(in.DSN) != "postgres" {
+		problem(w, 400, "postgres_required", "Migration target must be PostgreSQL")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	started := time.Now()
+	info, err := store.TestConnection(ctx, in.DSN)
+	if err != nil {
+		safeErr := safeDatabaseError(err, in.DSN)
+		a.audit(r, p, "database.test", "database", "postgres", "failure", map[string]any{"error": safeErr})
+		problem(w, 400, "database_connection_failed", safeErr)
+		return
+	}
+	a.audit(r, p, "database.test", "database", "postgres", "success", nil)
+	jsonOut(w, 200, map[string]any{"status": "verified", "driver": info["driver"], "database": info["database"], "user": info["user"], "serverVersion": info["serverVersion"], "latencyMs": float64(time.Since(started).Microseconds()) / 1000})
+}
+
+func (a *App) migrateDatabaseTarget(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	var in struct {
+		DSN     string `json:"dsn"`
+		Confirm string `json:"confirm"`
+		Reason  string `json:"reason"`
+	}
+	if decode(r, &in) != nil || strings.TrimSpace(in.DSN) == "" || in.Confirm != "MIGRATE TO POSTGRES" || strings.TrimSpace(in.Reason) == "" {
+		problem(w, 400, "migration_confirmation_required", "DSN, reason and exact confirmation MIGRATE TO POSTGRES are required")
+		return
+	}
+	if store.DriverForDSN(in.DSN) != "postgres" {
+		problem(w, 400, "postgres_required", "Migration target must be PostgreSQL")
+		return
+	}
+	a.requestGate.Lock()
+	a.stopBackground()
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			a.startBackground()
+		}
+		a.requestGate.Unlock()
+	}()
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	target, err := store.Open(ctx, "postgres", in.DSN)
+	if err != nil {
+		problem(w, 400, "database_migration_failed", safeDatabaseError(err, in.DSN))
+		return
+	}
+	defer target.DB.Close()
+	if err = backup.MigrateLogical(ctx, a.store, target); err != nil {
+		a.audit(r, p, "database.migrate", "database", "postgres", "failure", map[string]any{"reason": in.Reason, "error": truncateText(err.Error(), 500)})
+		problem(w, 400, "database_migration_failed", err.Error())
+		return
+	}
+	if err = a.saveDatabaseTarget(ctx, target, in.DSN, p.UserID, in.Reason); err != nil {
+		problem(w, 500, "database_target_save_failed", err.Error())
+		return
+	}
+	a.audit(r, p, "database.migrate", "database", "postgres", "success", map[string]any{"reason": in.Reason})
+	succeeded = true
+	a.databaseRestart.Store(true)
+	jsonOut(w, 200, map[string]any{"status": "migrated", "restartRequired": true, "message": "Data migration completed. Restart the service to activate PostgreSQL."})
+}
+
+func safeDatabaseError(err error, dsn string) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.ReplaceAll(err.Error(), dsn, "[redacted DSN]")
+	return truncateText(message, 500)
+}
 func (a *App) adminHealth(w http.ResponseWriter, r *http.Request) {
-	var repositories, chunks, pending, failed, activeKeys int64
+	var repositories, chunks, pending, failed, activeKeys, activeSecrets int64
 	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM repositories WHERE enabled=1`).Scan(&repositories)
 	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM document_chunks`).Scan(&chunks)
 	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM index_jobs WHERE status='pending'`).Scan(&pending)
 	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM index_jobs WHERE status='failed'`).Scan(&failed)
 	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM api_keys WHERE revoked_at IS NULL AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at>CURRENT_TIMESTAMP)`).Scan(&activeKeys)
+	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM managed_secrets WHERE status='active'`).Scan(&activeSecrets)
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
-	jsonOut(w, 200, map[string]any{"status": "ok", "version": version.Version, "database": "ok", "repositories": repositories, "chunks": chunks, "indexJobs": map[string]int64{"pending": pending, "failed": failed}, "activeApiKeys": activeKeys, "observability": map[string]bool{"tracingEnabled": a.traces.Enabled()}, "go": map[string]any{"goroutines": runtime.NumGoroutine(), "allocatedBytes": memory.Alloc}})
+	jsonOut(w, 200, map[string]any{"status": "ok", "version": version.Version, "database": "ok", "repositories": repositories, "chunks": chunks, "indexJobs": map[string]int64{"pending": pending, "failed": failed}, "activeApiKeys": activeKeys, "activeManagedSecrets": activeSecrets, "observability": map[string]bool{"tracingEnabled": a.traces.Enabled()}, "go": map[string]any{"goroutines": runtime.NumGoroutine(), "allocatedBytes": memory.Alloc}})
 }
 func (a *App) listBackups(w http.ResponseWriter, r *http.Request) {
 	records, err := a.backup.List(r.Context())
@@ -2281,6 +2728,7 @@ func (a *App) metrics(w http.ResponseWriter, r *http.Request) {
 		{"git_ctx_repositories", "Enabled source repositories", `SELECT COUNT(*) FROM repositories WHERE enabled=1`},
 		{"git_ctx_document_chunks", "Indexed document chunks", `SELECT COUNT(*) FROM document_chunks`},
 		{"git_ctx_api_keys_active", "Active MCP API keys", `SELECT COUNT(*) FROM api_keys WHERE revoked_at IS NULL AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at>CURRENT_TIMESTAMP)`},
+		{"git_ctx_managed_secrets_active", "Active managed secrets", `SELECT COUNT(*) FROM managed_secrets WHERE status='active'`},
 		{"git_ctx_mcp_calls_total", "Recorded MCP tool calls", `SELECT COUNT(*) FROM mcp_calls`},
 		{"git_ctx_index_jobs_pending", "Pending index jobs", `SELECT COUNT(*) FROM index_jobs WHERE status='pending'`},
 		{"git_ctx_index_jobs_failed", "Failed index jobs", `SELECT COUNT(*) FROM index_jobs WHERE status='failed'`},
@@ -2294,6 +2742,13 @@ func (a *App) metrics(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n%s %d\n", item.name, item.help, item.name, item.name, value)
 	}
+	databaseUp := 1
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	if err := a.store.DB.PingContext(ctx); err != nil {
+		databaseUp = 0
+	}
+	cancel()
+	fmt.Fprintf(w, "# HELP git_ctx_database_up Metadata database connectivity\n# TYPE git_ctx_database_up gauge\ngit_ctx_database_up %d\n", databaseUp)
 	fmt.Fprintf(w, "# HELP git_ctx_go_goroutines Current goroutines\n# TYPE git_ctx_go_goroutines gauge\ngit_ctx_go_goroutines %d\n", runtime.NumGoroutine())
 	fmt.Fprintf(w, "# HELP git_ctx_tracing_enabled OTLP tracing provider enabled\n# TYPE git_ctx_tracing_enabled gauge\ngit_ctx_tracing_enabled %d\n", boolInt(a.traces.Enabled()))
 }
@@ -2316,18 +2771,14 @@ func (a *App) open(in []byte) ([]byte, error) {
 	return a.aead.Open(nil, nonce, ciphertext, nil)
 }
 func (a *App) loadOIDCConfig(ctx context.Context) (auth.OIDCConfig, error) {
-	var sealed []byte
-	err := a.store.DB.QueryRowContext(ctx, `SELECT value_encrypted FROM system_settings WHERE category='keycloak'`).Scan(&sealed)
+	settings, err := a.loadSettingMap(ctx, "keycloak")
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return auth.OIDCConfig{}, errors.New("Keycloak is not configured")
 		}
 		return auth.OIDCConfig{}, err
 	}
-	raw, err := a.open(sealed)
-	if err != nil {
-		return auth.OIDCConfig{}, err
-	}
+	raw, err := json.Marshal(settings)
 	var cfg auth.OIDCConfig
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return auth.OIDCConfig{}, err

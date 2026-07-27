@@ -44,6 +44,8 @@ func TestSQLiteEncryptedBackupRestoreRoundTrip(t *testing.T) {
 	_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r1','alice','read')`)
 	_, _ = db.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding) VALUES('c1','r1','main','abc','README.md',1,2,'Demo','document','secret docs','hash',x'010203')`)
 	_, _ = db.DB.Exec(`INSERT INTO user_sessions(id_hash,user_id,expires_at,last_seen_at) VALUES(x'01','u1',?,?)`, time.Now().Add(time.Hour), time.Now())
+	_, _ = db.DB.Exec(`INSERT INTO managed_secrets(name,backend,value_encrypted,version,status,updated_by) VALUES('model-key','database',x'010203',2,'active','admin')`)
+	_, _ = db.DB.Exec(`INSERT INTO managed_secret_versions(name,version,backend,value_encrypted,changed_by,reason) VALUES('model-key',1,'database',x'01','admin','create'),('model-key',2,'database',x'010203','admin','rotate')`)
 	record, err := service.Create(ctx, "admin", "manual")
 	if err != nil {
 		t.Fatal(err)
@@ -60,6 +62,8 @@ func TestSQLiteEncryptedBackupRestoreRoundTrip(t *testing.T) {
 	}
 	_, _ = db.DB.Exec(`UPDATE users SET username='mutated' WHERE id='u1'`)
 	_, _ = db.DB.Exec(`DELETE FROM document_chunks`)
+	_, _ = db.DB.Exec(`DELETE FROM managed_secret_versions`)
+	_, _ = db.DB.Exec(`DELETE FROM managed_secrets`)
 	if err = service.Restore(ctx, record.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -74,6 +78,14 @@ func TestSQLiteEncryptedBackupRestoreRoundTrip(t *testing.T) {
 	_ = db.DB.QueryRow(`SELECT COUNT(*) FROM user_sessions`).Scan(&sessions)
 	if sessions != 0 {
 		t.Fatalf("restored active sessions: %d", sessions)
+	}
+	var secretVersion, secretVersions int
+	if err = db.DB.QueryRow(`SELECT version FROM managed_secrets WHERE name='model-key' AND status='active'`).Scan(&secretVersion); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.DB.QueryRow(`SELECT COUNT(*) FROM managed_secret_versions WHERE name='model-key'`).Scan(&secretVersions)
+	if secretVersion != 2 || secretVersions != 2 {
+		t.Fatalf("managed secret version=%d history=%d", secretVersion, secretVersions)
 	}
 }
 

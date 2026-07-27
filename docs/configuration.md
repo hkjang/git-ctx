@@ -198,6 +198,69 @@ Proxy와 Timeout 전용 필드를 제공하고 알 수 없는 확장 필드는 �
 저장과 rollback도 동일 검증을 다시 통과해야 한다. 시험 결과는 성공·실패 모두 감사
 로그에 남되 입력 Secret과 응답 원문은 기록하지 않는다.
 
+관리자 화면은 대메뉴(설정, MCP, 소스·색인, 검색 품질, 보안·Secret, 감사,
+데이터베이스, 운영 상태, 백업·복구)와 설정 종류별 탭으로 구성된다. 각 연동의
+`tlsVerify` 토글이 “사용함”이면 사내 CA 입력을 표시하고, “사용 안 함”이면 CA 필드를
+비활성화한다. 운영 환경에서는 검증 사용이 기본이며 비활성화는 제한된 시험망에서만
+허용한다.
+
+Keycloak은 `baseUrl`과 `realm`을 입력하면 `issuerUrl`을
+`{baseUrl}/realms/{realm}`으로 생성한다. Redirect가 비어 있으면 현재 공개 URL의
+`/auth/callback`과 `/`를 각각 로그인·로그아웃 기본값으로 저장한다. 저장 전 Discovery뿐
+아니라 브라우저 OAuth 구성까지 검증하므로 Redirect 누락 상태가 저장되는 것을 막는다.
+설정 저장만으로 Bootstrap을 폐기하지 않으며, 역할 매핑으로 `platform-admin`이 된
+사용자가 “Keycloak 로그인 시험”에 성공한 시점에 여러 Pod의 Bootstrap 토큰·세션을
+전역 폐기한다. 로그인 실패나 잘못된 역할 매핑이면 복구 진입이 유지된다.
+
+## 관리 Secret과 Vault KV v2
+
+`security-admin`은 보안 화면에서 이름 기반 Secret을 등록·회전·중지할 수 있다. 기본
+backend는 DSN 파생 AES-256-GCM으로 암호화하는 `database`이며, Vault 설정을 먼저
+연결 시험·저장하면 `vault` KV v2 backend도 선택할 수 있다. 목록과 감사 로그에는
+이름, backend, 버전, 상태만 기록하고 원문은 생성·회전 요청 뒤 반환하지 않는다.
+
+```json
+{
+  "enabled": true,
+  "baseUrl": "https://vault.company.local:8200",
+  "token": "********",
+  "namespace": "company/platform",
+  "mount": "secret",
+  "prefix": "git-ctx",
+  "tlsVerify": true
+}
+```
+
+Vault 연결 시험은 `GET /v1/auth/token/lookup-self`, 저장과 조회는 KV v2의
+`/{mount}/data/{prefix}/{name}` 계약을 사용한다. Token은 암호화된 `vault` 관리자
+설정에 보관하며 최소 권한 정책과 짧은 TTL의 전용 토큰을 사용한다. Vault를 사용하지
+않아도 외부 Bootstrap 값은 계속 `GIT_CTX_DB_DSN` 하나뿐이다.
+
+Keycloak Client Secret, Bitbucket PAT, GitLab Token, 모델 API Key 등 문자열 설정에는
+원문 대신 다음처럼 참조를 입력할 수 있다.
+
+```json
+{
+  "pat": "secret://bitbucket-readonly-pat"
+}
+```
+
+참조는 외부 호출 직전에 해석된다. Secret이 없거나 중지됐거나 Vault가 장애이면 해당
+연동은 Fail Closed하며 암호화 설정에 원문을 복사하지 않는다. 설정 조회 시 참조 이름은
+보이지만 Secret 원문은 어떤 조회 API에서도 반환하지 않는다.
+
+## 메타 데이터베이스 복구와 전환
+
+Bootstrap PostgreSQL에 연결할 수 없으면 `backups/recovery.db` SQLite로 복구 기동한다.
+관리자 “데이터베이스” 메뉴는 현재 driver, Ping 지연, pool, migration과 복구 모드를
+표시한다. `platform-admin`만 PostgreSQL DSN 연결 시험과 데이터 이전을 실행할 수 있다.
+연결 시험은 대상 DB를 변경하지 않으며 데이터 이전은 정확한 확인문과 변경 사유를
+요구한다. 성공한 DSN은 암호화 저장되고 API에서는 원문 대신 `********`로만 보인다.
+
+전환 직후 서비스는 새 요청을 받지 않고 readiness를 실패시켜 재시작을 요구한다. 재시작
+뒤 PostgreSQL 연결이 다시 실패하면 기존 recovery SQLite로 Fail Safe 복귀한다. 이 모드는
+장기 운영 DB가 아니므로 Kubernetes에서는 단일 replica로 연결 복구와 이전만 수행한다.
+
 ## 모델 미설정 검색 모드
 
 `model.provider`가 없거나 `local`이면 벡터와 Reranker 점수를 사용하지 않는다. 저장소

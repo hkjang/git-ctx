@@ -10,6 +10,7 @@ const categories = [
   "index",
   "permissions",
   "security",
+  "vault",
   "notifications",
   "logging",
   "observability",
@@ -20,7 +21,9 @@ const categories = [
 ];
 const integrationSettingFields = {
   keycloak: [
-    ["issuerUrl", "Keycloak Issuer URL", "url", ""],
+    ["baseUrl", "Keycloak Base URL", "url", ""],
+    ["realm", "Realm", "text", ""],
+    ["issuerUrl", "OIDC Issuer URL (자동 생성 또는 직접 입력)", "url", ""],
     ["clientId", "Client ID", "text", "git-ctx"],
     ["clientSecret", "Client Secret", "password", ""],
     ["redirectUrl", "Redirect URL", "url", ""],
@@ -28,6 +31,7 @@ const integrationSettingFields = {
     ["scopes", "Scopes (쉼표 구분)", "array", "openid,profile,email,groups"],
     ["usernameClaim", "Username Claim", "text", "preferred_username"],
     ["groupsClaim", "Groups Claim", "text", "groups"],
+    ["emailClaim", "Email Claim", "text", "email"],
     [
       "bitbucketUserSlugClaim",
       "Bitbucket User Slug Claim",
@@ -35,7 +39,11 @@ const integrationSettingFields = {
       "bitbucket_user_slug",
     ],
     ["gitlabUserIdClaim", "GitLab User ID Claim", "text", "gitlab_user_id"],
-    ["tlsVerify", "TLS 인증서 검증", "boolean", true],
+    ["realmRoleMappings", "Realm Role 매핑 (JSON)", "json", {}],
+    ["clientRoleMappings", "Client Role 매핑 (JSON)", "json", {}],
+    ["bitbucketGroupMappings", "Bitbucket Group 매핑 (JSON)", "json", {}],
+    ["allowedClockSkewSeconds", "Token Clock Skew(초)", "number", 30],
+    ["tlsVerify", "TLS 인증서 검증 사용", "boolean", true],
     ["caCertificate", "사내 CA PEM", "textarea", ""],
     ["proxyUrl", "Proxy URL", "url", ""],
     ["timeoutSeconds", "Timeout(초)", "number", 15],
@@ -47,7 +55,7 @@ const integrationSettingFields = {
     ["username", "Username (PAT 미사용 시)", "text", ""],
     ["password", "Password", "password", ""],
     ["webhookSecret", "Webhook Secret", "password", ""],
-    ["tlsVerify", "TLS 인증서 검증", "boolean", true],
+    ["tlsVerify", "TLS 인증서 검증 사용", "boolean", true],
     ["caCertificate", "사내 CA PEM", "textarea", ""],
     ["proxyUrl", "Proxy URL", "url", ""],
     ["timeoutSeconds", "Timeout(초)", "number", 30],
@@ -56,7 +64,7 @@ const integrationSettingFields = {
     ["baseUrl", "GitLab Base URL", "url", ""],
     ["token", "Access Token", "password", ""],
     ["webhookSecret", "Webhook Secret", "password", ""],
-    ["tlsVerify", "TLS 인증서 검증", "boolean", true],
+    ["tlsVerify", "TLS 인증서 검증 사용", "boolean", true],
     ["caCertificate", "사내 CA PEM", "textarea", ""],
     ["proxyUrl", "Proxy URL", "url", ""],
     ["timeoutSeconds", "Timeout(초)", "number", 30],
@@ -83,7 +91,7 @@ const integrationSettingFields = {
     ["rerankerApiKey", "Reranker API Key", "password", ""],
     ["rerankerModel", "Reranker Model", "text", ""],
     ["rerankerTimeoutSeconds", "Reranker Timeout(초)", "number", 15],
-    ["tlsVerify", "TLS 인증서 검증", "boolean", true],
+    ["tlsVerify", "TLS 인증서 검증 사용", "boolean", true],
     ["caCertificate", "사내 CA PEM", "textarea", ""],
     ["proxyUrl", "Proxy URL", "url", ""],
   ],
@@ -94,19 +102,57 @@ const integrationSettingFields = {
     ["username", "Username", "text", ""],
     ["password", "Password", "password", ""],
     ["apiKey", "API Key (Basic 인증 대체)", "password", ""],
-    ["tlsVerify", "TLS 인증서 검증", "boolean", true],
+    ["tlsVerify", "TLS 인증서 검증 사용", "boolean", true],
+    ["caCertificate", "사내 CA PEM", "textarea", ""],
+    ["proxyUrl", "Proxy URL", "url", ""],
+    ["timeoutSeconds", "Timeout(초)", "number", 30],
+  ],
+  vault: [
+    ["enabled", "Vault KV v2 사용", "boolean", false],
+    ["baseUrl", "Vault URL", "url", ""],
+    ["token", "Vault Token", "password", ""],
+    ["namespace", "Vault Enterprise Namespace", "text", ""],
+    ["mount", "KV v2 Mount", "text", "secret"],
+    ["prefix", "Secret 경로 Prefix", "text", "git-ctx"],
+    ["tlsVerify", "TLS 인증서 검증 사용", "boolean", true],
     ["caCertificate", "사내 CA PEM", "textarea", ""],
     ["proxyUrl", "Proxy URL", "url", ""],
     ["timeoutSeconds", "Timeout(초)", "number", 30],
   ],
 };
-const settingDefaults = (category) =>
-  Object.fromEntries(
+const settingCategoryMeta = {
+  keycloak: ["Keycloak SSO", "OIDC 로그인, Claim과 역할 매핑"],
+  bitbucket: ["Bitbucket", "Bitbucket Server 6.9.1 연결과 Webhook"],
+  gitlab: ["GitLab", "GitLab API v4 연결과 Webhook"],
+  mcp: ["MCP", "Transport, Origin, 호출 제한"],
+  search: ["검색", "키워드·벡터 가중치와 결과 수"],
+  model: ["모델", "Embedding과 Reranker"],
+  opensearch: ["OpenSearch", "BM25 projection과 인증"],
+  index: ["색인", "Polling과 기본 색인 정책"],
+  permissions: ["권한", "역할과 저장소 정책"],
+  security: ["보안", "신뢰 프록시와 키 정책"],
+  vault: ["Vault", "KV v2 Secret backend"],
+  notifications: ["알림", "이메일·Webhook·메신저"],
+  logging: ["로깅", "레벨·마스킹·보존"],
+  observability: ["관측성", "OpenTelemetry Export"],
+  backup: ["백업", "주기·경로·보존"],
+  retention: ["보존", "문서·감사 데이터 보존"],
+  operations: ["운영", "점검 모드·재시도"],
+  ui: ["UI", "서비스명·로고·공지"],
+};
+const settingDefaults = (category) => {
+  const defaults = Object.fromEntries(
     (integrationSettingFields[category] || []).map(([key, , , value]) => [
       key,
       value,
     ]),
   );
+  if (category === "keycloak") {
+    defaults.redirectUrl ||= `${location.origin}/auth/callback`;
+    defaults.postLogoutRedirectUrl ||= `${location.origin}/`;
+  }
+  return defaults;
+};
 let bootstrapInfo = { required: false, tokenFile: "" };
 const api = async (url, options = {}) => {
   const bootstrapToken = sessionStorage.getItem("git_ctx_bootstrap_token");
@@ -122,8 +168,12 @@ const api = async (url, options = {}) => {
   const body = await response
     .json()
     .catch(() => ({ detail: "응답을 읽을 수 없습니다." }));
-  if (!response.ok)
-    throw new Error(body.detail || body.title || `HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(body.detail || body.title || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.code = body.code || "";
+    throw error;
+  }
   return body;
 };
 $("#endpoint").textContent = location.origin;
@@ -149,6 +199,19 @@ async function loadBranding() {
     }
   } catch (e) {
     console.warn("브랜드 설정을 불러오지 못했습니다.", e);
+  }
+}
+async function loadPublicStatus() {
+  try {
+    const response = await fetch("/api/v1/public/status", { cache: "no-store" });
+    const status = await response.json();
+    $("#database-status").textContent =
+      `메타 DB ${status.status === "connected" ? "연결됨" : "연결 실패"} · ${status.driver || "unknown"}${status.recoveryMode ? " 복구 모드" : ""} · ${Number(status.latencyMs || 0).toFixed(1)}ms`;
+    $("#database-status").classList.toggle("ok", response.ok && !status.recoveryMode);
+    $("#database-status").classList.toggle("error", !response.ok || status.recoveryMode);
+  } catch {
+    $("#database-status").textContent = "메타 DB 상태 API에 연결할 수 없습니다.";
+    $("#database-status").classList.add("error");
   }
 }
 $("#login").onclick = () => {
@@ -341,22 +404,25 @@ function renderSettingFields(category, value) {
     "opensearch",
     "observability",
     "backup",
+    "vault",
   ].includes(category);
   $("#preview-keycloak").hidden = category !== "keycloak";
   $("#setting-fields").innerHTML = fields
     .map(([key, label, type, fallback]) => {
       const current = value[key] ?? fallback;
       if (type === "boolean")
-        return `<label><input data-setting-key="${key}" data-setting-type="boolean" type="checkbox" ${current ? "checked" : ""} /> ${esc(label)}</label>`;
+        return `<label class="toggle-control" data-field-key="${key}"><span>${esc(label)}</span><span class="toggle-row"><input data-setting-key="${key}" data-setting-type="boolean" type="checkbox" ${current ? "checked" : ""} /><span data-toggle-state="${key}">${current ? "사용함" : "사용 안 함"}</span></span></label>`;
       if (type === "textarea")
-        return `<label class="wide">${esc(label)}<textarea data-setting-key="${key}" data-setting-type="string" rows="4">${esc(current)}</textarea></label>`;
+        return `<label class="wide" data-field-key="${key}">${esc(label)}<textarea data-setting-key="${key}" data-setting-type="string" rows="4">${esc(current)}</textarea></label>`;
+      if (type === "json")
+        return `<label class="wide" data-field-key="${key}">${esc(label)}<textarea data-setting-key="${key}" data-setting-type="json" rows="4">${esc(JSON.stringify(current || {}, null, 2))}</textarea></label>`;
       if (type.startsWith("select:")) {
         const choices = type.slice(7).split("|");
-        return `<label>${esc(label)}<select data-setting-key="${key}" data-setting-type="string">${choices.map((choice) => `<option ${choice === current ? "selected" : ""}>${esc(choice)}</option>`).join("")}</select></label>`;
+        return `<label data-field-key="${key}">${esc(label)}<select data-setting-key="${key}" data-setting-type="string">${choices.map((choice) => `<option ${choice === current ? "selected" : ""}>${esc(choice)}</option>`).join("")}</select></label>`;
       }
       const inputType = type === "array" ? "text" : type;
       const shown = Array.isArray(current) ? current.join(",") : current;
-      return `<label>${esc(label)}<input data-setting-key="${key}" data-setting-type="${type}" type="${inputType}" value="${esc(shown)}" /></label>`;
+      return `<label data-field-key="${key}">${esc(label)}<input data-setting-key="${key}" data-setting-type="${type}" type="${inputType}" value="${esc(shown)}" /></label>`;
     })
     .join("");
   document.querySelectorAll("[data-setting-key]").forEach(
@@ -369,7 +435,8 @@ function renderSettingFields(category, value) {
           next = {};
         }
         const type = field.dataset.settingType;
-        next[field.dataset.settingKey] =
+        try {
+          next[field.dataset.settingKey] =
           type === "boolean"
             ? field.checked
             : type === "number"
@@ -379,10 +446,30 @@ function renderSettingFields(category, value) {
                     .split(",")
                     .map((item) => item.trim())
                     .filter(Boolean)
+                : type === "json"
+                  ? JSON.parse(field.value || "{}")
                 : field.value;
-        $("#setting-json").value = JSON.stringify(next, null, 2);
+          $("#setting-json").value = JSON.stringify(next, null, 2);
+          field.setCustomValidity("");
+          if (field.dataset.settingKey === "tlsVerify") applyTLSFieldState();
+        } catch {
+          field.setCustomValidity("올바른 JSON을 입력하세요.");
+        }
       }),
   );
+  applyTLSFieldState();
+}
+function applyTLSFieldState() {
+  const toggle = document.querySelector('[data-setting-key="tlsVerify"]');
+  if (!toggle) return;
+  const enabled = toggle.checked;
+  const state = document.querySelector('[data-toggle-state="tlsVerify"]');
+  if (state) state.textContent = enabled ? "사용함" : "사용 안 함";
+  const caField = document.querySelector('[data-field-key="caCertificate"]');
+  if (caField) {
+    caField.hidden = !enabled;
+    caField.querySelectorAll("input,textarea").forEach((field) => (field.disabled = !enabled));
+  }
 }
 function setupAdmin(roles, capabilities) {
   const allowedCategories = GitCtxRoles.categoriesFor(categories, [...roles]);
@@ -391,7 +478,25 @@ function setupAdmin(roles, capabilities) {
   $("#category").innerHTML = allowedCategories
     .map((c) => `<option>${c}</option>`)
     .join("");
-  $("#category").onchange = () => $("#load-setting").click();
+  $("#setting-tabs").innerHTML = allowedCategories
+    .map((category) => `<button type="button" role="tab" data-setting-tab="${category}">${esc(settingCategoryMeta[category]?.[0] || category)}</button>`)
+    .join("");
+  const selectCategory = (category) => {
+    $("#category").value = category;
+    document.querySelectorAll("[data-setting-tab]").forEach((tab) => {
+      const active = tab.dataset.settingTab === category;
+      tab.classList.toggle("active", active);
+      tab.setAttribute("aria-selected", String(active));
+    });
+    const meta = settingCategoryMeta[category] || [category, "동적 운영 설정"];
+    $("#setting-context").innerHTML = `<strong>${esc(meta[0])}</strong><span>${esc(meta[1])}</span>`;
+    $("#login-keycloak").hidden = category !== "keycloak";
+    $("#load-setting").click();
+  };
+  document.querySelectorAll("[data-setting-tab]").forEach(
+    (tab) => (tab.onclick = () => selectCategory(tab.dataset.settingTab)),
+  );
+  $("#category").onchange = () => selectCategory($("#category").value);
   $("#load-setting").onclick = async () => {
     try {
       const x = await api(`/api/v1/admin/settings/${$("#category").value}`);
@@ -402,6 +507,10 @@ function setupAdmin(roles, capabilities) {
         true,
       );
     } catch (e) {
+      if (e.status && e.status !== 404) {
+        showAdmin(`설정을 불러오지 못했습니다: ${e.message}`, false);
+        return;
+      }
       const defaults = settingDefaults($("#category").value);
       $("#setting-json").value = JSON.stringify(defaults, null, 2);
       renderSettingFields($("#category").value, defaults);
@@ -431,7 +540,7 @@ function setupAdmin(roles, capabilities) {
       );
     } catch {}
   };
-  $("#load-setting").click();
+  if (allowedCategories.length) selectCategory(allowedCategories[0]);
   $("#preview-keycloak").onclick = async () => {
     if ($("#category").value !== "keycloak")
       return showAdmin("keycloak 영역에서만 미리볼 수 있습니다.", false);
@@ -455,27 +564,41 @@ function setupAdmin(roles, capabilities) {
       showAdmin(e.message, false);
     }
   };
+  $("#login-keycloak").onclick = () => {
+    if ($("#category").value !== "keycloak") return;
+    location.href = "/auth/login?return_to=/";
+  };
   $("#save-setting").onclick = async () => {
+    const button = $("#save-setting");
     try {
+      if (!$("#setting-fields").querySelectorAll("input,select,textarea").length) {
+        JSON.parse($("#setting-json").value);
+      }
+      const invalid = $("#setting-fields").querySelector(":invalid");
+      if (invalid) {
+        invalid.reportValidity();
+        return;
+      }
       JSON.parse($("#setting-json").value);
+      button.disabled = true;
+      button.textContent = "저장·검증 중…";
       const x = await api(`/api/v1/admin/settings/${$("#category").value}`, {
         method: "PUT",
         headers: { "X-Change-Reason": $("#reason").value },
         body: $("#setting-json").value,
       });
       if ($("#category").value === "keycloak" && bootstrapInfo.required) {
-        sessionStorage.removeItem("git_ctx_bootstrap_token");
-        bootstrapInfo.required = false;
         showAdmin(
-          `버전 ${x.version} 저장 완료. 일회용 관리자 토큰이 폐기되었습니다. Keycloak으로 로그인하세요.`,
+          `버전 ${x.version} 저장 완료. 이제 “Keycloak 로그인 시험”으로 platform-admin 로그인을 완료하세요. 성공할 때까지 최초 관리자 복구 세션은 유지됩니다.`,
           true,
         );
-        setTimeout(() => location.reload(), 1200);
-        return;
-      }
-      showAdmin(`버전 ${x.version} 저장 완료`, true);
+      } else showAdmin(`버전 ${x.version} 저장 완료`, true);
+      $("#reason").value = "";
     } catch (e) {
-      showAdmin(e.message, false);
+      showAdmin(`저장하지 못했습니다: ${e.message}`, false);
+    } finally {
+      button.disabled = false;
+      button.textContent = "저장";
     }
   };
   $("#rollback-setting").onclick = async () => {
@@ -508,6 +631,7 @@ function setupOps(capabilities) {
   $("#mcp-admin-section").hidden = !capabilities.mcp;
   $("#source-admin-section").hidden = !capabilities.source;
   $("#status-admin-section").hidden = !capabilities.status;
+  $("#database-admin-section").hidden = !capabilities.status;
   $("#backup-admin-section").hidden = !capabilities.backup;
   $("#quality-admin-section").hidden = !capabilities.quality;
   $("#quality-write-section").hidden = !capabilities.qualityWrite;
@@ -519,6 +643,34 @@ function setupOps(capabilities) {
   $("#security-events-section").hidden = !capabilities.securityEvents;
   $("#audit-admin-section").hidden = !capabilities.audit;
   $("#create-backup").hidden = !capabilities.backupWrite;
+  $("#refresh-database").onclick = refreshDatabase;
+  $("#database-migration").hidden = !capabilities.platform;
+  if (capabilities.platform) {
+    $("#test-database").onclick = () => runDatabaseAction("test");
+    $("#migrate-database").onclick = () => runDatabaseAction("migrate");
+  }
+  if (capabilities.security) {
+    $("#secret-form").onsubmit = async (event) => {
+      event.preventDefault();
+      const form = new FormData(event.target);
+      try {
+        await api("/api/v1/admin/secrets", {
+          method: "POST",
+          body: JSON.stringify({
+            name: form.get("name"),
+            backend: form.get("backend"),
+            value: form.get("value"),
+            reason: form.get("reason"),
+          }),
+        });
+        event.target.reset();
+        showAdmin("비밀정보를 등록·회전했습니다. 원문은 다시 표시되지 않습니다.", true);
+        refreshSecurity(capabilities);
+      } catch (e) {
+        showAdmin(e.message, false);
+      }
+    };
+  }
   if (capabilities.backupWrite) {
     $("#create-backup").onclick = async () => {
       try {
@@ -546,6 +698,93 @@ function setupOps(capabilities) {
   if (capabilities.qualityWrite) {
     $("#create-quality-case").onclick = () => createQualityCase(capabilities);
     $("#run-quality").onclick = () => runQuality(capabilities);
+  }
+  setupAdminNavigation(capabilities);
+}
+function setupAdminNavigation(capabilities) {
+  const entries = [
+    ["settings-admin", "설정", capabilities.settings],
+    ["mcp-admin-section", "MCP", capabilities.mcp],
+    ["source-admin-section", "소스·색인", capabilities.source],
+    ["quality-admin-section", "검색 품질", capabilities.quality],
+    ["security-admin-section", "보안·Secret", capabilities.security || capabilities.securityEvents],
+    ["audit-admin-section", "감사", capabilities.audit],
+    ["database-admin-section", "데이터베이스", capabilities.status],
+    ["status-admin-section", "운영 상태", capabilities.status],
+    ["backup-admin-section", "백업·복구", capabilities.backup],
+  ].filter((entry) => entry[2]);
+  $("#admin-menu").innerHTML = entries
+    .map(([id, label]) => `<button type="button" data-admin-target="${id}">${label}</button>`)
+    .join("");
+  const open = (target) => {
+    document.querySelectorAll(".admin-panel").forEach((panel) => (panel.hidden = panel.id !== target));
+    document.querySelectorAll("[data-admin-target]").forEach((button) => button.classList.toggle("active", button.dataset.adminTarget === target));
+    if (target === "database-admin-section") refreshDatabase();
+  };
+  document.querySelectorAll("[data-admin-target]").forEach(
+    (button) => (button.onclick = () => open(button.dataset.adminTarget)),
+  );
+  if (entries.length) open(entries[0][0]);
+}
+async function refreshDatabase() {
+  try {
+    const status = await api("/api/v1/admin/database/status");
+    const pool = status.pool || {};
+    const migrations = status.migrations || {};
+    $("#admin-database-status").innerHTML = [
+      ["연결", `${status.status} · ${Number(status.latencyMs || 0).toFixed(1)}ms`],
+      ["Driver / DB", `${status.driver}${status.database ? ` · ${status.database}` : ""}`],
+      ["서버", status.serverVersion || "-"],
+      ["접속 사용자", status.user || "-"],
+      ["Connection Pool", `사용 ${pool.inUse || 0} · 유휴 ${pool.idle || 0} · 전체 ${pool.open || 0}`],
+      ["Migration", `${migrations.count || 0}개 · ${migrations.latest || "없음"}`],
+      ["기동 모드", status.recoveryMode ? "SQLite 복구 모드" : "정상 운영 모드"],
+    ].map(([label, value]) => `<article><span>${esc(label)}</span><strong>${esc(value)}</strong></article>`).join("");
+    if (status.recoveryMode && status.warning) {
+      $("#database-action-result").hidden = false;
+      $("#database-action-result").className = "notice error";
+      $("#database-action-result").textContent = status.warning;
+    }
+  } catch (error) {
+    $("#admin-database-status").innerHTML = `<div class="notice error">${esc(error.message)}</div>`;
+  }
+}
+async function runDatabaseAction(action) {
+  const result = $("#database-action-result");
+  const dsn = $("#database-dsn").value.trim();
+  if (!dsn) {
+    result.hidden = false;
+    result.className = "notice error";
+    result.textContent = "PostgreSQL DSN을 입력하세요.";
+    return;
+  }
+  const body = { dsn };
+  if (action === "migrate") {
+    body.reason = $("#database-reason").value.trim();
+    body.confirm = $("#database-confirm").value.trim();
+  }
+  const button = action === "test" ? $("#test-database") : $("#migrate-database");
+  button.disabled = true;
+  try {
+    const response = await api(`/api/v1/admin/database/${action}`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    result.hidden = false;
+    result.className = "notice ok";
+    result.textContent = action === "test"
+      ? `연결 성공: PostgreSQL ${response.serverVersion || ""} · ${response.database || ""} · ${Number(response.latencyMs || 0).toFixed(1)}ms`
+      : "데이터 이전이 완료되었습니다. PostgreSQL 적용을 위해 서비스를 재시작하세요.";
+    if (action === "migrate") {
+      $("#database-dsn").value = "";
+      $("#database-confirm").value = "";
+    }
+  } catch (error) {
+    result.hidden = false;
+    result.className = "notice error";
+    result.textContent = error.message;
+  } finally {
+    button.disabled = false;
   }
 }
 const qualityCSV = (selector) =>
@@ -791,11 +1030,12 @@ async function refreshOps(capabilities = activeCapabilities) {
 }
 async function refreshSecurity(capabilities = activeCapabilities) {
   try {
-    const [health, keys, events, audits] = await Promise.all([
+    const [health, keys, events, audits, secrets] = await Promise.all([
       capabilities.status ? api("/api/v1/admin/health") : null,
       capabilities.security ? api("/api/v1/admin/api-keys") : [],
       capabilities.securityEvents ? api("/api/v1/admin/security-events") : [],
       capabilities.audit ? api("/api/v1/admin/audit-logs") : [],
+      capabilities.security ? api("/api/v1/admin/secrets") : [],
     ]);
     if (health) {
       $("#system-health").textContent =
@@ -812,6 +1052,20 @@ async function refreshSecurity(capabilities = activeCapabilities) {
           await api(
             `/api/v1/admin/api-keys/${encodeURIComponent(b.dataset.adminRevoke)}/revoke`,
             { method: "POST", headers: { "X-Revoke-Reason": reason } },
+          );
+          refreshSecurity(capabilities);
+        }),
+    );
+    $("#managed-secrets").innerHTML =
+      `<table><thead><tr><th>이름</th><th>Backend</th><th>버전</th><th>상태</th><th>갱신</th><th></th></tr></thead><tbody>${secrets.map((s) => `<tr><td><code>secret://${esc(s.name)}</code></td><td>${esc(s.backend)}</td><td>${s.version}</td><td>${esc(s.status)}</td><td>${date(s.updatedAt)}</td><td>${s.status === "active" ? `<button class="danger" data-secret-disable="${esc(s.name)}">중지</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+    document.querySelectorAll("[data-secret-disable]").forEach(
+      (button) =>
+        (button.onclick = async () => {
+          const reason = prompt("비밀정보 중지 사유");
+          if (!reason) return;
+          await api(
+            `/api/v1/admin/secrets/${encodeURIComponent(button.dataset.secretDisable)}/disable`,
+            { method: "POST", headers: { "X-Change-Reason": reason } },
           );
           refreshSecurity(capabilities);
         }),
@@ -840,4 +1094,4 @@ function esc(v) {
 function date(v) {
   return v ? new Date(v).toLocaleString() : "-";
 }
-loadBranding().finally(boot);
+Promise.allSettled([loadBranding(), loadPublicStatus()]).finally(boot);

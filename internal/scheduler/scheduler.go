@@ -44,15 +44,20 @@ func (s *Scheduler) RunOnce(ctx context.Context) error {
 	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`DELETE FROM api_key_usage_buckets WHERE bucket_start<?`), now.Add(-48*time.Hour))
 	expiring, err := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT id,user_id,name,prefix,expires_at FROM api_keys WHERE revoked_at IS NULL AND disabled_at IS NULL AND expires_at>? AND expires_at<=?`), now, now.Add(7*24*time.Hour))
 	if err == nil {
-		defer expiring.Close()
+		type expiryNotice struct{ id, userID, keyID, message string }
+		var notices []expiryNotice
 		for expiring.Next() {
 			var keyID, userID, name, prefix string
 			var expires time.Time
 			if expiring.Scan(&keyID, &userID, &name, &prefix, &expires) == nil {
 				id := "key-expiry:" + keyID
 				message := fmt.Sprintf("%s (%s) key expires at %s", name, prefix, expires.UTC().Format(time.RFC3339))
-				_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`INSERT INTO notifications(id,user_id,notification_type,resource_id,title,message) VALUES(?,?,'api_key_expiring',?,'MCP API key expires soon',?) ON CONFLICT(user_id,notification_type,resource_id) DO NOTHING`), id, userID, keyID, message)
+				notices = append(notices, expiryNotice{id, userID, keyID, message})
 			}
+		}
+		expiring.Close()
+		for _, notice := range notices {
+			_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`INSERT INTO notifications(id,user_id,notification_type,resource_id,title,message) VALUES(?,?,'api_key_expiring',?,'MCP API key expires soon',?) ON CONFLICT(user_id,notification_type,resource_id) DO NOTHING`), notice.id, notice.userID, notice.keyID, notice.message)
 		}
 	}
 	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT id,default_branch FROM repositories r WHERE enabled=1 AND (indexed_at IS NULL OR indexed_at<?) AND NOT EXISTS(SELECT 1 FROM index_jobs j WHERE j.repository_id=r.id AND j.status IN ('pending','running'))`), threshold)
@@ -70,6 +75,9 @@ func (s *Scheduler) RunOnce(ctx context.Context) error {
 		targets = append(targets, x)
 	}
 	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
 		return err
 	}
 	for n, x := range targets {

@@ -27,6 +27,7 @@
         </p>
         <p id="login-version" class="version-text">서비스 버전 확인 중…</p>
         <div id="status" class="notice">서버 상태 확인 중…</div>
+        <div id="database-status" class="notice">메타 DB 연결 확인 중…</div>
         <div id="service-notice" class="notice" hidden></div>
       </section>
       <section id="account" hidden>
@@ -133,31 +134,33 @@
         <div id="my-calls" class="table-wrap"></div>
       </section>
       <section id="admin" hidden>
-        <div id="settings-admin" hidden>
+        <div class="admin-heading">
+          <div><h2>git-ctx 관리자</h2><p>연동, 검색, 보안과 운영 상태를 메뉴별로 관리합니다.</p></div>
+        </div>
+        <nav id="admin-menu" class="admin-menu" aria-label="관리자 메뉴"></nav>
+        <div id="settings-admin" class="admin-panel" hidden>
           <h2>관리자 설정</h2>
           <p>
             설정은 암호화되어 버전별 저장됩니다. Secret, PAT, Token은 재조회 시
             마스킹됩니다.
           </p>
+          <div id="setting-tabs" class="setting-tabs" role="tablist" aria-label="설정 종류"></div>
           <div class="admin-editor">
-            <label>설정 영역<select id="category"></select></label
-            ><label
+            <select id="category" hidden aria-hidden="true"></select>
+            <div id="setting-context" class="wide setting-context"></div>
+            <label
               >변경 사유<input id="reason" placeholder="변경 사유"
             /></label>
             <div id="setting-fields" class="form-row wide"></div>
-            <label class="wide"
-              >JSON 설정<textarea
-                id="setting-json"
-                rows="16"
-                spellcheck="false"
-              >
-{}</textarea
-              >
-            </label>
-            <div>
+            <details class="wide advanced-json">
+              <summary>고급 JSON 설정</summary>
+              <label>JSON 설정<textarea id="setting-json" rows="16" spellcheck="false">{}</textarea></label>
+            </details>
+            <div class="wide setting-actions">
               <button id="load-setting">불러오기</button>
               <button id="test-connection">연결 테스트·검증</button>
               <button id="preview-keycloak">Claim·역할 미리보기</button>
+              <button id="login-keycloak" class="secondary">Keycloak 로그인 시험</button>
               <button id="save-setting">저장</button>
               <button id="rollback-setting" class="danger">
                 이전 버전 복구
@@ -166,12 +169,12 @@
           </div>
         </div>
         <div id="admin-result" class="notice"></div>
-        <div id="mcp-admin-section" hidden>
+        <div id="mcp-admin-section" class="admin-panel" hidden>
           <hr />
           <h2>MCP 도구 운영</h2>
           <div id="mcp-tools" class="table-wrap"></div>
         </div>
-        <div id="source-admin-section" hidden>
+        <div id="source-admin-section" class="admin-panel" hidden>
           <hr />
           <h2>소스와 색인 운영</h2>
           <div class="form-row">
@@ -196,12 +199,31 @@
           <h3>최근 색인 작업</h3>
           <div id="jobs" class="table-wrap"></div>
         </div>
-        <div id="status-admin-section" hidden>
+        <div id="status-admin-section" class="admin-panel" hidden>
           <hr />
           <h2>운영 상태</h2>
           <div id="system-health" class="notice"></div>
         </div>
-        <div id="backup-admin-section" hidden>
+        <div id="database-admin-section" class="admin-panel" hidden>
+          <hr />
+          <div class="section-title">
+            <div><h2>메타 데이터베이스</h2><p>DSN 원문 없이 실제 연결과 migration 상태를 진단합니다.</p></div>
+            <button id="refresh-database">연결 다시 확인</button>
+          </div>
+          <div id="admin-database-status" class="status-grid"></div>
+          <div id="database-migration" class="card subtle-card">
+            <h3>PostgreSQL 연결 및 전환</h3>
+            <p>복구 SQLite로 기동된 경우 PostgreSQL을 읽기 전용으로 시험한 뒤, 명시적 확인을 거쳐 스키마와 데이터를 이전합니다. DSN 원문은 암호화 저장되고 다시 표시되지 않습니다.</p>
+            <form id="database-form" class="form-row">
+              <label class="wide">PostgreSQL DSN<input id="database-dsn" type="password" required autocomplete="new-password" placeholder="postgres://user:password@db:5432/gitctx?sslmode=require" /></label>
+              <label>변경 사유<input id="database-reason" placeholder="운영 PostgreSQL 전환" /></label>
+              <label>마이그레이션 확인<input id="database-confirm" placeholder="MIGRATE TO POSTGRES" /></label>
+              <div class="button-row"><button id="test-database" type="button">연결 시험</button><button id="migrate-database" type="button" class="danger">데이터 이전</button></div>
+            </form>
+            <div id="database-action-result" class="notice" hidden></div>
+          </div>
+        </div>
+        <div id="backup-admin-section" class="admin-panel" hidden>
           <hr />
           <div class="section-title">
             <div>
@@ -215,7 +237,7 @@
           </div>
           <div id="backups" class="table-wrap"></div>
         </div>
-        <div id="quality-admin-section" hidden>
+        <div id="quality-admin-section" class="admin-panel" hidden>
           <hr />
           <div class="section-title">
             <div>
@@ -295,9 +317,22 @@
           <h3>사례별 결과</h3>
           <div id="quality-results" class="table-wrap"></div>
         </div>
-        <div id="security-admin-section" hidden>
+        <div id="security-admin-section" class="admin-panel" hidden>
           <h2>보안</h2>
           <div id="security-keys-section">
+            <h3>관리 비밀정보</h3>
+            <p>
+              설정 값에 <code>secret://이름</code>을 입력하면 실행 시 안전하게
+              해석됩니다. 원문은 생성·회전 요청 뒤 다시 표시되지 않습니다.
+            </p>
+            <form id="secret-form" class="form-row">
+              <label>이름<input name="name" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,127}" /></label>
+              <label>Backend<select name="backend"><option value="database">암호화 DB</option><option value="vault">Vault KV v2</option></select></label>
+              <label>값<input name="value" type="password" required autocomplete="new-password" /></label>
+              <label>변경 사유<input name="reason" /></label>
+              <button type="submit">등록·회전</button>
+            </form>
+            <div id="managed-secrets" class="table-wrap"></div>
             <h3>전체 API 키</h3>
             <div id="admin-keys" class="table-wrap"></div>
           </div>
@@ -306,7 +341,7 @@
             <div id="security-events" class="table-wrap"></div>
           </div>
         </div>
-        <div id="audit-admin-section" hidden>
+        <div id="audit-admin-section" class="admin-panel" hidden>
           <h2>감사</h2>
           <h3>최근 감사 로그</h3>
           <div id="audit-logs" class="table-wrap"></div>

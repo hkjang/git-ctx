@@ -33,6 +33,7 @@ var tables = []string{
 	"quality_benchmark_cases", "quality_benchmark_runs", "quality_benchmark_results",
 	"system_settings", "setting_versions", "audit_logs", "mcp_calls", "index_jobs",
 	"webhook_events", "index_security_events", "mcp_tools", "notifications",
+	"managed_secrets", "managed_secret_versions",
 }
 
 type Config struct {
@@ -288,6 +289,36 @@ func (s *Service) Restore(ctx context.Context, id string) error {
 	if err = json.Unmarshal(raw, &a); err != nil || a.Format != "git-ctx-logical-v1" {
 		return errors.New("unsupported backup format")
 	}
+	return s.restoreArchive(ctx, a)
+}
+
+// MigrateLogical copies durable application data between already-migrated
+// stores. Sessions, auth flows and bootstrap credentials are deliberately not
+// copied, matching the restore security boundary.
+func MigrateLogical(ctx context.Context, source, target *store.Store) error {
+	sourceService := &Service{store: source}
+	payload, err := sourceService.snapshot(ctx)
+	if err != nil {
+		return err
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	raw, err := io.ReadAll(reader)
+	reader.Close()
+	if err != nil {
+		return err
+	}
+	var a archive
+	if err = json.Unmarshal(raw, &a); err != nil || a.Format != "git-ctx-logical-v1" {
+		return errors.New("unsupported migration snapshot")
+	}
+	return (&Service{store: target}).restoreArchive(ctx, a)
+}
+
+func (s *Service) restoreArchive(ctx context.Context, a archive) error {
+	var err error
 	if err = s.validateArchive(ctx, a); err != nil {
 		return err
 	}

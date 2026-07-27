@@ -134,6 +134,114 @@ pre {
   background: #e2f7ec;
   color: #11633b;
 }
+.notice.error {
+  background: #fee4e2;
+  color: #9b1c14;
+}
+.admin-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+}
+.admin-heading h2,
+.admin-heading p {
+  margin: 0 0 6px;
+}
+.admin-menu {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  margin: 20px -8px 26px;
+  padding: 8px;
+  border-bottom: 1px solid #dce3ed;
+}
+.admin-menu button,
+.setting-tabs button {
+  flex: 0 0 auto;
+  background: transparent;
+  color: #526079;
+  border: 1px solid transparent;
+}
+.admin-menu button.active,
+.setting-tabs button.active {
+  background: #e8efff;
+  border-color: #b9c9f7;
+  color: #203f9a;
+  font-weight: 700;
+}
+.setting-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 18px;
+}
+.setting-context {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #dde5f0;
+}
+.setting-context span {
+  color: #667085;
+  font-size: 13px;
+}
+.advanced-json {
+  border: 1px solid #d8e0ec;
+  border-radius: 8px;
+  padding: 12px;
+  background: white;
+}
+.advanced-json summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+.advanced-json label {
+  margin-top: 12px;
+}
+.setting-actions {
+  position: sticky;
+  bottom: 0;
+  padding: 12px;
+  background: rgba(247, 249, 252, 0.96);
+  border-top: 1px solid #dde5f0;
+  z-index: 2;
+}
+.toggle-control {
+  padding: 12px;
+  border: 1px solid #d8e0ec;
+  border-radius: 8px;
+  background: white;
+}
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #526079;
+  font-weight: 500;
+}
+.toggle-row input {
+  width: 20px;
+  height: 20px;
+}
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.status-grid article {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid #dde5f0;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+.status-grid article span {
+  color: #667085;
+  font-size: 13px;
+}
 dt {
   font-weight: 700;
   margin-top: 12px;
@@ -238,6 +346,9 @@ textarea {
   .grid,
   .form-row,
   .admin-editor {
+    grid-template-columns: 1fr;
+  }
+  .status-grid {
     grid-template-columns: 1fr;
   }
   main {

@@ -127,6 +127,20 @@ WHERE r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p.principal='*')`), 
 		if strings.EqualFold(x.Name, name) || strings.HasSuffix(x.ID, "/"+strings.ToLower(name)) {
 			x.score += 10
 		}
+		found = append(found, x)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	// SQLite is intentionally configured with a single connection so settings
+	// writes cannot race. Finish the repository cursor before issuing per-repo
+	// aggregate queries, otherwise database/sql waits for the connection held by
+	// that same cursor.
+	selected := found[:0]
+	for _, x := range found {
 		cr, _ := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT DISTINCT ref_name FROM document_chunks WHERE repository_id=?`), x.repoID)
 		for cr != nil && cr.Next() {
 			var ref string
@@ -138,9 +152,10 @@ WHERE r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p.principal='*')`), 
 		}
 		_ = s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT COUNT(*) FROM document_chunks WHERE repository_id=?`), x.repoID).Scan(&x.Snippets)
 		if x.score > 0 {
-			found = append(found, x)
+			selected = append(selected, x)
 		}
 	}
+	found = selected
 	sort.Slice(found, func(i, j int) bool { return found[i].score > found[j].score })
 	if len(found) > 10 {
 		found = found[:10]
@@ -150,7 +165,7 @@ WHERE r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p.principal='*')`), 
 		out[i] = found[i].Library
 	}
 	span.SetAttributes(attribute.Int("git_ctx.search.result_count", len(out)))
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *Service) Query(ctx context.Context, principals []string, libraryID, query string) (result string, err error) {
