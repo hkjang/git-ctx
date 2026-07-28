@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
 
+	"git-ctx/internal/codeintel"
 	"git-ctx/internal/embedding"
 	"git-ctx/internal/source"
 	"git-ctx/internal/store"
@@ -26,7 +28,7 @@ type Policy struct {
 }
 
 func DefaultPolicy() Policy {
-	return Policy{IncludeExtensions: []string{".md", ".mdx", ".rst", ".txt", ".adoc", ".asciidoc", ".yaml", ".yml", ".json", ".go", ".java", ".ts", ".tsx", ".py"}, ExcludePrefixes: []string{"node_modules/", "vendor/", "dist/", ".git/", "secrets/"}, MaxFileBytes: 1 << 20}
+	return Policy{IncludeExtensions: []string{".md", ".mdx", ".rst", ".txt", ".adoc", ".asciidoc", ".yaml", ".yml", ".json", ".xml", ".mod", ".gradle", ".tf", ".go", ".java", ".ts", ".tsx", ".py", ".sql", ".ddl"}, ExcludePrefixes: []string{"node_modules/", "vendor/", "dist/", ".git/", "secrets/"}, MaxFileBytes: 1 << 20}
 }
 
 type Indexer struct {
@@ -128,6 +130,7 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_, _ = i.store.DB.ExecContext(cleanupCtx, i.store.Rebind(`DELETE FROM document_chunks_staging WHERE generation_id=?`), generationID)
+		_, _ = i.store.DB.ExecContext(cleanupCtx, i.store.Rebind(`DELETE FROM code_symbols_staging WHERE generation_id=?`), generationID)
 		if trackJob {
 			_, _ = i.store.DB.ExecContext(cleanupCtx, i.store.Rebind(`UPDATE index_jobs SET status='failed',error_message=?,completed_at=? WHERE id=?`), truncate(e.Error(), 1000), time.Now().UTC(), jobID)
 		}
@@ -159,6 +162,9 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 	if previousCommit != "" && previousCommit == ref.LatestCommit && previousEmbeddingRevision == embeddingRevision {
 		_, err = i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,indexed_at,embedding_revision) VALUES(?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET commit_id=excluded.commit_id,indexed_at=excluded.indexed_at,embedding_revision=excluded.embedding_revision`), repoID, ref.Name, ref.LatestCommit, time.Now().UTC(), embeddingRevision)
 		if err != nil {
+			return fail(err)
+		}
+		if err = i.refreshRepositoryMap(ctx, repoID, ref.Name, ref.LatestCommit); err != nil {
 			return fail(err)
 		}
 		return complete(0)
@@ -233,6 +239,14 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 				continue
 			}
 		}
+		for _, symbol := range codeintel.Extract(file.Path, safeContent) {
+			symbolID := hash(repoID + "\x00" + ref.Name + "\x00" + file.Path + "\x00" + symbol.QualifiedName + "\x00" + fmt.Sprint(symbol.LineStart))
+			_, e = i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO code_symbols_staging(generation_id,id,repository_id,ref_name,commit_id,file_path,name,qualified_name,symbol_kind,language,signature,documentation,line_start,line_end,content_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+				generationID, symbolID, repoID, ref.Name, ref.LatestCommit, filepath.ToSlash(file.Path), symbol.Name, symbol.QualifiedName, symbol.Kind, symbol.Language, symbol.Signature, symbol.Documentation, symbol.LineStart, symbol.LineEnd, hash(symbol.Signature+"\n"+symbol.Documentation))
+			if e != nil {
+				return fail(e)
+			}
+		}
 		for _, chunk := range parse(file.Path, safeContent) {
 			id := hash(repoID + "\x00" + ref.Name + "\x00" + file.Path + "\x00" + fmt.Sprint(chunk.Start) + "\x00" + chunk.Content)
 			contentHash := hash(chunk.Content)
@@ -298,9 +312,17 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 				_ = tx.Rollback()
 				return fail(err)
 			}
+			if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM code_symbols WHERE repository_id=? AND ref_name=? AND file_path=?`), repoID, ref.Name, path); err != nil {
+				_ = tx.Rollback()
+				return fail(err)
+			}
 		}
 	} else {
 		if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM document_chunks WHERE repository_id=? AND ref_name=?`), repoID, ref.Name); err != nil {
+			_ = tx.Rollback()
+			return fail(err)
+		}
+		if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM code_symbols WHERE repository_id=? AND ref_name=?`), repoID, ref.Name); err != nil {
 			_ = tx.Rollback()
 			return fail(err)
 		}
@@ -308,6 +330,12 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 	if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding,indexed_at,embedding_provider,embedding_model,embedding_dimensions,embedding_revision)
 SELECT id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding,indexed_at,embedding_provider,embedding_model,embedding_dimensions,embedding_revision
 FROM document_chunks_staging WHERE generation_id=?`), generationID); err != nil {
+		_ = tx.Rollback()
+		return fail(err)
+	}
+	if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO code_symbols(id,repository_id,ref_name,commit_id,file_path,name,qualified_name,symbol_kind,language,signature,documentation,line_start,line_end,content_hash,indexed_at)
+SELECT id,repository_id,ref_name,commit_id,file_path,name,qualified_name,symbol_kind,language,signature,documentation,line_start,line_end,content_hash,indexed_at
+FROM code_symbols_staging WHERE generation_id=?`), generationID); err != nil {
 		_ = tx.Rollback()
 		return fail(err)
 	}
@@ -321,7 +349,15 @@ FROM document_chunks_staging WHERE generation_id=?`), generationID); err != nil 
 		_ = tx.Rollback()
 		return fail(err)
 	}
+	if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM code_symbols_staging WHERE generation_id=?`), generationID); err != nil {
+		_ = tx.Rollback()
+		return fail(err)
+	}
 	if _, err = tx.ExecContext(ctx, i.store.Rebind(`UPDATE document_chunks SET commit_id=?,indexed_at=? WHERE repository_id=? AND ref_name=?`), ref.LatestCommit, time.Now().UTC(), repoID, ref.Name); err != nil {
+		_ = tx.Rollback()
+		return fail(err)
+	}
+	if _, err = tx.ExecContext(ctx, i.store.Rebind(`UPDATE code_symbols SET commit_id=?,indexed_at=? WHERE repository_id=? AND ref_name=?`), ref.LatestCommit, time.Now().UTC(), repoID, ref.Name); err != nil {
 		_ = tx.Rollback()
 		return fail(err)
 	}
@@ -364,7 +400,82 @@ FROM document_chunks_staging WHERE generation_id=?`), generationID); err != nil 
 		_ = tx.Rollback()
 		return fail(err)
 	}
+	if err = i.refreshRepositoryMap(ctx, repoID, ref.Name, ref.LatestCommit); err != nil {
+		return fail(err)
+	}
 	return complete(processed)
+}
+
+func (i *Indexer) refreshRepositoryMap(ctx context.Context, repoID, ref, commit string) error {
+	type repositoryMap struct {
+		Languages   map[string]int `json:"languages"`
+		Symbols     map[string]int `json:"symbols"`
+		Directories []string       `json:"directories"`
+		KeyFiles    []string       `json:"keyFiles"`
+		EntryPoints []string       `json:"entryPoints"`
+	}
+	summary := repositoryMap{Languages: map[string]int{}, Symbols: map[string]int{}}
+	rows, err := i.store.DB.QueryContext(ctx, i.store.Rebind(`SELECT language,symbol_kind,qualified_name,file_path FROM code_symbols WHERE repository_id=? AND ref_name=? ORDER BY file_path,line_start`), repoID, ref)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var language, kind, qualified, path string
+		if err = rows.Scan(&language, &kind, &qualified, &path); err != nil {
+			rows.Close()
+			return err
+		}
+		summary.Languages[language]++
+		summary.Symbols[kind]++
+		if len(summary.EntryPoints) < 50 && (kind == "function" || kind == "method" || kind == "class" || kind == "interface") {
+			summary.EntryPoints = append(summary.EntryPoints, path+":"+qualified)
+		}
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	fileRows, err := i.store.DB.QueryContext(ctx, i.store.Rebind(`SELECT DISTINCT file_path FROM document_chunks WHERE repository_id=? AND ref_name=? ORDER BY file_path`), repoID, ref)
+	if err != nil {
+		return err
+	}
+	directories := map[string]bool{}
+	for fileRows.Next() {
+		var path string
+		if err = fileRows.Scan(&path); err != nil {
+			fileRows.Close()
+			return err
+		}
+		parts := strings.Split(filepath.ToSlash(path), "/")
+		if len(parts) > 1 {
+			directories[parts[0]] = true
+		}
+		if isKeyFile(path) {
+			summary.KeyFiles = append(summary.KeyFiles, path)
+		}
+	}
+	fileRows.Close()
+	for directory := range directories {
+		summary.Directories = append(summary.Directories, directory)
+	}
+	sort.Strings(summary.Directories)
+	raw, err := json.Marshal(summary)
+	if err != nil {
+		return err
+	}
+	_, err = i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_maps(repository_id,ref_name,commit_id,summary_json,generated_at) VALUES(?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET commit_id=excluded.commit_id,summary_json=excluded.summary_json,generated_at=excluded.generated_at`), repoID, ref, commit, string(raw), time.Now().UTC())
+	return err
+}
+
+func isKeyFile(path string) bool {
+	base := strings.ToLower(filepath.Base(path))
+	switch base {
+	case "readme.md", "go.mod", "pom.xml", "build.gradle", "package.json", "dockerfile", "compose.yaml", "docker-compose.yml", "openapi.yaml", "openapi.yml", "swagger.yaml", "chart.yaml", "main.go":
+		return true
+	default:
+		return false
+	}
 }
 func (i *Indexer) allowed(f source.File) bool {
 	p := strings.TrimPrefix(filepath.ToSlash(f.Path), "./")
@@ -393,6 +504,14 @@ var awsKeyRE = regexp.MustCompile(`\bAKIA[A-Z0-9]{16}\b`)
 
 func parse(path, content string) []chunk {
 	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	if symbols := codeintel.Extract(path, content); len(symbols) > 0 {
+		out := make([]chunk, 0, len(symbols))
+		for _, symbol := range symbols {
+			start, end := max(1, symbol.LineStart), min(len(lines), max(symbol.LineStart, symbol.LineEnd))
+			out = append(out, chunk{Heading: symbol.QualifiedName, Content: strings.TrimSpace(strings.Join(lines[start-1:end], "\n")), Start: start, End: end})
+		}
+		return out
+	}
 	heading := path
 	start := 1
 	var body []string

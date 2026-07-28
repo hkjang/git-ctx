@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.13.0
+  version: 0.14.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -125,6 +125,24 @@ paths:
       {
         summary: Test query-docs with current ACL,
         responses: { "200": { description: Text content } },
+      }
+  /api/v1/tools/repository-map/test:
+    post:
+      {
+        summary: Read an ACL-filtered repository structure and entry-point map,
+        responses: { "200": { description: Repository map } },
+      }
+  /api/v1/tools/symbols/test:
+    post:
+      {
+        summary: Search indexed code symbols within the current repository ACL,
+        responses: { "200": { description: Symbol candidates } },
+      }
+  /api/v1/tools/symbol-context/test:
+    post:
+      {
+        summary: Read a symbol definition documentation and source context,
+        responses: { "200": { description: Symbol context } },
       }
   /api/v1/admin/settings:
     get:
@@ -464,6 +482,9 @@ components:
                 - query-docs
                 - search-repositories
                 - search-source
+                - get-repository-map
+                - find-symbol
+                - get-symbol-context
                 - get-platform-status
                 - list-index-jobs
                 - reindex-repository

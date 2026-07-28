@@ -87,6 +87,153 @@ type SourceResult struct {
 	source.QueryResult
 }
 
+type SymbolResult struct {
+	LibraryID, Ref, CommitID, FilePath, Name, QualifiedName, Kind, Language, Signature, Documentation string
+	LineStart, LineEnd                                                                                int
+	Content                                                                                           string
+}
+
+type RepositoryMap struct {
+	LibraryID, Ref, CommitID, SummaryJSON string
+}
+
+func (s *Service) RepositoryMap(ctx context.Context, principals []string, libraryID, requestedRef string) (RepositoryMap, error) {
+	baseID, version, ok := splitLibraryID(libraryID)
+	if !ok || len(principals) == 0 {
+		return RepositoryMap{}, errors.New("library is unavailable or access is denied")
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(principals)), ",")
+	args := []any{baseID}
+	for _, principal := range principals {
+		args = append(args, principal)
+	}
+	var repositoryID, defaultRef string
+	err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT r.id,r.default_branch FROM repositories r JOIN repository_permissions p ON p.repository_id=r.id
+WHERE r.library_id=? AND r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p.principal='*') LIMIT 1`), args...).Scan(&repositoryID, &defaultRef)
+	if err != nil {
+		return RepositoryMap{}, errors.New("library is unavailable or access is denied")
+	}
+	ref := strings.TrimSpace(requestedRef)
+	if ref == "" {
+		ref = version
+	}
+	if ref == "" {
+		ref = defaultRef
+	}
+	var result RepositoryMap
+	result.LibraryID, result.Ref = baseID, ref
+	err = s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT commit_id,summary_json FROM repository_maps WHERE repository_id=? AND ref_name=?`), repositoryID, ref).Scan(&result.CommitID, &result.SummaryJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RepositoryMap{}, errors.New("repository map is unavailable; reindex this ref")
+	}
+	return result, err
+}
+
+func (s *Service) FindSymbols(ctx context.Context, principals []string, libraryID, ref, query, kind string, limit int) ([]SymbolResult, error) {
+	query, kind = strings.TrimSpace(query), strings.ToLower(strings.TrimSpace(kind))
+	if query == "" {
+		return nil, errors.New("query is required")
+	}
+	if len(principals) == 0 {
+		return []SymbolResult{}, nil
+	}
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(principals)), ",")
+	args := make([]any, 0, len(principals)+8)
+	for _, principal := range principals {
+		args = append(args, principal)
+	}
+	statement := `SELECT DISTINCT r.library_id,s.ref_name,s.commit_id,s.file_path,s.name,s.qualified_name,s.symbol_kind,s.language,s.signature,s.documentation,s.line_start,s.line_end
+FROM code_symbols s JOIN repositories r ON r.id=s.repository_id JOIN repository_permissions p ON p.repository_id=r.id
+WHERE r.enabled=1 AND (p.principal IN (` + placeholders + `) OR p.principal='*')`
+	if strings.TrimSpace(libraryID) != "" {
+		baseID, version, ok := splitLibraryID(libraryID)
+		if !ok {
+			return nil, errors.New("libraryId must use /organization/project[/version]")
+		}
+		statement += ` AND r.library_id=?`
+		args = append(args, baseID)
+		if ref == "" {
+			ref = version
+		}
+	}
+	if ref != "" {
+		statement += ` AND s.ref_name=?`
+		args = append(args, ref)
+	}
+	if kind != "" {
+		statement += ` AND s.symbol_kind=?`
+		args = append(args, kind)
+	}
+	statement += ` AND (LOWER(s.name) LIKE LOWER(?) OR LOWER(s.qualified_name) LIKE LOWER(?) OR LOWER(s.signature) LIKE LOWER(?))
+ORDER BY CASE WHEN LOWER(s.name)=LOWER(?) THEN 0 WHEN LOWER(s.qualified_name)=LOWER(?) THEN 1 ELSE 2 END,s.name,s.file_path LIMIT ?`
+	like := "%" + query + "%"
+	args = append(args, like, like, like, query, query, limit)
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SymbolResult
+	for rows.Next() {
+		var item SymbolResult
+		if err = rows.Scan(&item.LibraryID, &item.Ref, &item.CommitID, &item.FilePath, &item.Name, &item.QualifiedName, &item.Kind, &item.Language, &item.Signature, &item.Documentation, &item.LineStart, &item.LineEnd); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Service) SymbolContext(ctx context.Context, principals []string, libraryID, ref, symbol string) (SymbolResult, error) {
+	results, err := s.FindSymbols(ctx, principals, libraryID, ref, symbol, "", 20)
+	if err != nil {
+		return SymbolResult{}, err
+	}
+	if len(results) == 0 {
+		return SymbolResult{}, errors.New("symbol is unavailable or access is denied")
+	}
+	selected := results[0]
+	for _, item := range results {
+		if strings.EqualFold(item.QualifiedName, symbol) || strings.EqualFold(item.Name, symbol) {
+			selected = item
+			break
+		}
+	}
+	var repositoryID string
+	if err = s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT id FROM repositories WHERE library_id=?`), selected.LibraryID).Scan(&repositoryID); err != nil {
+		return SymbolResult{}, errors.New("symbol is unavailable or access is denied")
+	}
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT content FROM document_chunks WHERE repository_id=? AND ref_name=? AND file_path=? AND line_end>=? AND line_start<=? ORDER BY line_start LIMIT 5`), repositoryID, selected.Ref, selected.FilePath, selected.LineStart, selected.LineEnd)
+	if err != nil {
+		return SymbolResult{}, err
+	}
+	var contents []string
+	for rows.Next() {
+		var content string
+		if rows.Scan(&content) == nil {
+			contents = append(contents, content)
+		}
+	}
+	rows.Close()
+	selected.Content = strings.Join(contents, "\n\n")
+	return selected, nil
+}
+
+func splitLibraryID(libraryID string) (string, string, bool) {
+	parts := strings.Split(strings.TrimPrefix(strings.TrimSpace(libraryID), "/"), "/")
+	if len(parts) < 2 || len(parts) > 3 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	version := ""
+	if len(parts) == 3 {
+		version = parts[2]
+	}
+	return "/" + parts[0] + "/" + parts[1], version, true
+}
+
 func (s *Service) SearchRepositories(ctx context.Context, principals []string, query, sourceType string, limit int) ([]RepositoryResult, error) {
 	query, sourceType = strings.TrimSpace(query), strings.ToLower(strings.TrimSpace(sourceType))
 	if query == "" {

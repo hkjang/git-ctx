@@ -282,6 +282,22 @@ func Catalog() []map[string]any {
 				"repository": map[string]string{"type": "string", "description": "Optional repository slug or library ID"},
 				"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"},
 				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 50}}}},
+		{"name": "get-repository-map", "description": "Returns the indexed languages, directories, key files, and entry points for a repository.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId"}, "properties": map[string]any{
+				"libraryId": map[string]string{"type": "string", "description": "Context7-compatible library ID"},
+				"ref":       map[string]string{"type": "string", "description": "Optional branch or tag"}}}},
+		{"name": "find-symbol", "description": "Finds functions, methods, classes, interfaces, and database objects in accessible repositories.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
+				"query":     map[string]string{"type": "string", "description": "Symbol name or signature"},
+				"libraryId": map[string]string{"type": "string", "description": "Optional library scope"},
+				"ref":       map[string]string{"type": "string", "description": "Optional branch or tag"},
+				"kind":      map[string]string{"type": "string", "description": "Optional symbol kind"},
+				"limit":     map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}}},
+		{"name": "get-symbol-context", "description": "Returns an indexed symbol definition, documentation, source context, and location.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId", "symbol"}, "properties": map[string]any{
+				"libraryId": map[string]string{"type": "string"},
+				"symbol":    map[string]string{"type": "string", "description": "Exact or partial qualified symbol name"},
+				"ref":       map[string]string{"type": "string"}}}},
 		{"name": "get-platform-status", "description": "Returns administrative MCP, source, index, and database status. Requires an administrator MCP API key.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}}},
 		{"name": "list-index-jobs", "description": "Lists recent indexing jobs for source administrators and operators using an MCP API key.",
@@ -325,7 +341,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 	text := ""
 	var err error
 	libraryID := ""
-	if params.Name == "query-docs" || params.Name == "reindex-repository" {
+	if params.Name == "query-docs" || params.Name == "reindex-repository" || params.Name == "get-repository-map" || params.Name == "get-symbol-context" {
 		libraryID = stringArg(params.Arguments, "libraryId")
 	}
 	cacheKey := s.cacheKey(r.Context(), p, params.Name, params.Arguments)
@@ -380,6 +396,46 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 				hits = filtered
 			}
 			text = formatSourceResults(hits)
+		}
+	case "get-repository-map":
+		if p.KeyID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+			err = errors.New("library is unavailable or access is denied")
+		} else {
+			var item search.RepositoryMap
+			item, err = s.search.RepositoryMap(r.Context(), principalACLs(p), libraryID, stringArg(params.Arguments, "ref"))
+			if err == nil {
+				text = formatRepositoryMap(item)
+			}
+		}
+	case "find-symbol":
+		libraryID = stringArg(params.Arguments, "libraryId")
+		if p.KeyID != "" && libraryID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+			err = errors.New("library is unavailable or access is denied")
+		} else {
+			var items []search.SymbolResult
+			items, err = s.search.FindSymbols(r.Context(), principalACLs(p), libraryID, stringArg(params.Arguments, "ref"), stringArg(params.Arguments, "query"), stringArg(params.Arguments, "kind"), intArg(params.Arguments, "limit", 20))
+			if err == nil {
+				if len(p.AllowedRepositories) > 0 {
+					filtered := items[:0]
+					for _, item := range items {
+						if libraryAllowed(item.LibraryID, p.AllowedRepositories) {
+							filtered = append(filtered, item)
+						}
+					}
+					items = filtered
+				}
+				text = formatSymbols(items)
+			}
+		}
+	case "get-symbol-context":
+		if p.KeyID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+			err = errors.New("library is unavailable or access is denied")
+		} else {
+			var item search.SymbolResult
+			item, err = s.search.SymbolContext(r.Context(), principalACLs(p), libraryID, stringArg(params.Arguments, "ref"), stringArg(params.Arguments, "symbol"))
+			if err == nil {
+				text = formatSymbolContext(item)
+			}
 		}
 	case "get-platform-status":
 		text, err = s.platformStatus(r.Context())
@@ -675,6 +731,36 @@ func formatSourceResults(items []search.SourceResult) string {
 		fmt.Fprintf(&b, "\n### %s · %s\n\n%s\n\nSource: %s://%s/%s@%s/%s#L%d-L%d\n", item.LibraryID, item.Path, item.Snippet, item.SourceType, item.ProjectKey, item.RepositorySlug, item.CommitID, item.Path, item.LineStart, item.LineEnd)
 	}
 	return b.String()
+}
+
+func formatRepositoryMap(item search.RepositoryMap) string {
+	var decoded any
+	if json.Unmarshal([]byte(item.SummaryJSON), &decoded) != nil {
+		decoded = map[string]any{}
+	}
+	pretty, _ := json.MarshalIndent(decoded, "", "  ")
+	return fmt.Sprintf("## Repository Map\n\n- Library ID: %s\n- Ref: %s\n- Commit: %s\n\n```json\n%s\n```\n", item.LibraryID, item.Ref, item.CommitID, pretty)
+}
+
+func formatSymbols(items []search.SymbolResult) string {
+	if len(items) == 0 {
+		return "No accessible symbols matched the query. Reindex the repository or broaden the symbol name."
+	}
+	var b strings.Builder
+	b.WriteString("## Symbol Search Results\n")
+	for _, item := range items {
+		fmt.Fprintf(&b, "\n### %s\n\n- Kind: %s\n- Language: %s\n- Library ID: %s/%s\n- Signature: `%s`\n- Source: bitcontext://%s@%s/%s#L%d-L%d\n",
+			item.QualifiedName, item.Kind, item.Language, item.LibraryID, item.Ref, item.Signature, item.LibraryID, item.CommitID, item.FilePath, item.LineStart, item.LineEnd)
+		if item.Documentation != "" {
+			fmt.Fprintf(&b, "- Documentation: %s\n", item.Documentation)
+		}
+	}
+	return b.String()
+}
+
+func formatSymbolContext(item search.SymbolResult) string {
+	return fmt.Sprintf("## %s\n\n- Kind: %s\n- Language: %s\n- Signature: `%s`\n- Source: bitcontext://%s@%s/%s#L%d-L%d\n\n%s\n\n```%s\n%s\n```\n",
+		item.QualifiedName, item.Kind, item.Language, item.Signature, item.LibraryID, item.CommitID, item.FilePath, item.LineStart, item.LineEnd, item.Documentation, item.Language, item.Content)
 }
 
 func stringArg(m map[string]any, k string) string { v, _ := m[k].(string); return v }

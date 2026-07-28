@@ -21,6 +21,7 @@
             <button type="button" data-profile-target="account">프로필</button>
             <button type="button" data-profile-target="connections">MCP 연결</button>
             <button type="button" data-profile-target="keys">API 키 관리</button>
+            <button type="button" data-profile-target="knowledge">코드 지식 검색</button>
             <button type="button" data-profile-target="activity">내 활동·저장소</button>
             <hr />
             <button id="profile-logout" type="button" class="danger-text">로그아웃</button>
@@ -59,6 +60,7 @@
         <button type="button" data-personal-target="account">프로필</button>
         <button type="button" data-personal-target="connections">MCP 연결</button>
         <button type="button" data-personal-target="keys">API 키</button>
+        <button type="button" data-personal-target="knowledge">코드 지식</button>
         <button type="button" data-personal-target="activity">내 활동</button>
       </nav>
       <section id="account" class="personal-panel" hidden>
@@ -92,6 +94,10 @@
             <dd>Library ID 없이 접근 가능한 Bitbucket·GitLab 저장소 검색</dd>
             <dt>search-source</dt>
             <dd>Bitbucket·GitLab Query API 기반 소스 검색</dd>
+            <dt>get-repository-map</dt>
+            <dd>저장소 언어·구조·진입점과 주요 설정 파일 조회</dd>
+            <dt>find-symbol / get-symbol-context</dt>
+            <dd>함수·메서드·클래스·인터페이스 검색과 정의 문맥 조회</dd>
           </dl>
         </article>
       </section>
@@ -130,6 +136,15 @@
             ><label
               ><input type="checkbox" name="scope" value="search-source" checked />
               search-source</label
+            ><label
+              ><input type="checkbox" name="scope" value="get-repository-map" checked />
+              get-repository-map</label
+            ><label
+              ><input type="checkbox" name="scope" value="find-symbol" checked />
+              find-symbol</label
+            ><label
+              ><input type="checkbox" name="scope" value="get-symbol-context" checked />
+              get-symbol-context</label
             >
           </fieldset>
           <fieldset id="admin-key-scopes" hidden>
@@ -168,6 +183,30 @@
         </form>
         <div id="secret" class="secret" hidden></div>
         <div id="key-list" class="table-wrap"></div>
+      </section>
+      <section id="knowledge" class="personal-panel" hidden>
+        <h2>코드 지식 검색</h2>
+        <p>색인된 저장소 구조와 코드 심볼을 ACL 범위 안에서 조회합니다.</p>
+        <div class="grid">
+          <article>
+            <h3>Repository Map</h3>
+            <form id="repository-map-form" class="form-row">
+              <label>Library ID<input name="libraryId" required placeholder="/kcb/clustara" /></label>
+              <label>Ref<input name="ref" placeholder="main" /></label>
+              <button type="submit">구조 조회</button>
+            </form>
+          </article>
+          <article>
+            <h3>Symbol Search</h3>
+            <form id="symbol-search-form" class="form-row">
+              <label>Library ID<input name="libraryId" placeholder="/kcb/clustara" /></label>
+              <label>심볼<input name="query" required placeholder="Service.GetGPU" /></label>
+              <label>종류<input name="kind" placeholder="method" /></label>
+              <button type="submit">심볼 검색</button>
+            </form>
+          </article>
+        </div>
+        <pre id="knowledge-result">검색 결과가 여기에 표시됩니다.</pre>
       </section>
       <section id="activity" class="personal-panel" hidden>
         <h2>내 저장소와 MCP 사용량</h2>

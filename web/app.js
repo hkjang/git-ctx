@@ -373,6 +373,7 @@ async function boot() {
     applyInitialNavigation(hasAdmin);
     loadKeys();
     loadActivity();
+    setupKnowledgeSearch();
   } catch (e) {
     $("#status").textContent =
       "Keycloak으로 로그인하면 개인 MCP 키와 관리자 기능을 사용할 수 있습니다.";
@@ -380,6 +381,27 @@ async function boot() {
       location.href = `/auth/login?return_to=${encodeURIComponent("/admin")}`;
     }
   }
+}
+function setupKnowledgeSearch() {
+  const output = $("#knowledge-result");
+  $("#repository-map-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.currentTarget));
+    try {
+      output.textContent = JSON.stringify(await api("/api/v1/tools/repository-map/test", { method: "POST", body: JSON.stringify(data) }), null, 2);
+    } catch (error) {
+      output.textContent = error.message;
+    }
+  };
+  $("#symbol-search-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.currentTarget));
+    try {
+      output.textContent = JSON.stringify(await api("/api/v1/tools/symbols/test", { method: "POST", body: JSON.stringify({ ...data, limit: 30 }) }), null, 2);
+    } catch (error) {
+      output.textContent = error.message;
+    }
+  };
 }
 function configureMCPKeyScopes(roles) {
   const platform = roles.has("platform-admin");

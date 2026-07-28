@@ -32,6 +32,9 @@ func fixture(t *testing.T) *Server {
 	must(`INSERT INTO repositories(id,project_key,slug,name,description,library_id,default_branch,reputation) VALUES('r1','KCB','clustara','Clustara','Kubernetes GPU platform','/kcb/clustara','main','High')`)
 	must(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r1','alice','read')`)
 	must(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('c1','r1','main','4fa21bd','docs/gpu.md',20,30,'GPU metrics','document','Use DCGM exporter for Pod GPU metrics.','h1')`)
+	must(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('c2','r1','main','4fa21bd','service.go',20,30,'Service.GetGPU','code','func (s *Service) GetGPU() error { return nil }','h2')`)
+	must(`INSERT INTO code_symbols(id,repository_id,ref_name,commit_id,file_path,name,qualified_name,symbol_kind,language,signature,documentation,line_start,line_end,content_hash) VALUES('s1','r1','main','4fa21bd','service.go','GetGPU','Service.GetGPU','method','go','func (s *Service) GetGPU() error','Returns GPU metrics.',20,30,'sh1')`)
+	must(`INSERT INTO repository_maps(repository_id,ref_name,commit_id,summary_json) VALUES('r1','main','4fa21bd','{"languages":{"go":1},"symbols":{"method":1},"directories":["docs"],"keyFiles":["README.md"],"entryPoints":["service.go:Service.GetGPU"]}')`)
 	return New(search.New(s), s)
 }
 
@@ -98,7 +101,7 @@ func TestToolsListExtendedAndStrictCompatibility(t *testing.T) {
 	s := fixture(t)
 	out := call(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
 	tools := out["result"].(map[string]any)["tools"].([]any)
-	if len(tools) != 4 {
+	if len(tools) != 7 {
 		t.Fatalf("got %d tools", len(tools))
 	}
 	if tools[0].(map[string]any)["name"] != "resolve-library-id" || tools[1].(map[string]any)["name"] != "query-docs" {
@@ -109,6 +112,25 @@ func TestToolsListExtendedAndStrictCompatibility(t *testing.T) {
 	tools = out["result"].(map[string]any)["tools"].([]any)
 	if len(tools) != 2 {
 		t.Fatalf("strict mode got %d tools", len(tools))
+	}
+}
+
+func TestRepositoryMapAndSymbolTools(t *testing.T) {
+	s := fixture(t)
+	repositoryMap := call(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get-repository-map","arguments":{"libraryId":"/kcb/clustara"}}}`)
+	text := repositoryMap["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, `"go": 1`) || !strings.Contains(text, "Service.GetGPU") {
+		t.Fatalf("repository map=%s", text)
+	}
+	found := call(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"find-symbol","arguments":{"libraryId":"/kcb/clustara","query":"GetGPU"}}}`)
+	text = found["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "Service.GetGPU") || !strings.Contains(text, "service.go#L20-L30") {
+		t.Fatalf("symbol search=%s", text)
+	}
+	contextResult := call(t, s, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get-symbol-context","arguments":{"libraryId":"/kcb/clustara","symbol":"Service.GetGPU"}}}`)
+	text = contextResult["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "Returns GPU metrics") || !strings.Contains(text, "func (s *Service) GetGPU") {
+		t.Fatalf("symbol context=%s", text)
 	}
 }
 

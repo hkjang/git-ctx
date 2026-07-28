@@ -306,3 +306,41 @@ func TestConcurrentRefActivationCannotOverwriteNewerState(t *testing.T) {
 		t.Fatalf("concurrent activation changed active chunks: content=%q commit=%q", content, commit)
 	}
 }
+
+func TestCodeSymbolsAndRepositoryMapFollowIncrementalChanges(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file::memory:?cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+	src := &incrementalSource{files: map[string]string{
+		"main.go": "package main\n\nfunc main() { Run() }\n\n// Run starts work.\nfunc Run() {}\n",
+		"go.mod":  "module example.local/demo\n",
+	}}
+	repo := source.Repository{ID: 12, ProjectKey: "KCB", Slug: "symbols", Name: "Symbols", DefaultBranch: "main"}
+	idx := New(s, DefaultPolicy())
+	if err = idx.SyncRepository(ctx, src, "bitbucket", repo, []source.Reference{{Name: "main", LatestCommit: "c1"}}); err != nil {
+		t.Fatal(err)
+	}
+	var symbols, chunks int
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM code_symbols WHERE repository_id='bitbucket:12'`).Scan(&symbols)
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id='bitbucket:12' AND file_path='main.go'`).Scan(&chunks)
+	if symbols != 2 || chunks != 2 {
+		t.Fatalf("symbols=%d AST chunks=%d", symbols, chunks)
+	}
+	var summary string
+	_ = s.DB.QueryRow(`SELECT summary_json FROM repository_maps WHERE repository_id='bitbucket:12' AND ref_name='main'`).Scan(&summary)
+	if !strings.Contains(summary, `"go":2`) || !strings.Contains(summary, `"main.go"`) {
+		t.Fatalf("repository map=%s", summary)
+	}
+	src.files["main.go"] = "package main\n\nfunc main() {}\n"
+	src.changes = []source.Change{{Path: "main.go", OldPath: "main.go", Type: "modified"}}
+	if err = idx.SyncRepository(ctx, src, "bitbucket", repo, []source.Reference{{Name: "main", LatestCommit: "c2"}}); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM code_symbols WHERE repository_id='bitbucket:12'`).Scan(&symbols)
+	if symbols != 1 {
+		t.Fatalf("removed symbol survived incremental activation: %d", symbols)
+	}
+}

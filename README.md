@@ -9,6 +9,8 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - Context7 호환 `resolve-library-id`, `query-docs`와 선택 가능한 Strict 모드
 - Library ID 없이 ACL 범위에서 찾는 `search-repositories`, Bitbucket/GitLab Query API 기반 `search-source`
 - 관리자 MCP 키 전용 `get-platform-status`, `list-index-jobs`, `reindex-repository`
+- Go AST와 Java·TypeScript·Python·SQL 구조 분석 기반 `find-symbol`, `get-symbol-context`
+- 언어·디렉터리·주요 파일·진입점을 요약하는 ACL 기반 `get-repository-map`
 - 검색 후보 단계의 저장소 ACL 적용과 브랜치·태그별 조회
 - 사용자 API 키 생성·목록·중지·폐기 및 HMAC 기반 비가역 저장
 - SQLite와 PostgreSQL 공통 스키마
@@ -19,7 +21,7 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - Keycloak Authorization Code+PKCE 사용자 로그인과 HttpOnly 서버 세션
 - SSO 로그인과 최초 관리자 복구 진입 분리, 최고관리자용 사용자 CRUD·상태·역할 관리
 - Bitbucket Server 6.9.1 및 GitLab API v4 소스 어댑터
-- 저장소 ACL 동기화, commit diff 증분 수집, 원자적 staging, content hash 기반 embedding 재사용
+- 저장소 ACL 동기화, commit diff 증분 수집, 문서·심볼 원자적 staging, content hash 기반 embedding 재사용
 - 서명 검증 Webhook, 이벤트 멱등 처리 및 ref별 작업 큐
 - 우측 상단 프로필 메뉴, Ctrl/Cmd+K 빠른 이동, 개인 MCP 키 관리와 분리된 관리자 웹 화면
 - 키 회전·중지·재활성화와 CIDR·저장소·도구·분/시/일 호출 제한

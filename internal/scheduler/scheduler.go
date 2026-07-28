@@ -73,6 +73,7 @@ func (s *Scheduler) RunOnce(ctx context.Context) error {
 	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`DELETE FROM mcp_sessions WHERE expires_at<?`), now)
 	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`DELETE FROM admin_recovery_tokens WHERE expires_at<?`), now)
 	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`DELETE FROM document_chunks_staging WHERE indexed_at<?`), now.Add(-24*time.Hour))
+	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`DELETE FROM code_symbols_staging WHERE indexed_at<?`), now.Add(-24*time.Hour))
 	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`DELETE FROM repository_ref_changes WHERE created_at<?`), now.Add(-30*24*time.Hour))
 	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`DELETE FROM api_key_usage_buckets WHERE bucket_start<?`), now.Add(-48*time.Hour))
 	if s.retention != nil {

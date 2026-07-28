@@ -357,6 +357,9 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/me/notifications/{id}/read", a.authenticate(http.HandlerFunc(a.readNotification)))
 	a.mux.Handle("POST /api/v1/tools/resolve/test", a.authenticate(http.HandlerFunc(a.testResolve)))
 	a.mux.Handle("POST /api/v1/tools/query/test", a.authenticate(http.HandlerFunc(a.testQuery)))
+	a.mux.Handle("POST /api/v1/tools/repository-map/test", a.authenticate(http.HandlerFunc(a.testRepositoryMap)))
+	a.mux.Handle("POST /api/v1/tools/symbols/test", a.authenticate(http.HandlerFunc(a.testSymbols)))
+	a.mux.Handle("POST /api/v1/tools/symbol-context/test", a.authenticate(http.HandlerFunc(a.testSymbolContext)))
 	a.mux.Handle("GET /api/v1/admin/settings", a.admin(http.HandlerFunc(a.listSettings)))
 	a.mux.Handle("GET /api/v1/admin/settings/{category}", a.settingsAuthorize(http.HandlerFunc(a.getSetting)))
 	a.mux.Handle("DELETE /api/v1/admin/settings/{category}", a.settingsAuthorize(http.HandlerFunc(a.deleteSetting)))
@@ -1151,6 +1154,96 @@ func (a *App) testQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, 200, map[string]any{"content": []map[string]string{{"type": "text", "text": text}}})
+}
+func (a *App) testRepositoryMap(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	if p.KeyID != "" && !stringContains(p.Scopes, "get-repository-map") {
+		problem(w, 403, "forbidden", "API key is not allowed to call get-repository-map")
+		return
+	}
+	var in struct {
+		LibraryID string `json:"libraryId"`
+		Ref       string `json:"ref"`
+	}
+	if decode(r, &in) != nil || strings.TrimSpace(in.LibraryID) == "" {
+		problem(w, 400, "invalid_request", "libraryId is required")
+		return
+	}
+	if p.KeyID != "" && !repositoryAllowed(baseLibraryID(in.LibraryID), p.AllowedRepositories) {
+		problem(w, 403, "forbidden", "Library is unavailable or access is denied")
+		return
+	}
+	item, err := a.search.RepositoryMap(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.LibraryID, in.Ref)
+	if err != nil {
+		problem(w, 400, "search_failed", err.Error())
+		return
+	}
+	var summary any
+	_ = json.Unmarshal([]byte(item.SummaryJSON), &summary)
+	jsonOut(w, 200, map[string]any{"libraryId": item.LibraryID, "ref": item.Ref, "commitId": item.CommitID, "summary": summary})
+}
+func (a *App) testSymbols(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	if p.KeyID != "" && !stringContains(p.Scopes, "find-symbol") {
+		problem(w, 403, "forbidden", "API key is not allowed to call find-symbol")
+		return
+	}
+	var in struct {
+		LibraryID string `json:"libraryId"`
+		Ref       string `json:"ref"`
+		Query     string `json:"query"`
+		Kind      string `json:"kind"`
+		Limit     int    `json:"limit"`
+	}
+	if decode(r, &in) != nil || strings.TrimSpace(in.Query) == "" {
+		problem(w, 400, "invalid_request", "query is required")
+		return
+	}
+	if p.KeyID != "" && in.LibraryID != "" && !repositoryAllowed(baseLibraryID(in.LibraryID), p.AllowedRepositories) {
+		problem(w, 403, "forbidden", "Library is unavailable or access is denied")
+		return
+	}
+	items, err := a.search.FindSymbols(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.LibraryID, in.Ref, in.Query, in.Kind, in.Limit)
+	if err != nil {
+		problem(w, 400, "search_failed", err.Error())
+		return
+	}
+	if p.KeyID != "" && len(p.AllowedRepositories) > 0 {
+		filtered := items[:0]
+		for _, item := range items {
+			if repositoryAllowed(item.LibraryID, p.AllowedRepositories) {
+				filtered = append(filtered, item)
+			}
+		}
+		items = filtered
+	}
+	jsonOut(w, 200, map[string]any{"symbols": items})
+}
+func (a *App) testSymbolContext(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	if p.KeyID != "" && !stringContains(p.Scopes, "get-symbol-context") {
+		problem(w, 403, "forbidden", "API key is not allowed to call get-symbol-context")
+		return
+	}
+	var in struct {
+		LibraryID string `json:"libraryId"`
+		Ref       string `json:"ref"`
+		Symbol    string `json:"symbol"`
+	}
+	if decode(r, &in) != nil || in.LibraryID == "" || in.Symbol == "" {
+		problem(w, 400, "invalid_request", "libraryId and symbol are required")
+		return
+	}
+	if p.KeyID != "" && !repositoryAllowed(baseLibraryID(in.LibraryID), p.AllowedRepositories) {
+		problem(w, 403, "forbidden", "Library is unavailable or access is denied")
+		return
+	}
+	item, err := a.search.SymbolContext(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.LibraryID, in.Ref, in.Symbol)
+	if err != nil {
+		problem(w, 400, "search_failed", err.Error())
+		return
+	}
+	jsonOut(w, 200, item)
 }
 func baseLibraryID(id string) string {
 	parts := strings.Split(strings.TrimPrefix(strings.ToLower(id), "/"), "/")
@@ -3023,7 +3116,14 @@ func (a *App) mcpTools(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) updateMCPTool(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("id")
-	if name != "resolve-library-id" && name != "query-docs" {
+	found := false
+	for _, tool := range mcp.Catalog() {
+		if tool["name"] == name {
+			found = true
+			break
+		}
+	}
+	if !found {
 		problem(w, 404, "not_found", "MCP tool not found")
 		return
 	}
