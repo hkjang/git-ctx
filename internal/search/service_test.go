@@ -229,6 +229,94 @@ func TestSearchCodeDiscoversUnregisteredRemoteRepositoryAfterACL(t *testing.T) {
 	}
 }
 
+// globalQuerySource models a GitLab instance with advanced search enabled: the
+// term appears only inside a file, never in a repository name.
+type globalQuerySource struct {
+	discoveryQuerySource
+	globalCalls int
+	unsupported bool
+}
+
+func (q *globalQuerySource) SearchGlobalQuery(_ context.Context, query string, _ int) ([]source.GlobalQueryResult, error) {
+	q.globalCalls++
+	if q.unsupported {
+		return nil, source.ErrGlobalSearchUnsupported
+	}
+	q.lastQuery = query
+	return []source.GlobalQueryResult{{
+		ProjectKey: "apps", Slug: "dify", Name: "Dify", Ref: "main", DefaultBranch: "main", ID: 77,
+		QueryResult: source.QueryResult{Path: "api/core/auth.py", Snippet: "def verify_token(", LineStart: 42, LineEnd: 42},
+	}}, nil
+}
+
+// Searching for a code identifier must return file hits even though no
+// repository name, slug or description contains the term. Gating remote search
+// on repository metadata is what made GitLab code search look empty.
+func TestSearchCodeFindsContentThatNoRepositoryNameMatches(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:global-code-search?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	remote := &globalQuerySource{discoveryQuerySource: discoveryQuerySource{allowed: true}}
+	service := New(db)
+	service.SetSourceLoader(func(_ context.Context, sourceType string) (source.RepositorySource, error) {
+		if sourceType != "gitlab" {
+			return nil, errors.New("not configured")
+		}
+		return remote, nil
+	})
+	result, err := service.SearchCode(ctx, []string{"alice"}, "verify_token 코드 검색해", "gitlab", "", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Hits) != 1 || result.Hits[0].Path != "api/core/auth.py" || result.Hits[0].LibraryID != "/gitlab~apps/dify" {
+		t.Fatalf("global code hit missing: %#v diagnostics=%v", result.Hits, result.Diagnostics)
+	}
+	if result.Hits[0].Ref != "main" || result.Hits[0].CommitID != "main" {
+		t.Fatalf("ref was not propagated: %#v", result.Hits[0])
+	}
+	if len(result.Diagnostics) == 0 {
+		t.Fatal("diagnostics must explain which search path ran")
+	}
+
+	// A user without access to the project sees nothing, and the diagnostics must
+	// not leak the repository name.
+	remote.allowed = false
+	hidden, err := service.SearchCode(ctx, []string{"mallory"}, "verify_token", "gitlab", "", "", "", 10)
+	if err != nil || len(hidden.Hits) != 0 || len(hidden.Repositories) != 0 {
+		t.Fatalf("ACL leak: %#v err=%v", hidden, err)
+	}
+
+	// Without advanced search the client falls back to per repository queries.
+	remote.allowed = true
+	remote.unsupported = true
+	remote.calls = 0
+	fallback, err := service.SearchCode(ctx, []string{"alice"}, "dify", "gitlab", "", "", "", 10)
+	if err != nil || len(fallback.Hits) == 0 || remote.calls == 0 {
+		t.Fatalf("fallback search did not run: %#v calls=%d err=%v", fallback, remote.calls, err)
+	}
+}
+
+// An account with no Bitbucket or GitLab claim must be told why the result set
+// is empty instead of receiving a silent zero-result response.
+func TestSearchCodeExplainsMissingACLPrincipal(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:missing-acl-principal?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	result, err := New(db).SearchCode(ctx, nil, "verify_token", "", "", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Warning == "" || len(result.Diagnostics) == 0 || !strings.Contains(result.Diagnostics[0], "acl") {
+		t.Fatalf("missing ACL diagnostics: %#v", result)
+	}
+}
+
 func TestOpenSearchCandidatesAreHydratedFromIndexedDatabase(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, "sqlite", "file:keyword-candidate?mode=memory&cache=shared&_foreign_keys=on")

@@ -889,6 +889,9 @@ func formatCodeSearch(result search.CodeSearchResult) string {
 	b.WriteString("\n### Source Matches\n")
 	if len(result.Hits) == 0 {
 		b.WriteString("\nNo matching source snippets were returned by the connected query APIs.\n")
+		for _, diagnostic := range result.Diagnostics {
+			fmt.Fprintf(&b, "- %s\n", diagnostic)
+		}
 	} else {
 		for _, item := range result.Hits {
 			fmt.Fprintf(&b, "\n#### %s · %s\n\n%s\n\nSource: %s://%s/%s@%s/%s#L%d-L%d\n", item.LibraryID, item.Path, item.Snippet, item.SourceType, item.ProjectKey, item.RepositorySlug, item.CommitID, item.Path, item.LineStart, item.LineEnd)

@@ -9,12 +9,16 @@
     <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
-    <header>
+    <a class="skip-link" href="#main-content">본문으로 건너뛰기</a>
+    <header class="topbar">
+      <button id="sidebar-toggle" class="icon-button" type="button" aria-label="메뉴 열기" aria-expanded="false" hidden>☰</button>
       <img src="/logo.svg" alt="git-ctx" class="header-logo" />
-      <span id="brand-tagline">사내 개발 지식 MCP</span>
+      <span id="brand-tagline" class="topbar-tagline">사내 개발 지식 MCP</span>
       <span id="service-version" class="version-badge">v-</span>
-      <nav class="header-actions">
-        <button id="quick-nav-button" class="secondary" type="button" hidden>빠른 이동 <kbd>⌘K</kbd></button>
+      <nav class="header-actions" aria-label="계정">
+        <button id="quick-nav-button" class="ghost" type="button" hidden>빠른 이동 <kbd>⌘K</kbd></button>
+        <button id="theme-toggle" class="icon-button" type="button" aria-label="화면 테마 전환" title="화면 테마 전환">◐</button>
+        <button id="help-button" class="ghost" type="button" title="설정·권한 가이드">가이드</button>
         <div id="profile-menu" class="profile-menu" hidden>
           <button id="profile-toggle" type="button" aria-expanded="false" aria-controls="profile-dropdown"><span id="profile-avatar">U</span><span id="profile-name">내 프로필</span></button>
           <div id="profile-dropdown" class="profile-dropdown" hidden>
@@ -24,6 +28,7 @@
             <button type="button" data-profile-target="knowledge">코드 지식 검색</button>
             <button type="button" data-profile-target="activity">내 활동·저장소</button>
             <hr />
+            <button id="profile-acl" type="button">내 권한 진단</button>
             <button id="profile-logout" type="button" class="danger-text">로그아웃</button>
           </div>
         </div>
@@ -33,45 +38,55 @@
         <button id="logout" hidden>로그아웃</button>
       </nav>
     </header>
-    <main>
-      <section class="welcome-panel">
-        <h1>Context7 호환 사내 문서 검색</h1>
-        <p>
-          Bitbucket과 GitLab 문서를 저장소 권한에 맞게 검색하고 AI 개발 도구에
-          연결합니다.
-        </p>
-        <p id="entry-description">
-          Keycloak SSO로 로그인하여 접근 가능한 문서를 검색하고 MCP 키를 관리하세요.
-        </p>
-        <p><a id="admin-entry-link" href="/admin">관리자 화면으로 이동</a></p>
-        <p id="login-version" class="version-text">서비스 버전 확인 중…</p>
-        <div class="status-row" aria-live="polite">
-          <div id="status" class="notice">서버 상태 확인 중…</div>
-          <div id="database-status" class="notice">메타 DB 연결 확인 중…</div>
-          <div id="service-notice" class="notice" hidden></div>
-        </div>
-      </section>
-      <nav id="workspace-menu" class="workspace-menu" aria-label="업무 영역" hidden>
-        <button type="button" data-workspace="personal">내 공간</button>
-        <button id="admin-workspace-button" type="button" data-workspace="admin" hidden>관리자</button>
-      </nav>
-      <div id="personal-workspace" class="workspace" hidden>
-      <nav id="personal-menu" class="personal-menu" aria-label="개인화 메뉴">
-        <button type="button" data-personal-target="account">프로필</button>
-        <button type="button" data-personal-target="connections">MCP 연결</button>
-        <button type="button" data-personal-target="keys">API 키</button>
-        <button type="button" data-personal-target="knowledge">코드 지식</button>
-        <button type="button" data-personal-target="activity">내 활동</button>
-      </nav>
-      <section id="account" class="personal-panel" hidden>
-        <h2>내 계정</h2>
-        <p id="identity"></p>
-        <p id="profile-version" class="version-text"></p>
-      </section>
-      <section id="connections" class="grid personal-panel" hidden>
-        <article>
-          <h2>내 MCP 연결</h2>
-          <pre>{
+    <div class="shell">
+      <aside id="app-sidebar" class="sidebar" aria-label="주요 메뉴" hidden>
+        <nav id="workspace-menu" class="workspace-menu" aria-label="업무 영역">
+          <button type="button" data-workspace="personal">내 공간</button>
+          <button id="admin-workspace-button" type="button" data-workspace="admin" hidden>관리자</button>
+        </nav>
+        <nav id="personal-menu" class="side-nav" aria-label="개인화 메뉴">
+          <p class="side-nav-title">내 공간</p>
+          <button type="button" data-personal-target="account"><span class="nav-icon">👤</span>프로필</button>
+          <button type="button" data-personal-target="connections"><span class="nav-icon">🔌</span>MCP 연결</button>
+          <button type="button" data-personal-target="keys"><span class="nav-icon">🔑</span>API 키</button>
+          <button type="button" data-personal-target="knowledge"><span class="nav-icon">🔍</span>코드 지식</button>
+          <button type="button" data-personal-target="activity"><span class="nav-icon">📈</span>내 활동</button>
+        </nav>
+        <nav id="admin-menu" class="side-nav" aria-label="관리자 메뉴" hidden></nav>
+      </aside>
+      <main id="main-content">
+        <section class="panel welcome-panel">
+          <h1>Context7 호환 사내 문서 검색</h1>
+          <p>
+            Bitbucket과 GitLab 문서를 저장소 권한에 맞게 검색하고 AI 개발 도구에
+            연결합니다.
+          </p>
+          <p id="entry-description">
+            Keycloak SSO로 로그인하여 접근 가능한 문서를 검색하고 MCP 키를 관리하세요.
+          </p>
+          <p><a id="admin-entry-link" href="/admin">관리자 화면으로 이동</a></p>
+          <p id="login-version" class="version-text">서비스 버전 확인 중…</p>
+          <div class="status-row" aria-live="polite">
+            <div id="status" class="notice">서버 상태 확인 중…</div>
+            <div id="database-status" class="notice">메타 DB 연결 확인 중…</div>
+            <div id="service-notice" class="notice" hidden></div>
+          </div>
+        </section>
+        <div id="personal-workspace" class="workspace" hidden>
+          <section id="account" class="panel personal-panel" hidden>
+            <div class="section-title">
+              <div><h2>내 계정</h2><p>Keycloak 신원, 플랫폼 역할과 소스 ACL Principal입니다.</p></div>
+              <button class="secondary" type="button" data-guide="acl">권한 가이드</button>
+            </div>
+            <p id="identity"></p>
+            <div id="account-access" class="access-grid"></div>
+            <p id="profile-version" class="version-text"></p>
+          </section>
+          <section id="connections" class="personal-panel" hidden>
+            <div class="grid">
+              <article class="panel">
+                <h2>내 MCP 연결</h2>
+                <pre>{
   "mcpServers": {
     "git-ctx": {
       "url": "<span id="endpoint"></span>/mcp",
@@ -81,488 +96,460 @@
     }
   }
 }</pre>
-          <p>키 원문은 환경변수에 저장하고 설정 파일에는 넣지 마세요.</p>
-        </article>
-        <article>
-          <h2>지원 도구</h2>
-          <dl>
-            <dt>resolve-library-id</dt>
-            <dd>접근 가능한 라이브러리 ID 후보 검색</dd>
-            <dt>query-docs</dt>
-            <dd>버전별 문서와 코드 예제를 출처와 함께 검색</dd>
-            <dt>search-repositories</dt>
-            <dd>Library ID 없이 접근 가능한 Bitbucket·GitLab 저장소 검색</dd>
-            <dt>search-source</dt>
-            <dd>Bitbucket·GitLab Query API 기반 소스 검색</dd>
-            <dt>get-repository-map</dt>
-            <dd>저장소 언어·구조·진입점과 주요 설정 파일 조회</dd>
-            <dt>find-symbol / get-symbol-context</dt>
-            <dd>함수·메서드·클래스·인터페이스 검색과 정의 문맥 조회</dd>
-            <dt>trace-dependencies / compare-refs / get-change-impact</dt>
-            <dd>의존 관계 추적, branch·tag 비교와 변경 영향 분석</dd>
-            <dt>get-context-pack / find-runbook / export-context</dt>
-            <dd>업무 단위 복합 검색, 운영 절차 검색과 안전한 Markdown 내보내기</dd>
-            <dt>explain-search-result</dt>
-            <dd>검색 후보의 키워드 근거, 모델 버전과 원문 line 범위 설명</dd>
-          </dl>
-        </article>
-      </section>
-      <section id="keys" class="personal-panel" hidden>
-        <div class="section-title">
-          <div>
-            <h2>내 MCP API 키</h2>
-            <p>전체 키는 생성 직후 한 번만 표시됩니다.</p>
-          </div>
-          <button id="new-key">새 키 만들기</button>
-        </div>
-        <form id="key-form" class="form-row" hidden>
-          <label
-            >이름<input
-              name="name"
-              required
-              maxlength="100"
-              placeholder="Codex 노트북" /></label
-          ><label>만료일<input name="expiresAt" type="date" /></label>
-          <fieldset>
-            <legend>허용 도구</legend>
-            <label
-              ><input
-                type="checkbox"
-                name="scope"
-                value="resolve-library-id"
-                checked
-              />
-              resolve-library-id</label
-            ><label
-              ><input type="checkbox" name="scope" value="query-docs" checked />
-              query-docs</label
-            ><label
-              ><input type="checkbox" name="scope" value="search-repositories" checked />
-              search-repositories</label
-            ><label
-              ><input type="checkbox" name="scope" value="search-source" checked />
-              search-source</label
-            ><label
-              ><input type="checkbox" name="scope" value="search-code" checked />
-              search-code</label
-            ><label
-              ><input type="checkbox" name="scope" value="get-repository-map" checked />
-              get-repository-map</label
-            ><label
-              ><input type="checkbox" name="scope" value="find-symbol" checked />
-              find-symbol</label
-            ><label
-              ><input type="checkbox" name="scope" value="get-symbol-context" checked />
-              get-symbol-context</label
-            ><label
-              ><input type="checkbox" name="scope" value="trace-dependencies" checked />
-              trace-dependencies</label
-            ><label
-              ><input type="checkbox" name="scope" value="compare-refs" checked />
-              compare-refs</label
-            ><label
-              ><input type="checkbox" name="scope" value="get-change-impact" checked />
-              get-change-impact</label
-            ><label
-              ><input type="checkbox" name="scope" value="get-context-pack" checked />
-              get-context-pack</label
-            ><label
-              ><input type="checkbox" name="scope" value="find-runbook" checked />
-              find-runbook</label
-            ><label
-              ><input type="checkbox" name="scope" value="export-context" checked />
-              export-context</label
-            ><label
-              ><input type="checkbox" name="scope" value="explain-search-result" checked />
-              explain-search-result</label
-            >
-          </fieldset>
-          <fieldset id="admin-key-scopes" hidden>
-            <legend>관리자 MCP 도구</legend>
-            <label><input type="checkbox" name="scope" value="get-platform-status" /> get-platform-status</label>
-            <label><input type="checkbox" name="scope" value="list-index-jobs" /> list-index-jobs</label>
-            <label><input type="checkbox" name="scope" value="reindex-repository" /> reindex-repository</label>
-          </fieldset>
-          <label
-            >허용 CIDR<input
-              name="cidrs"
-              placeholder="10.0.0.0/8, 192.168.1.0/24" /></label
-          ><label
-            >허용 저장소 Library ID<input
-              name="repositories"
-              placeholder="/kcb/clustara, /ops/agent" /></label
-          ><label
-            >분당 제한<input
-              name="rateMinute"
-              type="number"
-              min="0"
-              value="0" /></label
-          ><label
-            >시간당 제한<input
-              name="rateHour"
-              type="number"
-              min="0"
-              value="0" /></label
-          ><label
-            >일일 제한<input
-              name="rateDay"
-              type="number"
-              min="0"
-              value="0" /></label
-          ><button type="submit">생성</button>
-        </form>
-        <div id="secret" class="secret" hidden></div>
-        <div id="key-list" class="table-wrap"></div>
-      </section>
-      <section id="knowledge" class="personal-panel" hidden>
-        <h2>코드 지식 검색</h2>
-        <p>색인된 저장소 구조와 코드 심볼을 ACL 범위 안에서 조회합니다.</p>
-        <div class="grid">
-          <article>
-            <h3>Source Query Search</h3>
-            <form id="search-code-form" class="form-row">
-              <label>질의<input name="query" required placeholder="dify 소스 검색해" /></label>
-              <label>소스<select name="sourceType"><option value="">전체</option><option value="bitbucket">Bitbucket</option><option value="gitlab">GitLab</option><option value="confluence">Confluence</option><option value="jira">Jira</option></select></label>
-              <label>프로젝트 (선택)<input name="project" /></label>
-              <label>저장소 (선택)<input name="repository" /></label>
-              <button type="submit">원격 소스 검색</button>
-            </form>
-          </article>
-          <article>
-            <h3>Repository Map</h3>
-            <form id="repository-map-form" class="form-row">
-              <label>Library ID<input name="libraryId" required placeholder="/kcb/clustara" /></label>
-              <label>Ref<input name="ref" placeholder="main" /></label>
-              <button type="submit">구조 조회</button>
-            </form>
-          </article>
-          <article>
-            <h3>Symbol Search</h3>
-            <form id="symbol-search-form" class="form-row">
-              <label>Library ID<input name="libraryId" placeholder="/kcb/clustara" /></label>
-              <label>심볼<input name="query" required placeholder="Service.GetGPU" /></label>
-              <label>종류<input name="kind" placeholder="method" /></label>
-              <button type="submit">심볼 검색</button>
-            </form>
-          </article>
-          <article>
-            <h3>Dependency Trace</h3>
-            <form id="dependency-form" class="form-row">
-              <label>Library ID<input name="libraryId" required placeholder="/kcb/clustara" /></label>
-              <label>Ref<input name="ref" placeholder="main" /></label>
-              <label>심볼 또는 모듈<input name="symbol" required placeholder="Service.GetGPU" /></label>
-              <button type="submit">의존성 추적</button>
-            </form>
-          </article>
-          <article>
-            <h3>Change Impact</h3>
-            <form id="change-impact-form" class="form-row">
-              <label>Library ID<input name="libraryId" required placeholder="/kcb/clustara" /></label>
-              <label>기준 Ref<input name="baseRef" required placeholder="main" /></label>
-              <label>비교 Ref<input name="headRef" required placeholder="release/v1" /></label>
-              <button type="submit">변경 영향 분석</button>
-            </form>
-          </article>
-          <article>
-            <h3>Context Pack</h3>
-            <form id="context-pack-form" class="form-row">
-              <label>Pack Slug<input name="pack" required placeholder="gpu-platform" /></label>
-              <label>질의<input name="query" required placeholder="GPU 장애 대응과 관련 API" /></label>
-              <button type="submit">Pack 검색</button>
-            </form>
-          </article>
-          <article>
-            <h3>Runbook Search</h3>
-            <form id="runbook-form" class="form-row">
-              <label>Library ID<input name="libraryId" placeholder="/kcb/clustara" /></label>
-              <label>증상 또는 작업<input name="query" required placeholder="GPU 메트릭 누락" /></label>
-              <button type="submit">Runbook 검색</button>
-            </form>
-          </article>
-          <article>
-            <h3>Safe Context Export</h3>
-            <form id="context-export-form" class="form-row">
-              <label>Library IDs<input name="libraryIds" required placeholder="/kcb/api, /kcb/agent" /></label>
-              <label>질의<input name="query" required placeholder="인증 API 구현" /></label>
-              <button type="submit">Markdown Export</button>
-            </form>
-          </article>
-        </div>
-        <pre id="knowledge-result">검색 결과가 여기에 표시됩니다.</pre>
-      </section>
-      <section id="activity" class="personal-panel" hidden>
-        <h2>내 저장소와 MCP 사용량</h2>
-        <h3>알림</h3>
-        <div id="my-notifications" class="table-wrap"></div>
-        <h3>접근 가능한 저장소</h3>
-        <div id="my-repositories" class="table-wrap"></div>
-        <h3>사용량</h3>
-        <div id="my-usage" class="table-wrap"></div>
-        <h3>최근 호출</h3>
-        <div id="my-calls" class="table-wrap"></div>
-      </section>
-      </div>
-      <section id="admin" hidden>
-        <div class="admin-heading">
-          <div><h2>git-ctx 관리자</h2><p>연동, 검색, 보안과 운영 상태를 메뉴별로 관리합니다.</p></div>
-        </div>
-        <nav id="admin-menu" class="admin-menu" aria-label="관리자 메뉴"></nav>
-        <div id="settings-admin" class="admin-panel" hidden>
-          <h2>관리자 설정</h2>
-          <p>
-            설정은 암호화되어 버전별 저장됩니다. Secret, PAT, Token은 재조회 시
-            마스킹됩니다.
-          </p>
-          <div id="setting-tabs" class="setting-tabs" role="tablist" aria-label="설정 종류"></div>
-          <div class="admin-editor">
-            <select id="category" hidden aria-hidden="true"></select>
-            <div id="setting-context" class="wide setting-context"></div>
-            <div id="setting-load-status" class="wide notice" aria-live="polite"></div>
-            <div id="keycloak-runtime-status" class="wide notice" hidden></div>
-            <div id="setting-fields" class="form-row wide"></div>
-            <details id="advanced-setting-json" class="wide advanced-json">
-              <summary>고급 JSON 설정</summary>
-              <label>JSON 설정<textarea id="setting-json" rows="16" spellcheck="false">{}</textarea></label>
-            </details>
-            <div class="wide setting-actions">
-              <button id="test-connection">연결 테스트·검증</button>
-              <button id="preview-keycloak">Claim·역할 미리보기</button>
-              <button id="login-keycloak" class="secondary">Keycloak 로그인 시험</button>
-              <button id="save-setting">저장</button>
-              <button id="delete-setting" class="danger">설정 삭제</button>
+                <p>키 원문은 환경변수에 저장하고 설정 파일에는 넣지 마세요.</p>
+                <button class="secondary" type="button" data-guide="mcp-client">클라이언트 연결 가이드</button>
+              </article>
+              <article class="panel">
+                <h2>지원 도구</h2>
+                <dl>
+                  <dt>resolve-library-id</dt>
+                  <dd>접근 가능한 라이브러리 ID 후보 검색</dd>
+                  <dt>query-docs</dt>
+                  <dd>버전별 문서와 코드 예제를 출처와 함께 검색</dd>
+                  <dt>search-repositories</dt>
+                  <dd>Library ID 없이 접근 가능한 Bitbucket·GitLab 저장소 검색</dd>
+                  <dt>search-source</dt>
+                  <dd>Bitbucket·GitLab Query API 기반 소스 검색</dd>
+                  <dt>search-code</dt>
+                  <dd>저장소 이름과 코드 본문을 한 번에 검색</dd>
+                  <dt>get-repository-map</dt>
+                  <dd>저장소 언어·구조·진입점과 주요 설정 파일 조회</dd>
+                  <dt>find-symbol / get-symbol-context</dt>
+                  <dd>함수·메서드·클래스·인터페이스 검색과 정의 문맥 조회</dd>
+                  <dt>trace-dependencies / compare-refs / get-change-impact</dt>
+                  <dd>의존 관계 추적, branch·tag 비교와 변경 영향 분석</dd>
+                  <dt>get-context-pack / find-runbook / export-context</dt>
+                  <dd>업무 단위 복합 검색, 운영 절차 검색과 안전한 Markdown 내보내기</dd>
+                  <dt>explain-search-result</dt>
+                  <dd>검색 후보의 키워드 근거, 모델 버전과 원문 line 범위 설명</dd>
+                </dl>
+              </article>
             </div>
-          </div>
-        </div>
-        <div id="admin-result" class="notice"></div>
-        <div id="users-admin-section" class="admin-panel" hidden>
-          <div class="section-title">
-            <div><h2>사용자 관리</h2><p>Keycloak 사용자를 등록·조회·수정·삭제하고 역할을 관리합니다. 최고관리자는 모든 관리자 설정과 운영 기능을 사용할 수 있습니다.</p></div>
-            <button id="new-admin-user">사용자 추가</button>
-          </div>
-          <form id="admin-user-form" class="form-row" hidden>
-            <input id="admin-user-id" type="hidden" />
-            <label>Keycloak Subject<input id="admin-user-subject" required placeholder="Keycloak 사용자 UUID" /></label>
-            <label>사용자명<input id="admin-user-username" required /></label>
-            <label>이메일<input id="admin-user-email" type="email" /></label>
-            <label>상태<select id="admin-user-status"><option value="active">활성</option><option value="disabled">비활성</option></select></label>
-            <fieldset id="admin-user-roles" class="wide"><legend>플랫폼 역할</legend></fieldset>
-            <div class="button-row"><button id="save-admin-user" type="submit">저장</button><button id="cancel-admin-user" type="button" class="secondary">취소</button></div>
-          </form>
-          <div id="admin-users" class="table-wrap"></div>
-        </div>
-        <div id="mcp-admin-section" class="admin-panel" hidden>
-          <hr />
-          <h2>MCP 도구 운영</h2>
-          <div id="mcp-tools" class="table-wrap"></div>
-        </div>
-        <div id="source-admin-section" class="admin-panel" hidden>
-          <hr />
-          <h2>소스와 색인 운영</h2>
-          <div class="form-row">
-            <label
-              >소스<select id="source-type">
-                <option>bitbucket</option>
-                <option>gitlab</option>
-                <option>confluence</option>
-                <option>jira</option>
-              </select></label
-            ><label
-              >프로젝트 Key / Group ID<input
-                id="project-key"
-                placeholder="비우면 프로젝트 목록 조회"
-            /></label>
-            <div>
-              <button id="discover">소스 탐색</button>
-              <button id="refresh-ops">현황 새로고침</button>
+          </section>
+          <section id="keys" class="panel personal-panel" hidden>
+            <div class="section-title">
+              <div>
+                <h2>내 MCP API 키</h2>
+                <p>전체 키는 생성 직후 한 번만 표시됩니다.</p>
+              </div>
+              <div class="button-row">
+                <button class="secondary" type="button" data-guide="api-keys">키 발급 가이드</button>
+                <button id="new-key">새 키 만들기</button>
+              </div>
             </div>
-          </div>
-          <div id="discovery" class="table-wrap"></div>
-          <h3>최신성 SLO</h3>
-          <div id="freshness" class="table-wrap"></div>
-          <h3>등록 저장소</h3>
-          <div id="repositories" class="table-wrap"></div>
-          <h3>최근 색인 작업</h3>
-          <div id="jobs" class="table-wrap"></div>
-        </div>
-        <div id="status-admin-section" class="admin-panel" hidden>
-          <hr />
-          <h2>운영 상태</h2>
-          <div id="system-health" class="notice"></div>
-        </div>
-        <div id="database-admin-section" class="admin-panel" hidden>
-          <hr />
-          <div class="section-title">
-            <div><h2>메타 데이터베이스</h2><p>DSN 원문 없이 실제 연결과 migration 상태를 진단합니다.</p></div>
-            <button id="refresh-database">연결 다시 확인</button>
-          </div>
-          <div id="admin-database-status" class="status-grid"></div>
-          <div id="database-migration" class="card subtle-card">
-            <h3>PostgreSQL 연결 및 전환</h3>
-            <p>복구 SQLite로 기동된 경우 PostgreSQL을 읽기 전용으로 시험한 뒤, 명시적 확인을 거쳐 스키마와 데이터를 이전합니다. DSN 원문은 암호화 저장되고 다시 표시되지 않습니다.</p>
-            <form id="database-form" class="form-row">
-              <label class="wide">PostgreSQL DSN<input id="database-dsn" type="password" required autocomplete="new-password" placeholder="postgres://user:password@db:5432/gitctx?sslmode=require" /></label>
-              <label>마이그레이션 확인<input id="database-confirm" placeholder="MIGRATE TO POSTGRES" /></label>
-              <div class="button-row"><button id="test-database" type="button">연결 시험</button><button id="migrate-database" type="button" class="danger">데이터 이전</button></div>
+            <form id="key-form" class="form-row" hidden>
+              <label>이름<input name="name" required maxlength="100" placeholder="Codex 노트북" /></label>
+              <label>만료일<input name="expiresAt" type="date" /></label>
+              <fieldset class="wide">
+                <legend>허용 도구</legend>
+                <div class="scope-grid">
+                  <label><input type="checkbox" name="scope" value="resolve-library-id" checked /> resolve-library-id</label>
+                  <label><input type="checkbox" name="scope" value="query-docs" checked /> query-docs</label>
+                  <label><input type="checkbox" name="scope" value="search-repositories" checked /> search-repositories</label>
+                  <label><input type="checkbox" name="scope" value="search-source" checked /> search-source</label>
+                  <label><input type="checkbox" name="scope" value="search-code" checked /> search-code</label>
+                  <label><input type="checkbox" name="scope" value="get-repository-map" checked /> get-repository-map</label>
+                  <label><input type="checkbox" name="scope" value="find-symbol" checked /> find-symbol</label>
+                  <label><input type="checkbox" name="scope" value="get-symbol-context" checked /> get-symbol-context</label>
+                  <label><input type="checkbox" name="scope" value="trace-dependencies" checked /> trace-dependencies</label>
+                  <label><input type="checkbox" name="scope" value="compare-refs" checked /> compare-refs</label>
+                  <label><input type="checkbox" name="scope" value="get-change-impact" checked /> get-change-impact</label>
+                  <label><input type="checkbox" name="scope" value="get-context-pack" checked /> get-context-pack</label>
+                  <label><input type="checkbox" name="scope" value="find-runbook" checked /> find-runbook</label>
+                  <label><input type="checkbox" name="scope" value="export-context" checked /> export-context</label>
+                  <label><input type="checkbox" name="scope" value="explain-search-result" checked /> explain-search-result</label>
+                </div>
+              </fieldset>
+              <fieldset id="admin-key-scopes" class="wide" hidden>
+                <legend>관리자 MCP 도구</legend>
+                <div class="scope-grid">
+                  <label><input type="checkbox" name="scope" value="get-platform-status" /> get-platform-status</label>
+                  <label><input type="checkbox" name="scope" value="list-index-jobs" /> list-index-jobs</label>
+                  <label><input type="checkbox" name="scope" value="reindex-repository" /> reindex-repository</label>
+                </div>
+              </fieldset>
+              <label>허용 CIDR<input name="cidrs" placeholder="10.0.0.0/8, 192.168.1.0/24" /></label>
+              <label>허용 저장소 Library ID<input name="repositories" placeholder="/kcb/clustara, /ops/agent" /></label>
+              <label>분당 제한<input name="rateMinute" type="number" min="0" value="0" /></label>
+              <label>시간당 제한<input name="rateHour" type="number" min="0" value="0" /></label>
+              <label>일일 제한<input name="rateDay" type="number" min="0" value="0" /></label>
+              <div class="wide button-row"><button type="submit">생성</button></div>
             </form>
-            <div id="database-action-result" class="notice" hidden></div>
-          </div>
+            <div id="secret" class="secret" hidden></div>
+            <div id="key-list" class="table-wrap"></div>
+          </section>
+          <section id="knowledge" class="panel personal-panel" hidden>
+            <div class="section-title">
+              <div>
+                <h2>코드 지식 검색</h2>
+                <p>색인된 저장소 구조와 코드 심볼을 ACL 범위 안에서 조회합니다.</p>
+              </div>
+              <button class="secondary" type="button" data-guide="code-search">검색 가이드</button>
+            </div>
+            <div class="grid">
+              <article class="card">
+                <h3>Source Query Search</h3>
+                <form id="search-code-form" class="form-row">
+                  <label class="wide">질의<input name="query" required placeholder="dify 소스 검색해" /></label>
+                  <label>소스<select name="sourceType"><option value="">전체</option><option value="bitbucket">Bitbucket</option><option value="gitlab">GitLab</option><option value="confluence">Confluence</option><option value="jira">Jira</option></select></label>
+                  <label>프로젝트 (선택)<input name="project" /></label>
+                  <label>저장소 (선택)<input name="repository" /></label>
+                  <label>Ref (선택)<input name="ref" placeholder="main" /></label>
+                  <div class="wide button-row"><button type="submit">원격 소스 검색</button></div>
+                </form>
+              </article>
+              <article class="card">
+                <h3>Repository Map</h3>
+                <form id="repository-map-form" class="form-row">
+                  <label>Library ID<input name="libraryId" required placeholder="/kcb/clustara" /></label>
+                  <label>Ref<input name="ref" placeholder="main" /></label>
+                  <div class="wide button-row"><button type="submit">구조 조회</button></div>
+                </form>
+              </article>
+              <article class="card">
+                <h3>Symbol Search</h3>
+                <form id="symbol-search-form" class="form-row">
+                  <label>Library ID<input name="libraryId" placeholder="/kcb/clustara" /></label>
+                  <label>심볼<input name="query" required placeholder="Service.GetGPU" /></label>
+                  <label>종류<input name="kind" placeholder="method" /></label>
+                  <div class="wide button-row"><button type="submit">심볼 검색</button></div>
+                </form>
+              </article>
+              <article class="card">
+                <h3>Dependency Trace</h3>
+                <form id="dependency-form" class="form-row">
+                  <label>Library ID<input name="libraryId" required placeholder="/kcb/clustara" /></label>
+                  <label>Ref<input name="ref" placeholder="main" /></label>
+                  <label class="wide">심볼 또는 모듈<input name="symbol" required placeholder="Service.GetGPU" /></label>
+                  <div class="wide button-row"><button type="submit">의존성 추적</button></div>
+                </form>
+              </article>
+              <article class="card">
+                <h3>Change Impact</h3>
+                <form id="change-impact-form" class="form-row">
+                  <label class="wide">Library ID<input name="libraryId" required placeholder="/kcb/clustara" /></label>
+                  <label>기준 Ref<input name="baseRef" required placeholder="main" /></label>
+                  <label>비교 Ref<input name="headRef" required placeholder="release/v1" /></label>
+                  <div class="wide button-row"><button type="submit">변경 영향 분석</button></div>
+                </form>
+              </article>
+              <article class="card">
+                <h3>Context Pack</h3>
+                <form id="context-pack-form" class="form-row">
+                  <label>Pack Slug<input name="pack" required placeholder="gpu-platform" /></label>
+                  <label>질의<input name="query" required placeholder="GPU 장애 대응과 관련 API" /></label>
+                  <div class="wide button-row"><button type="submit">Pack 검색</button></div>
+                </form>
+              </article>
+              <article class="card">
+                <h3>Runbook Search</h3>
+                <form id="runbook-form" class="form-row">
+                  <label>Library ID<input name="libraryId" placeholder="/kcb/clustara" /></label>
+                  <label>증상 또는 작업<input name="query" required placeholder="GPU 메트릭 누락" /></label>
+                  <div class="wide button-row"><button type="submit">Runbook 검색</button></div>
+                </form>
+              </article>
+              <article class="card">
+                <h3>Safe Context Export</h3>
+                <form id="context-export-form" class="form-row">
+                  <label class="wide">Library IDs<input name="libraryIds" required placeholder="/kcb/api, /kcb/agent" /></label>
+                  <label class="wide">질의<input name="query" required placeholder="인증 API 구현" /></label>
+                  <div class="wide button-row"><button type="submit">Markdown Export</button></div>
+                </form>
+              </article>
+            </div>
+            <pre id="knowledge-result">검색 결과가 여기에 표시됩니다.</pre>
+          </section>
+          <section id="activity" class="panel personal-panel" hidden>
+            <h2>내 저장소와 MCP 사용량</h2>
+            <h3>알림</h3>
+            <div id="my-notifications" class="table-wrap"></div>
+            <h3>접근 가능한 저장소</h3>
+            <div id="my-repositories" class="table-wrap"></div>
+            <h3>사용량</h3>
+            <div id="my-usage" class="table-wrap"></div>
+            <h3>최근 호출</h3>
+            <div id="my-calls" class="table-wrap"></div>
+          </section>
         </div>
-        <div id="backup-admin-section" class="admin-panel" hidden>
-          <hr />
-          <div class="section-title">
-            <div>
-              <h2>백업과 복구</h2>
+        <div id="admin" hidden>
+          <div id="admin-result" class="notice" hidden></div>
+          <section id="settings-admin" class="panel admin-panel" hidden>
+            <div class="section-title">
+              <div>
+                <h2>관리자 설정</h2>
+                <p>설정은 암호화되어 버전별 저장됩니다. Secret, PAT, Token은 재조회 시 마스킹됩니다.</p>
+              </div>
+              <div class="button-row">
+                <button id="acl-guide-button" class="secondary" type="button" data-guide="acl">ACL 설정 가이드</button>
+                <button id="setting-guide-button" class="secondary" type="button">이 탭 가이드</button>
+              </div>
+            </div>
+            <div class="settings-layout">
+              <div class="settings-side">
+                <label class="search-field">설정 검색<input id="setting-search" type="search" placeholder="예: gitlab, 알림" autocomplete="off" /></label>
+                <div id="setting-tabs" class="setting-tabs" role="tablist" aria-label="설정 종류"></div>
+              </div>
+              <div class="admin-editor">
+                <select id="category" hidden aria-hidden="true"></select>
+                <div id="setting-context" class="wide setting-context"></div>
+                <div id="setting-load-status" class="wide notice" aria-live="polite"></div>
+                <div id="keycloak-runtime-status" class="wide notice" hidden></div>
+                <div id="setting-fields" class="form-row wide"></div>
+                <div id="keycloak-mapping-card" class="wide card subtle-card" hidden>
+                  <div class="section-title">
+                    <div>
+                      <h3>Keycloak 역할·Claim 매핑 (ACL)</h3>
+                      <p>Keycloak 역할 이름을 플랫폼 역할로 연결합니다. 매핑이 없으면 관리자도 설정을 수정할 수 없습니다.</p>
+                    </div>
+                    <button class="secondary" type="button" data-guide="acl">자세한 설정 방법</button>
+                  </div>
+                  <div id="keycloak-role-mappings" class="table-wrap"></div>
+                  <div class="form-row">
+                    <label>Keycloak 역할 이름<input id="mapping-source-role" placeholder="git-ctx-admin" /></label>
+                    <label>매핑 종류<select id="mapping-kind"><option value="realm">Realm 역할</option><option value="client">Client 역할</option></select></label>
+                    <label>플랫폼 역할<select id="mapping-platform-role"></select></label>
+                    <div class="button-row"><button id="add-role-mapping" type="button">매핑 추가</button></div>
+                  </div>
+                  <div class="form-row">
+                    <label>Bitbucket 사용자 Claim<input id="claim-bitbucket" placeholder="bitbucket_user_slug" /></label>
+                    <label>GitLab 사용자 ID Claim<input id="claim-gitlab" placeholder="gitlab_user_id" /></label>
+                    <label>그룹 Claim<input id="claim-groups" placeholder="groups" /></label>
+                  </div>
+                </div>
+                <div id="source-test-card" class="wide card subtle-card" hidden>
+                  <div class="section-title">
+                    <div>
+                      <h3>연동 즉시 검증</h3>
+                      <p>저장된 설정으로 실제 원격 코드 검색을 실행해 결과 건수와 차단 사유를 확인합니다. 값을 바꿨다면 먼저 저장하세요.</p>
+                    </div>
+                  </div>
+                  <form id="source-test-form" class="form-row">
+                    <label>검색어<input id="source-test-query" placeholder="README" /></label>
+                    <label>프로젝트/그룹 (선택)<input id="source-test-project" /></label>
+                    <div class="button-row"><button type="submit">검색 테스트 실행</button></div>
+                  </form>
+                  <div id="source-test-result" class="result-panel" hidden></div>
+                </div>
+                <details id="advanced-setting-json" class="wide advanced-json">
+                  <summary>고급 JSON 설정</summary>
+                  <label>JSON 설정<textarea id="setting-json" rows="16" spellcheck="false">{}</textarea></label>
+                </details>
+                <div id="setting-test-result" class="wide result-panel" hidden></div>
+                <div class="wide setting-actions">
+                  <button id="validate-setting" class="secondary">설정 검증</button>
+                  <button id="test-connection">연결 테스트·검증</button>
+                  <button id="preview-keycloak" class="secondary">Claim·역할 미리보기</button>
+                  <button id="login-keycloak" class="secondary">Keycloak 로그인 시험</button>
+                  <button id="save-setting">저장</button>
+                  <button id="delete-setting" class="danger">설정 삭제</button>
+                </div>
+              </div>
+            </div>
+          </section>
+          <section id="users-admin-section" class="panel admin-panel" hidden>
+            <div class="section-title">
+              <div><h2>사용자 관리</h2><p>Keycloak 사용자를 등록·조회·수정·삭제하고 역할을 관리합니다. 최고관리자는 모든 관리자 설정과 운영 기능을 사용할 수 있습니다.</p></div>
+              <div class="button-row">
+                <button class="secondary" type="button" data-guide="users">사용자 관리 가이드</button>
+                <button id="new-admin-user">사용자 추가</button>
+              </div>
+            </div>
+            <form id="admin-user-form" class="form-row" hidden>
+              <input id="admin-user-id" type="hidden" />
+              <label>Keycloak Subject<input id="admin-user-subject" required placeholder="Keycloak 사용자 UUID" /></label>
+              <label>사용자명<input id="admin-user-username" required /></label>
+              <label>이메일<input id="admin-user-email" type="email" /></label>
+              <label>상태<select id="admin-user-status"><option value="active">활성</option><option value="disabled">비활성</option></select></label>
+              <fieldset id="admin-user-roles" class="wide"><legend>플랫폼 역할</legend></fieldset>
+              <div class="button-row"><button id="save-admin-user" type="submit">저장</button><button id="cancel-admin-user" type="button" class="secondary">취소</button></div>
+            </form>
+            <div id="admin-users" class="table-wrap"></div>
+          </section>
+          <section id="mcp-admin-section" class="panel admin-panel" hidden>
+            <div class="section-title">
+              <div><h2>MCP 도구 운영</h2><p>도구별 활성화, Timeout과 캐시를 조정합니다.</p></div>
+              <button class="secondary" type="button" data-guide="mcp">MCP 운영 가이드</button>
+            </div>
+            <div id="mcp-tools" class="table-wrap"></div>
+          </section>
+          <section id="source-admin-section" class="panel admin-panel" hidden>
+            <div class="section-title">
+              <div><h2>소스와 색인 운영</h2><p>저장소를 탐색·등록하고 색인 작업과 최신성을 관리합니다.</p></div>
+              <button class="secondary" type="button" data-guide="indexing">색인 운영 가이드</button>
+            </div>
+            <div class="form-row">
+              <label>소스<select id="source-type">
+                  <option>bitbucket</option>
+                  <option>gitlab</option>
+                  <option>confluence</option>
+                  <option>jira</option>
+                </select></label>
+              <label>프로젝트 Key / Group ID<input id="project-key" placeholder="비우면 프로젝트 목록 조회" /></label>
+              <div class="button-row">
+                <button id="discover">소스 탐색</button>
+                <button id="refresh-ops" class="secondary">현황 새로고침</button>
+              </div>
+            </div>
+            <div id="discovery" class="table-wrap"></div>
+            <h3>최신성 SLO</h3>
+            <div id="freshness" class="table-wrap"></div>
+            <h3>등록 저장소</h3>
+            <div id="repositories" class="table-wrap"></div>
+            <h3>최근 색인 작업</h3>
+            <div id="jobs" class="table-wrap"></div>
+          </section>
+          <section id="quality-admin-section" class="panel admin-panel" hidden>
+            <div class="section-title">
+              <div>
+                <h2>Context Pack 관리</h2>
+                <p>업무 시스템 단위로 여러 Library와 ref를 묶어 MCP 검색 범위를 구성합니다.</p>
+              </div>
+              <div class="button-row">
+                <button class="secondary" type="button" data-guide="quality">검색 품질 가이드</button>
+                <button id="refresh-context-packs" class="secondary">새로고침</button>
+              </div>
+            </div>
+            <form id="context-pack-admin-form" class="form-row">
+              <input id="context-pack-id" type="hidden" />
+              <label>Slug<input id="context-pack-slug" required placeholder="gpu-platform" /></label>
+              <label>이름<input id="context-pack-name" required placeholder="GPU Platform" /></label>
+              <label class="wide">설명<input id="context-pack-description" placeholder="GPU 서비스, 에이전트와 운영 문서" /></label>
+              <label class="wide">Library 항목<textarea id="context-pack-items" required placeholder="/kcb/api|main|API&#10;/kcb/agent|release/v1|agent"></textarea></label>
+              <label class="toggle-control"><span>활성화</span><span class="toggle-row"><input id="context-pack-enabled" type="checkbox" checked /></span></label>
+              <div class="button-row"><button type="submit">저장</button><button id="reset-context-pack" type="button" class="secondary">새 항목</button></div>
+            </form>
+            <div id="context-pack-list" class="table-wrap"></div>
+            <hr />
+            <div class="section-title">
+              <div>
+                <h2>검색 품질 벤치마크</h2>
+                <p>정답 파일을 기준으로 Recall@K, MRR, nDCG@K 회귀를 검사합니다.</p>
+              </div>
+              <button id="refresh-quality" class="secondary">새로고침</button>
+            </div>
+            <div id="quality-write-section" class="form-row">
+              <label>이름<input id="quality-name" placeholder="GPU API 검색" /></label>
+              <label>Library ID<input id="quality-library" placeholder="/kcb/clustara/main" /></label>
+              <label class="wide">질의<input id="quality-query" placeholder="Pod별 GPU 사용량 API" /></label>
+              <label>ACL Principal<input id="quality-principals" placeholder="alice,group:platform" /></label>
+              <label>정답 파일<input id="quality-sources" placeholder="docs/gpu.md,internal/gpu.go" /></label>
+              <div class="button-row"><button id="create-quality-case">평가 사례 추가</button></div>
+            </div>
+            <h3>평가 사례</h3>
+            <div id="quality-cases" class="table-wrap"></div>
+            <div id="quality-run-controls" class="form-row">
+              <label>Top K<input id="quality-top-k" type="number" min="1" max="50" value="8" /></label>
+              <label>최소 Recall<input id="quality-min-recall" type="number" min="0" max="1" step="0.01" value="0.8" /></label>
+              <label>최소 MRR<input id="quality-min-mrr" type="number" min="0" max="1" step="0.01" value="0.7" /></label>
+              <label>최소 nDCG<input id="quality-min-ndcg" type="number" min="0" max="1" step="0.01" value="0.7" /></label>
+              <div class="button-row"><button id="run-quality">벤치마크 실행</button></div>
+            </div>
+            <h3>실행 이력</h3>
+            <div id="quality-runs" class="table-wrap"></div>
+            <h3>사례별 결과</h3>
+            <div id="quality-results" class="table-wrap"></div>
+          </section>
+          <section id="security-admin-section" class="panel admin-panel" hidden>
+            <div class="section-title">
+              <div><h2>보안</h2><p>관리 Secret, 발급된 API 키와 색인 보안 이벤트입니다.</p></div>
+              <button class="secondary" type="button" data-guide="security_ops">보안 운영 가이드</button>
+            </div>
+            <div id="security-keys-section">
+              <h3>관리 비밀정보</h3>
               <p>
-                백업은 Master Key로 암호화되며 복원하면 모든 활성 세션이
-                폐기됩니다.
+                설정 값에 <code>secret://이름</code>을 입력하면 실행 시 안전하게
+                해석됩니다. 원문은 생성·회전 요청 뒤 다시 표시되지 않습니다.
               </p>
+              <form id="secret-form" class="form-row">
+                <label>이름<input name="name" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,127}" /></label>
+                <label>Backend<select name="backend"><option value="database">암호화 DB</option><option value="vault">Vault KV v2</option></select></label>
+                <label>값<input name="value" type="password" required autocomplete="new-password" /></label>
+                <div class="button-row"><button type="submit">등록·회전</button></div>
+              </form>
+              <div id="managed-secrets" class="table-wrap"></div>
+              <h3>전체 API 키</h3>
+              <div id="admin-keys" class="table-wrap"></div>
             </div>
-            <button id="create-backup">지금 백업</button>
-          </div>
-          <div id="backups" class="table-wrap"></div>
-        </div>
-        <div id="quality-admin-section" class="admin-panel" hidden>
-          <hr />
-          <div class="section-title">
-            <div>
-              <h2>Context Pack 관리</h2>
-              <p>업무 시스템 단위로 여러 Library와 ref를 묶어 MCP 검색 범위를 구성합니다.</p>
+            <div id="security-events-section">
+              <h3>색인 보안 이벤트</h3>
+              <div id="security-events" class="table-wrap"></div>
             </div>
-            <button id="refresh-context-packs">새로고침</button>
-          </div>
-          <form id="context-pack-admin-form" class="form-row">
-            <input id="context-pack-id" type="hidden" />
-            <label>Slug<input id="context-pack-slug" required placeholder="gpu-platform" /></label>
-            <label>이름<input id="context-pack-name" required placeholder="GPU Platform" /></label>
-            <label class="wide">설명<input id="context-pack-description" placeholder="GPU 서비스, 에이전트와 운영 문서" /></label>
-            <label class="wide">Library 항목<textarea id="context-pack-items" required placeholder="/kcb/api|main|API&#10;/kcb/agent|release/v1|agent"></textarea></label>
-            <label><input id="context-pack-enabled" type="checkbox" checked /> 활성화</label>
-            <div class="button-row"><button type="submit">저장</button><button id="reset-context-pack" type="button">새 항목</button></div>
-          </form>
-          <div id="context-pack-list" class="table-wrap"></div>
-          <hr />
-          <div class="section-title">
-            <div>
-              <h2>검색 품질 벤치마크</h2>
-              <p>
-                정답 파일을 기준으로 Recall@K, MRR, nDCG@K 회귀를 검사합니다.
-              </p>
+            <div id="notification-deliveries-section">
+              <h3>외부 알림 전달</h3>
+              <p>Webhook, 사내 메신저 및 이메일 알림의 전달 상태입니다. 목적지와 인증정보는 표시하지 않습니다.</p>
+              <div id="notification-deliveries" class="table-wrap"></div>
             </div>
-            <button id="refresh-quality">새로고침</button>
-          </div>
-          <div id="quality-write-section" class="form-row">
-            <label
-              >이름<input id="quality-name" placeholder="GPU API 검색"
-            /></label>
-            <label
-              >Library ID<input
-                id="quality-library"
-                placeholder="/kcb/clustara/main"
-            /></label>
-            <label class="wide"
-              >질의<input id="quality-query" placeholder="Pod별 GPU 사용량 API"
-            /></label>
-            <label
-              >ACL Principal<input
-                id="quality-principals"
-                placeholder="alice,group:platform"
-            /></label>
-            <label
-              >정답 파일<input
-                id="quality-sources"
-                placeholder="docs/gpu.md,internal/gpu.go"
-            /></label>
-            <div><button id="create-quality-case">평가 사례 추가</button></div>
-          </div>
-          <h3>평가 사례</h3>
-          <div id="quality-cases" class="table-wrap"></div>
-          <div id="quality-run-controls" class="form-row">
-            <label
-              >Top K<input
-                id="quality-top-k"
-                type="number"
-                min="1"
-                max="50"
-                value="8"
-            /></label>
-            <label
-              >최소 Recall<input
-                id="quality-min-recall"
-                type="number"
-                min="0"
-                max="1"
-                step="0.01"
-                value="0.8"
-            /></label>
-            <label
-              >최소 MRR<input
-                id="quality-min-mrr"
-                type="number"
-                min="0"
-                max="1"
-                step="0.01"
-                value="0.7"
-            /></label>
-            <label
-              >최소 nDCG<input
-                id="quality-min-ndcg"
-                type="number"
-                min="0"
-                max="1"
-                step="0.01"
-                value="0.7"
-            /></label>
-            <div><button id="run-quality">벤치마크 실행</button></div>
-          </div>
-          <h3>실행 이력</h3>
-          <div id="quality-runs" class="table-wrap"></div>
-          <h3>사례별 결과</h3>
-          <div id="quality-results" class="table-wrap"></div>
+          </section>
+          <section id="audit-admin-section" class="panel admin-panel" hidden>
+            <div class="section-title">
+              <div><h2>감사</h2><p>설정 변경, 로그인과 키 운영 이력입니다.</p></div>
+              <button class="secondary" type="button" data-guide="audit">감사 로그 가이드</button>
+            </div>
+            <h3>최근 감사 로그</h3>
+            <div id="audit-logs" class="table-wrap"></div>
+          </section>
+          <section id="database-admin-section" class="panel admin-panel" hidden>
+            <div class="section-title">
+              <div><h2>메타 데이터베이스</h2><p>DSN 원문 없이 실제 연결과 migration 상태를 진단합니다.</p></div>
+              <div class="button-row">
+                <button class="secondary" type="button" data-guide="database">데이터베이스 가이드</button>
+                <button id="refresh-database" class="secondary">연결 다시 확인</button>
+              </div>
+            </div>
+            <div id="admin-database-status" class="status-grid"></div>
+            <div id="database-migration" class="card subtle-card">
+              <h3>PostgreSQL 연결 및 전환</h3>
+              <p>복구 SQLite로 기동된 경우 PostgreSQL을 읽기 전용으로 시험한 뒤, 명시적 확인을 거쳐 스키마와 데이터를 이전합니다. DSN 원문은 암호화 저장되고 다시 표시되지 않습니다.</p>
+              <form id="database-form" class="form-row">
+                <label class="wide">PostgreSQL DSN<input id="database-dsn" type="password" required autocomplete="new-password" placeholder="postgres://user:password@db:5432/gitctx?sslmode=require" /></label>
+                <label>마이그레이션 확인<input id="database-confirm" placeholder="MIGRATE TO POSTGRES" /></label>
+                <div class="button-row"><button id="test-database" type="button">연결 시험</button><button id="migrate-database" type="button" class="danger">데이터 이전</button></div>
+              </form>
+              <div id="database-action-result" class="notice" hidden></div>
+            </div>
+          </section>
+          <section id="status-admin-section" class="panel admin-panel" hidden>
+            <div class="section-title">
+              <div><h2>운영 상태</h2><p>색인, 키와 관측성 상태 요약입니다.</p></div>
+              <button class="secondary" type="button" data-guide="operations">운영 가이드</button>
+            </div>
+            <div id="system-health" class="notice"></div>
+          </section>
+          <section id="backup-admin-section" class="panel admin-panel" hidden>
+            <div class="section-title">
+              <div>
+                <h2>백업과 복구</h2>
+                <p>백업은 Master Key로 암호화되며 복원하면 모든 활성 세션이 폐기됩니다.</p>
+              </div>
+              <div class="button-row">
+                <button class="secondary" type="button" data-guide="backup">백업 가이드</button>
+                <button id="create-backup">지금 백업</button>
+              </div>
+            </div>
+            <div id="backups" class="table-wrap"></div>
+          </section>
         </div>
-        <div id="security-admin-section" class="admin-panel" hidden>
-          <h2>보안</h2>
-          <div id="security-keys-section">
-            <h3>관리 비밀정보</h3>
-            <p>
-              설정 값에 <code>secret://이름</code>을 입력하면 실행 시 안전하게
-              해석됩니다. 원문은 생성·회전 요청 뒤 다시 표시되지 않습니다.
-            </p>
-            <form id="secret-form" class="form-row">
-              <label>이름<input name="name" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,127}" /></label>
-              <label>Backend<select name="backend"><option value="database">암호화 DB</option><option value="vault">Vault KV v2</option></select></label>
-              <label>값<input name="value" type="password" required autocomplete="new-password" /></label>
-              <button type="submit">등록·회전</button>
-            </form>
-            <div id="managed-secrets" class="table-wrap"></div>
-            <h3>전체 API 키</h3>
-            <div id="admin-keys" class="table-wrap"></div>
-          </div>
-          <div id="security-events-section">
-            <h3>색인 보안 이벤트</h3>
-            <div id="security-events" class="table-wrap"></div>
-          </div>
-          <div id="notification-deliveries-section">
-            <h3>외부 알림 전달</h3>
-            <p>Webhook, 사내 메신저 및 이메일 알림의 전달 상태입니다. 목적지와 인증정보는 표시하지 않습니다.</p>
-            <div id="notification-deliveries" class="table-wrap"></div>
-          </div>
-        </div>
-        <div id="audit-admin-section" class="admin-panel" hidden>
-          <h2>감사</h2>
-          <h3>최근 감사 로그</h3>
-          <div id="audit-logs" class="table-wrap"></div>
-        </div>
-      </section>
-    </main>
-    <dialog id="quick-nav-dialog" class="quick-nav-dialog">
-      <div class="quick-nav-head"><strong>빠른 이동</strong><button id="quick-nav-close" type="button" aria-label="닫기">×</button></div>
+      </main>
+    </div>
+    <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+    <dialog id="quick-nav-dialog" class="app-dialog quick-nav-dialog">
+      <div class="dialog-head"><strong>빠른 이동</strong><button id="quick-nav-close" type="button" aria-label="닫기">×</button></div>
       <input id="quick-nav-query" type="search" placeholder="메뉴 검색…" autocomplete="off" />
       <div id="quick-nav-results" class="quick-nav-results"></div>
       <small>↑↓ 이동 · Enter 선택 · Esc 닫기</small>
     </dialog>
-    <dialog id="key-scope-dialog" class="quick-nav-dialog">
+    <dialog id="guide-dialog" class="app-dialog guide-dialog">
+      <div class="dialog-head"><strong id="guide-title">설정 가이드</strong><button id="guide-close" type="button" aria-label="닫기">×</button></div>
+      <div id="guide-body" class="guide-body"></div>
+      <div class="dialog-foot">
+        <button id="guide-diagnose" class="secondary" type="button">내 권한 다시 진단</button>
+        <button id="guide-dismiss" type="button">닫기</button>
+      </div>
+    </dialog>
+    <dialog id="key-scope-dialog" class="app-dialog">
       <form id="key-scope-form">
-        <div class="quick-nav-head">
+        <div class="dialog-head">
           <strong>MCP 키 Scope 편집</strong>
           <button id="key-scope-close" type="button" aria-label="닫기">×</button>
         </div>
@@ -571,13 +558,14 @@
           <legend>허용 도구</legend>
           <div id="key-scope-options" class="scope-grid"></div>
         </fieldset>
-        <div class="actions">
+        <div class="dialog-foot">
           <button type="submit">저장</button>
           <button id="key-scope-cancel" type="button" class="secondary">취소</button>
         </div>
       </form>
     </dialog>
     <script src="/roles.js"></script>
+    <script src="/guides.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

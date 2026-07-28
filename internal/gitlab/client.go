@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"git-ctx/internal/netclient"
@@ -29,6 +30,11 @@ type Client struct {
 	base  *url.URL
 	token string
 	http  *http.Client
+
+	// projectCache keeps the id to namespace mapping used when advanced search
+	// returns blob hits that only carry a numeric project id.
+	projectMu    sync.Mutex
+	projectCache map[int64]source.Repository
 }
 
 func New(cfg Config) (*Client, error) {
@@ -43,7 +49,7 @@ func New(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{base: u, token: cfg.Token, http: httpClient}, nil
+	return &Client{base: u, token: cfg.Token, http: httpClient, projectCache: map[int64]source.Repository{}}, nil
 }
 
 type group struct {
@@ -52,12 +58,12 @@ type group struct {
 }
 type project struct {
 	ID                                                        int64
-	Path, Name, Description, DefaultBranch, PathWithNamespace string `json:"-"`
-	Namespace                                                 struct{ Path string }
+	Path, Name, Description, DefaultBranch, PathWithNamespace string
+	Archived                                                  bool
+	Namespace                                                 struct{ Path, FullPath string }
 }
 
 func (p *project) UnmarshalJSON(data []byte) error {
-	type alias project
 	var raw struct {
 		ID                int64  `json:"id"`
 		Path              string `json:"path"`
@@ -65,8 +71,10 @@ func (p *project) UnmarshalJSON(data []byte) error {
 		Description       string `json:"description"`
 		DefaultBranch     string `json:"default_branch"`
 		PathWithNamespace string `json:"path_with_namespace"`
+		Archived          bool   `json:"archived"`
 		Namespace         struct {
-			Path string `json:"path"`
+			Path     string `json:"path"`
+			FullPath string `json:"full_path"`
 		} `json:"namespace"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -78,8 +86,29 @@ func (p *project) UnmarshalJSON(data []byte) error {
 	p.Description = raw.Description
 	p.DefaultBranch = raw.DefaultBranch
 	p.PathWithNamespace = raw.PathWithNamespace
+	p.Archived = raw.Archived
 	p.Namespace.Path = raw.Namespace.Path
+	p.Namespace.FullPath = raw.Namespace.FullPath
 	return nil
+}
+
+// repository converts a GitLab project into the catalog model. GitLab nests
+// projects in subgroups, so the namespace full path is required: using only the
+// direct parent path builds URL-encoded project IDs such as `sub%2Fproject`
+// that every later repository, search or ACL call resolves to 404.
+func (p *project) repository() source.Repository {
+	namespace := strings.TrimSpace(p.Namespace.FullPath)
+	if namespace == "" {
+		if trimmed := strings.TrimSuffix(p.PathWithNamespace, "/"+p.Path); trimmed != p.PathWithNamespace {
+			namespace = trimmed
+		} else {
+			namespace = p.Namespace.Path
+		}
+	}
+	return source.Repository{
+		ID: p.ID, ProjectKey: namespace, Slug: p.Path, Name: p.Name,
+		Description: p.Description, DefaultBranch: p.DefaultBranch, Archived: p.Archived,
+	}
 }
 
 func (c *Client) ListProjects(ctx context.Context) ([]source.Project, error) {
@@ -100,9 +129,129 @@ func (c *Client) ListRepositories(ctx context.Context, groupID string) ([]source
 	}
 	out := make([]source.Repository, len(items))
 	for i, p := range items {
-		out[i] = source.Repository{ID: p.ID, ProjectKey: p.Namespace.Path, Slug: p.Path, Name: p.Name, Description: p.Description, DefaultBranch: p.DefaultBranch}
+		out[i] = p.repository()
+		c.cacheProject(p)
 	}
 	return out, nil
+}
+
+// SearchRepositories asks GitLab to match the term against project and
+// namespace names instead of downloading every group and project page, so
+// discovery stays responsive on large instances.
+func (c *Client) SearchRepositories(ctx context.Context, query string, limit int) ([]source.Repository, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, errors.New("search query is required")
+	}
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	var items []project
+	params := url.Values{
+		"search":            []string{query},
+		"search_namespaces": []string{"true"},
+		"order_by":          []string{"last_activity_at"},
+		"simple":            []string{"false"},
+		"per_page":          []string{strconv.Itoa(limit)},
+	}
+	if err := c.json(ctx, http.MethodGet, "/projects", params, nil, &items); err != nil {
+		return nil, err
+	}
+	out := make([]source.Repository, 0, len(items))
+	for _, p := range items {
+		c.cacheProject(p)
+		out = append(out, p.repository())
+	}
+	return out, nil
+}
+
+// SearchGlobalQuery runs GitLab advanced search across every project the token
+// can read. Instances without advanced search reject the blobs scope, which is
+// reported as source.ErrGlobalSearchUnsupported so the caller can fall back to
+// per repository search instead of failing the whole request.
+func (c *Client) SearchGlobalQuery(ctx context.Context, query string, limit int) ([]source.GlobalQueryResult, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, errors.New("search query is required")
+	}
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	var items []blobHit
+	params := url.Values{"scope": []string{"blobs"}, "search": []string{query}, "per_page": []string{strconv.Itoa(limit)}}
+	if err := c.json(ctx, http.MethodGet, "/search", params, nil, &items); err != nil {
+		if globalSearchUnsupported(err) {
+			return nil, fmt.Errorf("%w: %v", source.ErrGlobalSearchUnsupported, err)
+		}
+		return nil, err
+	}
+	out := make([]source.GlobalQueryResult, 0, len(items))
+	for _, item := range items {
+		if item.Path == "" || item.ProjectID == 0 {
+			continue
+		}
+		repository, err := c.project(ctx, item.ProjectID)
+		if err != nil {
+			continue
+		}
+		ref := item.Ref
+		if ref == "" {
+			ref = repository.DefaultBranch
+		}
+		start := max(1, item.StartLine)
+		out = append(out, source.GlobalQueryResult{
+			ProjectKey: repository.ProjectKey, Slug: repository.Slug, Name: repository.Name,
+			Description: repository.Description, Ref: ref, DefaultBranch: repository.DefaultBranch, ID: repository.ID,
+			QueryResult: source.QueryResult{Path: item.Path, Snippet: item.Data, LineStart: start, LineEnd: start + max(0, strings.Count(item.Data, "\n"))},
+		})
+		if len(out) == limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+type blobHit struct {
+	Path      string `json:"path"`
+	Data      string `json:"data"`
+	Ref       string `json:"ref"`
+	StartLine int    `json:"startline"`
+	ProjectID int64  `json:"project_id"`
+}
+
+// globalSearchUnsupported detects the responses returned by GitLab instances
+// that run basic search only. Those reject the blobs scope with 400 or 403
+// instead of returning an empty result set.
+func globalSearchUnsupported(err error) bool {
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "scope") && (strings.Contains(message, "not supported") || strings.Contains(message, "does not have a valid value")) {
+		return true
+	}
+	return strings.Contains(message, "400 bad request") || strings.Contains(message, "403 forbidden") || strings.Contains(message, "501 not implemented")
+}
+
+func (c *Client) cacheProject(p project) {
+	if p.ID == 0 {
+		return
+	}
+	c.projectMu.Lock()
+	defer c.projectMu.Unlock()
+	c.projectCache[p.ID] = p.repository()
+}
+
+func (c *Client) project(ctx context.Context, id int64) (source.Repository, error) {
+	c.projectMu.Lock()
+	cached, ok := c.projectCache[id]
+	c.projectMu.Unlock()
+	if ok {
+		return cached, nil
+	}
+	var p project
+	if err := c.json(ctx, http.MethodGet, "/projects/"+strconv.FormatInt(id, 10), nil, nil, &p); err != nil {
+		return source.Repository{}, err
+	}
+	c.cacheProject(p)
+	return p.repository(), nil
 }
 func (c *Client) ListBranches(ctx context.Context, r source.RepositoryRef) ([]source.Reference, error) {
 	return c.refs(ctx, r, "branches")
@@ -195,14 +344,25 @@ func (c *Client) SearchQuery(ctx context.Context, r source.RepositoryRef, ref, q
 	if limit < 1 || limit > 50 {
 		limit = 8
 	}
-	var items []struct {
-		Path      string `json:"path"`
-		Data      string `json:"data"`
-		Ref       string `json:"ref"`
-		StartLine int    `json:"startline"`
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, errors.New("search query is required")
 	}
-	params := url.Values{"scope": []string{"blobs"}, "search": []string{query}, "ref": []string{ref}, "per_page": []string{strconv.Itoa(limit)}}
-	if err := c.json(ctx, http.MethodGet, c.repo(r)+"/search", params, nil, &items); err != nil {
+	var items []blobHit
+	params := url.Values{"scope": []string{"blobs"}, "search": []string{query}, "per_page": []string{strconv.Itoa(limit)}}
+	if ref = strings.TrimSpace(ref); ref != "" {
+		params.Set("ref", ref)
+	}
+	err := c.json(ctx, http.MethodGet, c.repo(r)+"/search", params, nil, &items)
+	if err != nil && ref != "" {
+		// GitLab rejects the whole search when the ref is missing on the remote
+		// side, for example after a default branch rename. Retrying on the
+		// default branch keeps the search useful instead of returning nothing.
+		params.Del("ref")
+		items = nil
+		err = c.json(ctx, http.MethodGet, c.repo(r)+"/search", params, nil, &items)
+	}
+	if err != nil {
 		return nil, err
 	}
 	out := make([]source.QueryResult, 0, min(limit, len(items)))

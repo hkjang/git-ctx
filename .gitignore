@@ -1,6 +1,7 @@
 *.db
 *.db-shm
 *.db-wal
+backups/
 .env
 bin/
 coverage.out

@@ -103,6 +103,22 @@ func TestKeycloakOIDCEndToEndSavePKCECallbackAndSession(t *testing.T) {
 	if session == nil || !session.HttpOnly || session.SameSite != http.SameSiteLaxMode {
 		t.Fatalf("session=%#v", session)
 	}
+	// The browser session must outlive the short Keycloak access token, and it
+	// must not be marked Secure on a plain HTTP request or the browser drops it
+	// on the next page refresh.
+	if session.Secure {
+		t.Fatalf("Secure must follow the request scheme, got %#v", session)
+	}
+	if remaining := time.Until(session.Expires); remaining < 8*time.Hour {
+		t.Fatalf("session expiry %v is shorter than the browser session lifetime", remaining)
+	}
+	secureCallback := httptest.NewRequest(http.MethodGet, "/auth/login?return_to=/admin", nil)
+	secureCallback.Header.Set("X-Forwarded-Proto", "https")
+	secureResult := httptest.NewRecorder()
+	a.Handler().ServeHTTP(secureResult, secureCallback)
+	if !requestIsSecure(secureCallback) {
+		t.Fatal("X-Forwarded-Proto https must be treated as a secure request")
+	}
 	me := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
 	me.AddCookie(session)
 	meResult := httptest.NewRecorder()

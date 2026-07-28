@@ -93,6 +93,10 @@ type CodeSearchResult struct {
 	Repositories []RepositoryResult
 	Hits         []SourceResult
 	Warning      string
+	// Diagnostics explains, per source, how the search was executed and why a
+	// remote match may be missing. Empty results are otherwise indistinguishable
+	// from a missing ACL mapping or a disabled remote search feature.
+	Diagnostics []string
 }
 
 type SymbolResult struct {
@@ -812,18 +816,33 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 	if normalized == "" {
 		return CodeSearchResult{}, errors.New("query is required")
 	}
+	if limit < 1 || limit > 50 {
+		limit = 20
+	}
+	if len(principals) == 0 {
+		// Fail closed, but say why: without a Bitbucket or GitLab identity claim
+		// every repository ACL check rejects the caller and the result set is
+		// silently empty even though the remote instance has matches.
+		return CodeSearchResult{Query: normalized, Repositories: []RepositoryResult{}, Hits: []SourceResult{},
+			Warning: "No source ACL principal is mapped to this account, so every repository is filtered out.",
+			Diagnostics: []string{
+				"acl: the Keycloak identity has no bitbucket_user_slug or gitlab_user_id claim, so no repository can be authorized.",
+			}}, nil
+	}
 	repositories, repoErr := s.SearchRepositories(ctx, principals, normalized, sourceType, limit)
 	hits, sourceErr := s.SearchSource(ctx, principals, normalized, sourceType, project, repository, ref, limit)
 	result := CodeSearchResult{Query: normalized, Repositories: repositories, Hits: hits}
 	if sourceErr != nil {
 		result.Warning = "The remote source query API was unavailable; repository matches are still shown."
+		result.Diagnostics = append(result.Diagnostics, "indexed-source: "+sourceErr.Error())
 	}
-	if s.sources != nil && len(principals) > 0 && repository == "" && len(result.Repositories) < limit {
-		discoveredRepositories, discoveredHits, discoveryWarning := s.discoverRemoteCode(ctx, principals, normalized, sourceType, project, ref, limit, result.Repositories)
-		result.Repositories = append(result.Repositories, discoveredRepositories...)
-		result.Hits = append(result.Hits, discoveredHits...)
+	if s.sources != nil && repository == "" {
+		discovery := s.discoverRemoteCode(ctx, principals, normalized, sourceType, project, ref, limit, result.Repositories, result.Hits)
+		result.Repositories = append(result.Repositories, discovery.repositories...)
+		result.Hits = append(result.Hits, discovery.hits...)
+		result.Diagnostics = append(result.Diagnostics, discovery.diagnostics...)
 		if result.Warning == "" {
-			result.Warning = discoveryWarning
+			result.Warning = discovery.warning
 		}
 	}
 	if len(result.Repositories) > limit {
@@ -838,97 +857,271 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 	return result, repoErr
 }
 
-func (s *Service) discoverRemoteCode(ctx context.Context, principals []string, query, sourceType, project, ref string, limit int, existing []RepositoryResult) ([]RepositoryResult, []SourceResult, string) {
+// maxDiscoveryProjects and maxDiscoveryRepositories bound the fallback path that
+// enumerates a whole instance. Without a bound a single search on a large
+// Bitbucket or GitLab server issues thousands of API calls and times out, which
+// is indistinguishable from "no results" for the caller.
+const (
+	maxDiscoveryProjects     = 50
+	maxDiscoveryRepositories = 300
+)
+
+type remoteDiscovery struct {
+	repositories []RepositoryResult
+	hits         []SourceResult
+	diagnostics  []string
+	warning      string
+}
+
+// discoverRemoteCode searches repositories that are not in the local catalog.
+// Repository names are matched by the remote search API when the adapter
+// supports it, and source code is matched by the instance wide code search that
+// the Bitbucket and GitLab web UIs use, so a code term that appears in no
+// repository name still returns hits. Every repository is ACL-verified against
+// the caller principals before any name or snippet is returned.
+func (s *Service) discoverRemoteCode(ctx context.Context, principals []string, query, sourceType, project, ref string, limit int, existingRepositories []RepositoryResult, existingHits []SourceResult) remoteDiscovery {
 	sourceTypes := []string{sourceType}
 	if sourceType == "" {
 		sourceTypes = []string{"bitbucket", "gitlab"}
 	}
-	seen := map[string]bool{}
-	for _, item := range existing {
-		seen[strings.ToLower(item.LibraryID)] = true
+	var out remoteDiscovery
+	seenRepository := map[string]bool{}
+	for _, item := range existingRepositories {
+		seenRepository[strings.ToLower(item.LibraryID)] = true
 	}
-	var repositories []RepositoryResult
-	var hits []SourceResult
-	var failures int
+	seenHit := map[string]bool{}
+	for _, item := range existingHits {
+		seenHit[strings.ToLower(item.LibraryID+"@"+item.Path)] = true
+	}
+	failures := 0
 	for _, currentSourceType := range sourceTypes {
 		adapter, err := s.sources(ctx, currentSourceType)
 		if err != nil {
+			if sourceType != "" {
+				out.diagnostics = append(out.diagnostics, currentSourceType+": adapter is unavailable: "+err.Error())
+			}
 			continue
 		}
-		searcher, ok := adapter.(source.QuerySearcher)
-		if !ok {
-			continue
+		scan := &remoteScan{
+			service: s, adapter: adapter, sourceType: currentSourceType, principals: principals,
+			query: query, project: project, ref: ref, limit: limit,
+			seenRepository: seenRepository, seenHit: seenHit, allowed: map[string]bool{},
 		}
-		projects, err := adapter.ListProjects(ctx)
-		if err != nil {
-			failures++
-			continue
-		}
-		for _, remoteProject := range projects {
-			if project != "" && !strings.EqualFold(project, remoteProject.Key) {
-				continue
-			}
-			remoteRepositories, listErr := adapter.ListRepositories(ctx, remoteProject.Key)
-			if listErr != nil {
-				failures++
-				continue
-			}
-			for _, remoteRepository := range remoteRepositories {
-				if remoteRepository.Archived || !repositoryMetadataMatches(remoteRepository, query) {
-					continue
-				}
-				libraryID := source.LibraryID(currentSourceType, remoteRepository.ProjectKey, remoteRepository.Slug)
-				if seen[strings.ToLower(libraryID)] {
-					continue
-				}
-				repositoryRef := source.RepositoryRef{ProjectKey: remoteRepository.ProjectKey, Slug: remoteRepository.Slug}
-				permissions, permissionErr := adapter.GetPermissions(ctx, repositoryRef)
-				if permissionErr != nil || !permissionsAllowPrincipals(permissions, principals) {
-					if permissionErr != nil {
-						failures++
-					}
-					continue
-				}
-				seen[strings.ToLower(libraryID)] = true
-				repositories = append(repositories, RepositoryResult{
-					ID: fmt.Sprint(remoteRepository.ID), ProjectKey: remoteRepository.ProjectKey, Slug: remoteRepository.Slug,
-					Name: remoteRepository.Name, Description: remoteRepository.Description, LibraryID: libraryID,
-					DefaultBranch: remoteRepository.DefaultBranch, SourceType: currentSourceType,
-				})
-				selectedRef := ref
-				if selectedRef == "" {
-					selectedRef = remoteRepository.DefaultBranch
-				}
-				if selectedRef == "" {
-					selectedRef = "main"
-				}
-				if len(hits) < limit {
-					remoteHits, queryErr := searcher.SearchQuery(ctx, repositoryRef, selectedRef, query, limit-len(hits))
-					if queryErr != nil {
-						failures++
-					} else {
-						for _, hit := range s.safeSourceHits(ctx, "remote:"+libraryID, selectedRef, remoteHits, limit-len(hits)) {
-							hits = append(hits, SourceResult{
-								LibraryID: libraryID, SourceType: currentSourceType, ProjectKey: remoteRepository.ProjectKey,
-								RepositorySlug: remoteRepository.Slug, Ref: selectedRef, QueryResult: hit,
-							})
-						}
-					}
-				}
-				if len(repositories) >= limit {
-					break
-				}
-			}
-			if len(repositories) >= limit {
-				break
-			}
-		}
+		scan.discoverRepositories(ctx)
+		scan.searchCode(ctx)
+		out.repositories = append(out.repositories, scan.repositories...)
+		out.hits = append(out.hits, scan.hits...)
+		out.diagnostics = append(out.diagnostics, scan.diagnostics...)
+		failures += scan.failures
 	}
-	warning := ""
 	if failures > 0 {
-		warning = "Some remote repositories could not be discovered, ACL-verified, or searched."
+		out.warning = "Some remote repositories could not be discovered, ACL-verified, or searched."
 	}
-	return repositories, hits, warning
+	if len(out.diagnostics) == 0 && len(out.repositories) == 0 && len(out.hits) == 0 {
+		out.diagnostics = append(out.diagnostics, "remote: no source connector is configured, so only the local index was searched.")
+	}
+	return out
+}
+
+type remoteScan struct {
+	service                 *Service
+	adapter                 source.RepositorySource
+	sourceType              string
+	principals              []string
+	query, project, ref     string
+	limit                   int
+	seenRepository, seenHit map[string]bool
+	allowed                 map[string]bool
+	repositories            []RepositoryResult
+	hits                    []SourceResult
+	diagnostics             []string
+	failures                int
+	candidates              []source.Repository
+}
+
+func (r *remoteScan) discoverRepositories(ctx context.Context) {
+	searcher, ok := r.adapter.(source.RepositorySearcher)
+	if ok {
+		found, err := searcher.SearchRepositories(ctx, r.query, r.limit*2)
+		if err == nil {
+			r.collect(ctx, found, false)
+			r.diagnostics = append(r.diagnostics, fmt.Sprintf("%s: repository name search matched %d repositories.", r.sourceType, len(r.repositories)))
+			return
+		}
+		r.failures++
+		r.diagnostics = append(r.diagnostics, r.sourceType+": repository name search failed, falling back to project enumeration: "+err.Error())
+	}
+	projects, err := r.adapter.ListProjects(ctx)
+	if err != nil {
+		r.failures++
+		r.diagnostics = append(r.diagnostics, r.sourceType+": project discovery failed: "+err.Error())
+		return
+	}
+	scanned := 0
+	for index, remoteProject := range projects {
+		if r.project != "" && !strings.EqualFold(r.project, remoteProject.Key) {
+			continue
+		}
+		if index >= maxDiscoveryProjects {
+			r.diagnostics = append(r.diagnostics, fmt.Sprintf("%s: only the first %d projects were scanned; narrow the search with a project filter.", r.sourceType, maxDiscoveryProjects))
+			break
+		}
+		repositories, listErr := r.adapter.ListRepositories(ctx, remoteProject.Key)
+		if listErr != nil {
+			r.failures++
+			continue
+		}
+		if scanned += len(repositories); scanned > maxDiscoveryRepositories {
+			r.collect(ctx, repositories, true)
+			r.diagnostics = append(r.diagnostics, fmt.Sprintf("%s: repository scan stopped after %d repositories.", r.sourceType, maxDiscoveryRepositories))
+			break
+		}
+		r.collect(ctx, repositories, true)
+		if len(r.repositories) >= r.limit {
+			break
+		}
+	}
+}
+
+// collect ACL-verifies remote repositories and keeps them as both result rows
+// and candidates for the per repository code search fallback.
+func (r *remoteScan) collect(ctx context.Context, repositories []source.Repository, requireMetadataMatch bool) {
+	for _, repository := range repositories {
+		if repository.Archived || repository.Slug == "" {
+			continue
+		}
+		if r.project != "" && !strings.EqualFold(r.project, repository.ProjectKey) {
+			continue
+		}
+		if requireMetadataMatch && !repositoryMetadataMatches(repository, r.query) {
+			continue
+		}
+		libraryID := source.LibraryID(r.sourceType, repository.ProjectKey, repository.Slug)
+		if !r.authorize(ctx, repository.ProjectKey, repository.Slug) {
+			continue
+		}
+		r.candidates = append(r.candidates, repository)
+		if r.seenRepository[strings.ToLower(libraryID)] || len(r.repositories) >= r.limit {
+			continue
+		}
+		r.seenRepository[strings.ToLower(libraryID)] = true
+		r.repositories = append(r.repositories, RepositoryResult{
+			ID: fmt.Sprint(repository.ID), ProjectKey: repository.ProjectKey, Slug: repository.Slug,
+			Name: repository.Name, Description: repository.Description, LibraryID: libraryID,
+			DefaultBranch: repository.DefaultBranch, SourceType: r.sourceType,
+		})
+	}
+}
+
+func (r *remoteScan) authorize(ctx context.Context, projectKey, slug string) bool {
+	cacheKey := strings.ToLower(projectKey + "/" + slug)
+	if decision, ok := r.allowed[cacheKey]; ok {
+		return decision
+	}
+	permissions, err := r.adapter.GetPermissions(ctx, source.RepositoryRef{ProjectKey: projectKey, Slug: slug})
+	if err != nil {
+		r.failures++
+		r.allowed[cacheKey] = false
+		return false
+	}
+	decision := permissionsAllowPrincipals(permissions, r.principals)
+	r.allowed[cacheKey] = decision
+	return decision
+}
+
+func (r *remoteScan) searchCode(ctx context.Context) {
+	if len(r.hits) >= r.limit {
+		return
+	}
+	if global, ok := r.adapter.(source.GlobalQuerySearcher); ok {
+		results, err := global.SearchGlobalQuery(ctx, r.query, r.limit*2)
+		switch {
+		case err == nil:
+			r.appendGlobalHits(ctx, results)
+			r.diagnostics = append(r.diagnostics, fmt.Sprintf("%s: instance-wide code search returned %d hits, %d visible after the repository ACL check.", r.sourceType, len(results), len(r.hits)))
+			return
+		case errors.Is(err, source.ErrGlobalSearchUnsupported):
+			r.diagnostics = append(r.diagnostics, r.sourceType+": instance-wide code search is unavailable, searching discovered repositories one by one.")
+		default:
+			r.failures++
+			r.diagnostics = append(r.diagnostics, r.sourceType+": instance-wide code search failed: "+err.Error())
+		}
+	}
+	searcher, ok := r.adapter.(source.QuerySearcher)
+	if !ok {
+		return
+	}
+	searched := 0
+	for _, repository := range r.candidates {
+		if len(r.hits) >= r.limit || searched >= maxDiscoveryProjects {
+			break
+		}
+		searched++
+		selectedRef := r.selectedRef(repository.DefaultBranch)
+		libraryID := source.LibraryID(r.sourceType, repository.ProjectKey, repository.Slug)
+		found, err := searcher.SearchQuery(ctx, source.RepositoryRef{ProjectKey: repository.ProjectKey, Slug: repository.Slug}, selectedRef, r.query, r.limit-len(r.hits))
+		if err != nil {
+			r.failures++
+			continue
+		}
+		for _, hit := range r.service.safeSourceHits(ctx, "remote:"+libraryID, selectedRef, found, r.limit-len(r.hits)) {
+			r.appendHit(libraryID, repository.ProjectKey, repository.Slug, selectedRef, hit)
+		}
+	}
+}
+
+func (r *remoteScan) appendGlobalHits(ctx context.Context, results []source.GlobalQueryResult) {
+	for _, item := range results {
+		if len(r.hits) >= r.limit {
+			return
+		}
+		if item.Slug == "" || item.Path == "" {
+			continue
+		}
+		if r.project != "" && !strings.EqualFold(r.project, item.ProjectKey) {
+			continue
+		}
+		if !r.authorize(ctx, item.ProjectKey, item.Slug) {
+			continue
+		}
+		libraryID := source.LibraryID(r.sourceType, item.ProjectKey, item.Slug)
+		selectedRef := r.selectedRef(item.Ref)
+		safe := r.service.safeSourceHits(ctx, "remote:"+libraryID, selectedRef, []source.QueryResult{item.QueryResult}, 1)
+		for _, hit := range safe {
+			r.appendHit(libraryID, item.ProjectKey, item.Slug, selectedRef, hit)
+		}
+		if !r.seenRepository[strings.ToLower(libraryID)] && len(r.repositories) < r.limit {
+			r.seenRepository[strings.ToLower(libraryID)] = true
+			r.repositories = append(r.repositories, RepositoryResult{
+				ID: fmt.Sprint(item.ID), ProjectKey: item.ProjectKey, Slug: item.Slug, Name: item.Name,
+				Description: item.Description, LibraryID: libraryID, DefaultBranch: item.DefaultBranch, SourceType: r.sourceType,
+			})
+		}
+	}
+}
+
+func (r *remoteScan) appendHit(libraryID, projectKey, slug, ref string, hit source.QueryResult) {
+	key := strings.ToLower(libraryID + "@" + hit.Path)
+	if r.seenHit[key] {
+		return
+	}
+	r.seenHit[key] = true
+	if hit.CommitID == "" {
+		hit.CommitID = ref
+	}
+	r.hits = append(r.hits, SourceResult{
+		LibraryID: libraryID, SourceType: r.sourceType, ProjectKey: projectKey,
+		RepositorySlug: slug, Ref: ref, QueryResult: hit,
+	})
+}
+
+func (r *remoteScan) selectedRef(fallback string) string {
+	for _, candidate := range []string{r.ref, fallback} {
+		if strings.TrimSpace(candidate) != "" {
+			return candidate
+		}
+	}
+	return "main"
 }
 
 func repositoryMetadataMatches(repository source.Repository, query string) bool {

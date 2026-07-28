@@ -941,6 +941,114 @@ func TestAdministrativeRoleMatrix(t *testing.T) {
 	}
 }
 
+// A denied settings change must name the missing role and the roles the caller
+// actually has, and the diagnostics endpoint must report the same decision, so
+// an administrator can fix the Keycloak mapping without reading server logs.
+func TestSettingDenialAndAccessDiagnosticsExplainMissingRole(t *testing.T) {
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:access-diagnostics?mode=memory&cache=shared&_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	_, _ = a.store.DB.Exec(`INSERT INTO users(id,subject,username,email,status) VALUES('u1','kc-1','alice','','active')`)
+	_, _ = a.store.DB.Exec(`INSERT INTO user_roles(user_id,role_code) VALUES('u1','mcp-admin')`)
+	const rawSession = "session-token-for-mcp-admin"
+	if _, err = a.store.DB.Exec(a.store.Rebind(`INSERT INTO user_sessions(id_hash,user_id,expires_at,last_seen_at) VALUES(?,?,?,?)`),
+		sessionHash(rawSession), "u1", time.Now().UTC().Add(time.Hour), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	withSession := func(method, path, payload string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, path, strings.NewReader(payload))
+		request.Header.Set("Content-Type", "application/json")
+		request.AddCookie(&http.Cookie{Name: "git_ctx_session", Value: rawSession})
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+	deniedResult := withSession(http.MethodPut, "/api/v1/admin/settings/gitlab", `{}`)
+	body := deniedResult.Body.String()
+	if deniedResult.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s", deniedResult.Code, body)
+	}
+	for _, expected := range []string{"insufficient_role", "source-admin", "platform-admin", "mcp-admin"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("denial message is missing %q: %s", expected, body)
+		}
+	}
+	diagnosticsResult := withSession(http.MethodGet, "/api/v1/me/access", "")
+	var access struct {
+		AclReady bool `json:"aclReady"`
+		Settings []struct {
+			Category string   `json:"category"`
+			Allowed  bool     `json:"allowed"`
+			Roles    []string `json:"roles"`
+		} `json:"settings"`
+	}
+	if err = json.Unmarshal(diagnosticsResult.Body.Bytes(), &access); err != nil {
+		t.Fatalf("diagnostics body=%s err=%v", diagnosticsResult.Body.String(), err)
+	}
+	if access.AclReady {
+		t.Fatal("an identity without a source claim must not report an ACL principal")
+	}
+	found := map[string]bool{}
+	for _, item := range access.Settings {
+		found[item.Category] = item.Allowed
+	}
+	if found["gitlab"] || !found["mcp"] {
+		t.Fatalf("unexpected per-category decisions: %#v", access.Settings)
+	}
+}
+
+// A session close to expiry is extended while the user is active, so long
+// administrative work is never interrupted by a forced re-login.
+func TestActiveSessionIsRenewedBeforeExpiry(t *testing.T) {
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:session-renewal?mode=memory&cache=shared&_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "https://git-ctx.company",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	_, _ = a.store.DB.Exec(`INSERT INTO users(id,subject,username,email,status) VALUES('u1','kc-1','alice','','active')`)
+	const raw = "expiring-session-token"
+	if _, err = a.store.DB.Exec(a.store.Rebind(`INSERT INTO user_sessions(id_hash,user_id,expires_at,last_seen_at) VALUES(?,?,?,?)`),
+		sessionHash(raw), "u1", time.Now().UTC().Add(20*time.Minute), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+	request.AddCookie(&http.Cookie{Name: "git_ctx_session", Value: raw})
+	recorder := httptest.NewRecorder()
+	a.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var renewed *http.Cookie
+	for _, cookie := range recorder.Result().Cookies() {
+		if cookie.Name == "git_ctx_session" {
+			renewed = cookie
+		}
+	}
+	if renewed == nil || time.Until(renewed.Expires) < 8*time.Hour {
+		t.Fatalf("session was not renewed: %#v", renewed)
+	}
+	// A plain HTTP request must not receive a Secure cookie even when the public
+	// URL is HTTPS, otherwise the browser drops the session on refresh.
+	if renewed.Secure {
+		t.Fatalf("Secure must follow the request scheme: %#v", renewed)
+	}
+	var stored time.Time
+	if err = a.store.DB.QueryRow(a.store.Rebind(`SELECT expires_at FROM user_sessions WHERE id_hash=?`), sessionHash(raw)).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if time.Until(stored) < 8*time.Hour {
+		t.Fatalf("stored expiry was not extended: %v", stored)
+	}
+}
+
 func TestAdministratorMCPKeyScopesRequireCurrentRole(t *testing.T) {
 	a, err := New(context.Background(), config.Config{
 		DatabaseDriver: "sqlite", DatabaseDSN: "file:admin-mcp-scopes?mode=memory&cache=shared&_foreign_keys=on",

@@ -35,6 +35,30 @@ endpoint를 표시하므로 입력값 시험과 실제 적용 상태를 구분�
 }
 ```
 
+사내 역할 명명 규칙 때문에 Keycloak 역할 이름을 플랫폼 역할과 같게 만들 수 없는
+환경은 관리자 화면 Keycloak 탭의 “Keycloak 역할·Claim 매핑 (ACL)” 카드에서 매핑을
+등록한다. 같은 카드에서 소스 ACL Principal을 만드는 Claim 이름도 지정한다. 저장되는
+값은 다음과 같으며, 매핑 대상은 플랫폼 역할만 허용한다.
+
+```json
+{
+  "realmRoleMappings": { "git-ctx-admin": "platform-admin" },
+  "clientRoleMappings": { "admin": "platform-admin" },
+  "bitbucketUserSlugClaim": "bitbucket_user_slug",
+  "gitlabUserIdClaim": "gitlab_user_id",
+  "groupsClaim": "groups"
+}
+```
+
+`GET /api/v1/me/access`는 로그인 사용자의 플랫폼 역할, 설정 카테고리별 수정 가능
+여부와 소스 ACL Principal 매핑 상태를 반환한다. 관리자 화면의 “ACL 설정 가이드”
+모달이 이 응답을 그대로 표시하므로, 403 `insufficient_role`이 발생하면 어떤 역할이
+빠졌는지 화면에서 바로 확인할 수 있다.
+
+브라우저 세션은 Keycloak Access Token 수명과 분리된 12시간이며 활동 중에는 자동
+연장된다. 세션 쿠키의 `Secure` 속성은 실제 요청 스킴(`X-Forwarded-Proto` 포함)을
+따르므로 HTTP로 접속하는 내부망 배포에서도 새로고침에 로그인이 풀리지 않는다.
+
 ## Bitbucket Server 6.9.1
 
 ```json
@@ -79,6 +103,15 @@ Search POST 요청까지 확인하고 결과 수를 표시한다. Bitbucket 6.x�
 연결 시험은 그룹·프로젝트 탐색뿐 아니라 첫 프로젝트의 멤버 ACL, 브랜치 API 및
 `scope=blobs` Project Search API까지 검증한다. `internal` 프로젝트의 전체 접근은 GitLab 사용자 ID가 매핑된 플랫폼
 사용자에게만 적용하고, `public` 프로젝트만 모든 인증 사용자에게 허용한다.
+
+프로젝트 식별자는 `namespace.full_path`로 구성한다. 서브그룹 프로젝트에서 직계 그룹
+경로만 사용하면 `/projects/sub%2Fproject`가 되어 검색·ACL·파일 API가 모두 404가 된다.
+
+코드 검색은 두 경로를 사용한다. Advanced Search가 켜진 인스턴스는 `/search?scope=blobs`
+전역 검색 한 번으로 저장소 이름과 무관한 코드까지 찾고, 꺼진 인스턴스는 저장소 이름
+검색(`/projects?search=`)으로 후보를 좁힌 뒤 프로젝트별 `scope=blobs` 검색으로
+전환한다. 어느 경로가 실행됐는지와 ACL로 걸러진 건수는 `search-code` 응답의
+`Diagnostics`에 남으므로, 결과가 0건일 때 원인을 구분할 수 있다.
 
 ## MCP와 색인
 

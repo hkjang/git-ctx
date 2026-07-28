@@ -29,7 +29,9 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - Bitbucket Server 6.9.1 및 GitLab API v4 소스 어댑터
 - 저장소 ACL 동기화, commit diff 증분 수집, 문서·심볼 원자적 staging, content hash 기반 embedding 재사용
 - 서명 검증 Webhook, 이벤트 멱등 처리 및 ref별 작업 큐
-- 우측 상단 프로필 메뉴, Ctrl/Cmd+K 빠른 이동, 개인 MCP 키 관리와 분리된 관리자 웹 화면
+- 사이드바 기반 관리 콘솔, 라이트·다크 테마, Ctrl/Cmd+K 빠른 이동과 비차단 알림
+- 모든 설정 탭의 상세 모달 가이드, 설정 화면 내 연결 테스트·설정 검증·원격 검색 즉시 확인
+- Keycloak 역할·Claim 매핑 편집기와 `GET /api/v1/me/access` 권한 진단
 - 키 회전·중지·재활성화와 CIDR·저장소·도구·분/시/일 호출 제한
 - 동적 소스 설정 기반 Worker, 재시도·지수 백오프와 polling 무결성 보정
 - 저장소 발견·등록·재색인 및 작업 운영 화면
@@ -130,9 +132,13 @@ Kubernetes 배포는 [deploy/kubernetes/README.md](deploy/kubernetes/README.md)�
 ### 원격 소스 검색
 
 `search-code`는 Library ID 없이 접근 가능한 저장소 이름과 코드를 함께 검색합니다.
-GitLab은 Project Search API(`scope=blobs`), Bitbucket Server는 Code Search API를
-사용하며, 로컬 색인이 아직 없는 파일도 ACL 검증과 Secret 마스킹 후 결과에
-포함합니다. 아직 카탈로그에 등록되지 않은 저장소도 원격 발견 후 저장소 ACL이 현재
+GitLab은 Advanced Search가 있으면 인스턴스 전역 `scope=blobs` 검색을, 없으면 저장소
+이름 검색으로 후보를 좁힌 뒤 Project Search API를 사용합니다. Bitbucket Server는 Code
+Search API를 전역·저장소 범위로 모두 사용하며, 로컬 색인이 아직 없는 파일도 ACL
+검증과 Secret 마스킹 후 결과에 포함합니다. 저장소 이름과 무관한 코드 문자열도
+검색되고, 어떤 경로가 실행됐는지와 ACL로 걸러진 건수는 응답 `Diagnostics`로
+설명합니다. 소스 ACL Principal이 매핑되지 않은 계정은 결과가 0건인 이유를 함께
+반환합니다. 아직 카탈로그에 등록되지 않은 저장소도 원격 발견 후 저장소 ACL이 현재
 사용자 Principal과 일치할 때만 표시합니다. 예를 들어 `dify 소스 검색해`는 검색 명령
 표현을 제거한 `dify`를 원격 API에 전달합니다. 기존 `search-source`와 `query-docs`도 같은 안전한 원격
 검색 결과 경로를 사용합니다.

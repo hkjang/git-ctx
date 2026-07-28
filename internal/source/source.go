@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"unicode"
 )
@@ -70,6 +71,35 @@ type QueryResult struct {
 type QuerySearcher interface {
 	SearchQuery(context.Context, RepositoryRef, string, string, int) ([]QueryResult, error)
 }
+
+// GlobalQueryResult carries a code hit found by an instance wide search API
+// together with the repository it belongs to, so the caller can apply the
+// repository ACL before the snippet is shown to a user.
+type GlobalQueryResult struct {
+	ProjectKey, Slug, Name, Description, Ref, DefaultBranch string
+	ID                                                      int64
+	QueryResult
+}
+
+// GlobalQuerySearcher searches source code across every repository the service
+// account can read. Bitbucket Server exposes this through the code search API
+// and GitLab through advanced search, so implementations must return
+// ErrGlobalSearchUnsupported when the remote instance has the feature disabled.
+type GlobalQuerySearcher interface {
+	SearchGlobalQuery(context.Context, string, int) ([]GlobalQueryResult, error)
+}
+
+// RepositorySearcher performs a server side repository name search instead of
+// enumerating every project, which keeps discovery usable on instances with
+// thousands of repositories.
+type RepositorySearcher interface {
+	SearchRepositories(context.Context, string, int) ([]Repository, error)
+}
+
+// ErrGlobalSearchUnsupported reports that the remote instance cannot run an
+// instance wide code search, so the caller should fall back to per repository
+// queries instead of surfacing an error.
+var ErrGlobalSearchUnsupported = errors.New("global source code search is not available on this instance")
 
 // LibraryID returns the canonical source-aware library ID used by the catalog.
 // Bitbucket keeps /project/repository while other sources receive a namespace

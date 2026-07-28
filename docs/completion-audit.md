@@ -54,6 +54,8 @@ Notification outbox 1,205-event paging      PASS
 PostgreSQL 16 DSN-only application startup PASS
 PostgreSQL 실패→SQLite 복구→PostgreSQL 논리 이전·재기동 PASS
 node test/web/admin-ui.test.js              PASS
+node test/web/guides.test.js                PASS
+헤드리스 브라우저 관리자 화면 전 패널·설정 탭 순회 PASS (콘솔 오류 0)
 scripts/package-offline-image.sh            PASS (`git-ctx-vX.Y.Z.tar.gz`)
 Docker build + UID 10001 readiness/UI       PASS
 OpenSearch auth/mapping/bulk/ACL contract   PASS

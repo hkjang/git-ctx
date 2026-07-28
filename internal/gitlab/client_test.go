@@ -2,6 +2,7 @@ package gitlab
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -76,5 +77,115 @@ func TestGitLabAdapterPaginationFilesAndPermissions(t *testing.T) {
 	hits, err := c.SearchQuery(context.Background(), ref, "main", "gpu usage", 5)
 	if err != nil || len(hits) != 1 || hits[0].Path != "docs/gpu.md" || hits[0].LineStart != 12 {
 		t.Fatalf("hits=%#v err=%v", hits, err)
+	}
+}
+
+// Subgroup projects must carry the full namespace path. Using only the direct
+// parent path produced /projects/sub%2Fproject URLs that GitLab answers with 404
+// for every later search, ACL and content call.
+func TestGitLabRepositoriesUseFullNamespacePath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.EscapedPath() {
+		case "/api/v4/groups/platform/projects":
+			w.Write([]byte(`[{"id":7,"path":"agent","name":"Agent","default_branch":"main","path_with_namespace":"platform/ai/agent","namespace":{"path":"ai","full_path":"platform/ai"}}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := New(Config{BaseURL: srv.URL, Token: "pat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repositories, err := c.ListRepositories(context.Background(), "platform")
+	if err != nil || len(repositories) != 1 {
+		t.Fatalf("repositories=%#v err=%v", repositories, err)
+	}
+	if repositories[0].ProjectKey != "platform/ai" || repositories[0].Slug != "agent" {
+		t.Fatalf("unexpected namespace mapping: %#v", repositories[0])
+	}
+}
+
+func TestGitLabGlobalSearchResolvesProjectAndReportsUnsupported(t *testing.T) {
+	advanced := true
+	projectCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.EscapedPath() {
+		case "/api/v4/search":
+			if !advanced {
+				w.WriteHeader(http.StatusBadRequest)
+				w.Write([]byte(`{"error":"scope does not have a valid value"}`))
+				return
+			}
+			if r.URL.Query().Get("scope") != "blobs" || r.URL.Query().Get("search") != "NewOIDCVerifier" {
+				t.Errorf("search query=%s", r.URL.RawQuery)
+			}
+			w.Write([]byte(`[{"path":"internal/auth/oidc.go","data":"func NewOIDCVerifier(","ref":"main","startline":80,"project_id":7}]`))
+		case "/api/v4/projects/7":
+			projectCalls++
+			w.Write([]byte(`{"id":7,"path":"agent","name":"Agent","default_branch":"main","path_with_namespace":"platform/ai/agent","namespace":{"path":"ai","full_path":"platform/ai"}}`))
+		case "/api/v4/projects":
+			if r.URL.Query().Get("search") != "agent" || r.URL.Query().Get("search_namespaces") != "true" {
+				t.Errorf("project search query=%s", r.URL.RawQuery)
+			}
+			w.Write([]byte(`[{"id":7,"path":"agent","name":"Agent","default_branch":"main","namespace":{"full_path":"platform/ai"}}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	c, err := New(Config{BaseURL: srv.URL, Token: "pat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := c.SearchGlobalQuery(context.Background(), "NewOIDCVerifier", 10)
+	if err != nil || len(results) != 1 {
+		t.Fatalf("results=%#v err=%v", results, err)
+	}
+	if results[0].ProjectKey != "platform/ai" || results[0].Slug != "agent" || results[0].LineStart != 80 {
+		t.Fatalf("unexpected global hit: %#v", results[0])
+	}
+	if _, err = c.SearchRepositories(context.Background(), "agent", 10); err != nil {
+		t.Fatalf("repository search: %v", err)
+	}
+	// The project lookup must be cached so a page of hits from one project does
+	// not issue one API call per hit.
+	if _, err = c.SearchGlobalQuery(context.Background(), "NewOIDCVerifier", 10); err != nil {
+		t.Fatal(err)
+	}
+	if projectCalls != 1 {
+		t.Fatalf("project lookups=%d, want 1 cached lookup", projectCalls)
+	}
+	advanced = false
+	if _, err = c.SearchGlobalQuery(context.Background(), "NewOIDCVerifier", 10); !errors.Is(err, source.ErrGlobalSearchUnsupported) {
+		t.Fatalf("expected unsupported sentinel, got %v", err)
+	}
+}
+
+// GitLab rejects a search that names a ref the remote no longer has. The client
+// retries on the default branch instead of returning nothing.
+func TestGitLabSearchRetriesWithoutMissingRef(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/api/v4/projects/core%2Fdemo/search" {
+			http.NotFound(w, r)
+			return
+		}
+		attempts++
+		if r.URL.Query().Get("ref") != "" {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"message":"ref not found"}`))
+			return
+		}
+		w.Write([]byte(`[{"path":"README.md","data":"hello","ref":"main","startline":1}]`))
+	}))
+	defer srv.Close()
+	c, err := New(Config{BaseURL: srv.URL, Token: "pat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits, err := c.SearchQuery(context.Background(), source.RepositoryRef{ProjectKey: "core", Slug: "demo"}, "deleted-branch", "hello", 5)
+	if err != nil || len(hits) != 1 || attempts != 2 {
+		t.Fatalf("hits=%#v attempts=%d err=%v", hits, attempts, err)
 	}
 }

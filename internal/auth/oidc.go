@@ -363,13 +363,14 @@ func oidcContext(ctx context.Context, cfg OIDCConfig) (context.Context, error) {
 	return oidc.ClientContext(ctx, client), nil
 }
 func stringClaim(m map[string]any, key string) string { v, _ := m[key].(string); return v }
+
+// PlatformRoles lists every role a Keycloak role may be mapped onto. The
+// administration UI renders it so mappings can only be built from valid values.
+func PlatformRoles() []string {
+	return []string{"platform-admin", "security-admin", "mcp-admin", "source-admin", "search-admin", "auditor", "readonly-operator", "developer", "service-account"}
+}
 func isPlatformRole(role string) bool {
-	switch role {
-	case "platform-admin", "security-admin", "mcp-admin", "source-admin", "search-admin", "auditor", "developer", "service-account", "readonly-operator":
-		return true
-	default:
-		return false
-	}
+	return slices.Contains(PlatformRoles(), role)
 }
 func stringSliceClaim(m map[string]any, key string) []string {
 	raw, ok := m[key].([]any)

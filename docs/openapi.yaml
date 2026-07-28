@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.19.0
+  version: 0.20.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -121,6 +121,12 @@ paths:
         parameters: [{ $ref: "#/components/parameters/Id" }],
         responses: { "204": { description: Read } },
       }
+  /api/v1/me/access:
+    get:
+      {
+        summary: Explain the signed-in platform roles per setting category and whether a source ACL principal is mapped,
+        responses: { "200": { description: Access diagnostics } },
+      }
   /api/v1/tools/resolve/test:
     post:
       {
@@ -224,6 +230,13 @@ paths:
         summary: Test and validate Keycloak source model OpenSearch telemetry or backup connectivity without saving,
         parameters: [{ $ref: "#/components/parameters/Category" }],
         responses: { "200": { description: Verified } },
+      }
+  /api/v1/admin/settings/{category}/validate:
+    post:
+      {
+        summary: Normalize and validate any setting category without saving or contacting the category owner service,
+        parameters: [{ $ref: "#/components/parameters/Category" }],
+        responses: { "200": { description: Valid with masked normalized value }, "400": { description: Validation failed } },
       }
   /api/v1/admin/settings/keycloak/status:
     get:

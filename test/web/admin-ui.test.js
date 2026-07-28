@@ -38,8 +38,38 @@ for (const id of [
   "admin-users",
   "admin-key-scopes",
   "notification-deliveries",
+  "app-sidebar",
+  "sidebar-toggle",
+  "theme-toggle",
+  "help-button",
+  "toast-stack",
+  "guide-dialog",
+  "guide-title",
+  "guide-body",
+  "guide-diagnose",
+  "acl-guide-button",
+  "setting-guide-button",
+  "setting-search",
+  "setting-test-result",
+  "validate-setting",
+  "keycloak-mapping-card",
+  "keycloak-role-mappings",
+  "mapping-source-role",
+  "mapping-platform-role",
+  "claim-bitbucket",
+  "claim-gitlab",
+  "claim-groups",
+  "source-test-card",
+  "source-test-form",
+  "source-test-result",
+  "account-access",
 ]) {
   assert.match(html, new RegExp(`id=["']${id}["']`), `missing ${id}`);
+}
+// app.js가 참조하는 모든 요소는 실제로 존재해야 합니다.
+const declaredIds = new Set([...html.matchAll(/id="([^"]+)"/g)].map((match) => match[1]));
+for (const match of script.matchAll(/\$\("#([a-zA-Z0-9_-]+)"\)/g)) {
+  assert.ok(declaredIds.has(match[1]), `app.js references missing element #${match[1]}`);
 }
 assert.match(script, /data-setting-tab/);
 assert.match(script, /data-admin-target/);
@@ -57,6 +87,18 @@ assert.match(script, /비밀값.*마스킹됨/);
 assert.match(script, /data-secret-stored/);
 assert.match(script, /api\/v1\/admin\/users/);
 assert.match(script, /configureMCPKeyScopes/);
+// 새 UI 기능: 토스트, 가이드 모달, 권한 진단, 설정 검증, 역할 매핑 편집기
+assert.match(script, /function toast\(/);
+assert.match(script, /function openGuide\(/);
+assert.match(script, /api\/v1\/me\/access/);
+assert.match(script, /settings\/\$\{category\}\/\$\{kind\}/);
+assert.match(script, /realmRoleMappings/);
+assert.match(script, /clientRoleMappings/);
+assert.match(script, /renderKeycloakMappings/);
+assert.match(script, /reportError/);
+assert.match(script, /ACL 가이드 열기/);
+assert.match(script, /Diagnostics/);
+assert.match(html, /<script src="\/guides\.js">/);
 assert.match(html, /search-repositories/);
 assert.match(html, /search-code/);
 assert.match(script, /api\/v1\/tools\/search-code\/test/);

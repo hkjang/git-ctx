@@ -232,11 +232,76 @@ func (c *Client) Changes(ctx context.Context, r source.RepositoryRef, from, to s
 	return out, nil
 }
 func (c *Client) SearchQuery(ctx context.Context, r source.RepositoryRef, ref, query string, limit int) ([]source.QueryResult, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, errors.New("search query is required")
+	}
+	hits, err := c.searchCode(ctx, fmt.Sprintf("project:%s repo:%s %s", r.ProjectKey, r.Slug, query), limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]source.QueryResult, 0, len(hits))
+	for _, hit := range hits {
+		result := hit.QueryResult
+		result.CommitID = ref
+		out = append(out, result)
+	}
+	return out, nil
+}
+
+// SearchGlobalQuery uses the same Bitbucket code search API without a project
+// or repository filter, which is what the Bitbucket search screen itself does.
+func (c *Client) SearchGlobalQuery(ctx context.Context, query string, limit int) ([]source.GlobalQueryResult, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, errors.New("search query is required")
+	}
+	return c.searchCode(ctx, query, limit)
+}
+
+// SearchRepositories matches the term against repository names across every
+// project instead of paging through the full project list.
+func (c *Client) SearchRepositories(ctx context.Context, query string, limit int) ([]source.Repository, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, errors.New("search query is required")
+	}
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	type item struct {
+		ID                      int64
+		Slug, Name, Description string
+		Archived                bool
+		Project                 struct{ Key string }
+		DefaultBranch           *struct {
+			DisplayID string `json:"displayId"`
+		} `json:"defaultBranch"`
+	}
+	items, err := pageAll[item](ctx, c, "/repos?name="+url.QueryEscape(query))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]source.Repository, 0, len(items))
+	for _, x := range items {
+		branch := ""
+		if x.DefaultBranch != nil {
+			branch = x.DefaultBranch.DisplayID
+		}
+		out = append(out, source.Repository{ID: x.ID, ProjectKey: x.Project.Key, Slug: x.Slug, Name: x.Name, Description: x.Description, DefaultBranch: branch, Archived: x.Archived})
+		if len(out) == limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (c *Client) searchCode(ctx context.Context, query string, limit int) ([]source.GlobalQueryResult, error) {
 	if limit < 1 || limit > 50 {
 		limit = 8
 	}
 	body := map[string]any{
-		"query":    fmt.Sprintf("project:%s repo:%s %s", r.ProjectKey, r.Slug, query),
+		"query":    query,
 		"entities": map[string]any{"code": map[string]int{"start": 0, "limit": limit}},
 		"limits":   map[string]int{"primary": limit, "secondary": limit},
 	}
@@ -269,7 +334,14 @@ func (c *Client) SearchQuery(ctx context.Context, r source.RepositoryRef, ref, q
 	var payload struct {
 		Code struct {
 			Values []struct {
-				File  string `json:"file"`
+				File       string `json:"file"`
+				Repository struct {
+					ID            int64                `json:"id"`
+					Slug          string               `json:"slug"`
+					Name          string               `json:"name"`
+					Project       struct{ Key string } `json:"project"`
+					DefaultBranch string               `json:"defaultBranch"`
+				} `json:"repository"`
 				Lines []struct {
 					Line     int    `json:"line"`
 					Text     string `json:"text"`
@@ -283,7 +355,7 @@ func (c *Client) SearchQuery(ctx context.Context, r source.RepositoryRef, ref, q
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&payload); err != nil {
 		return nil, err
 	}
-	out := make([]source.QueryResult, 0, len(payload.Code.Values))
+	out := make([]source.GlobalQueryResult, 0, len(payload.Code.Values))
 	for _, hit := range payload.Code.Values {
 		if hit.File == "" {
 			continue
@@ -311,7 +383,11 @@ func (c *Client) SearchQuery(ctx context.Context, r source.RepositoryRef, ref, q
 		if end < start {
 			end = start
 		}
-		out = append(out, source.QueryResult{Path: hit.File, Snippet: strings.Join(lines, "\n"), CommitID: ref, LineStart: start, LineEnd: end})
+		out = append(out, source.GlobalQueryResult{
+			ID: hit.Repository.ID, ProjectKey: hit.Repository.Project.Key, Slug: hit.Repository.Slug,
+			Name: hit.Repository.Name, Ref: hit.Repository.DefaultBranch, DefaultBranch: hit.Repository.DefaultBranch,
+			QueryResult: source.QueryResult{Path: hit.File, Snippet: strings.Join(lines, "\n"), LineStart: start, LineEnd: end},
+		})
 	}
 	return out, nil
 }

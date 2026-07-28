@@ -370,11 +370,13 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/tools/context-pack/test", a.authenticate(http.HandlerFunc(a.testContextPack)))
 	a.mux.Handle("POST /api/v1/tools/runbooks/test", a.authenticate(http.HandlerFunc(a.testRunbooks)))
 	a.mux.Handle("POST /api/v1/tools/export/test", a.authenticate(http.HandlerFunc(a.testContextExport)))
+	a.mux.Handle("GET /api/v1/me/access", a.authenticate(http.HandlerFunc(a.accessDiagnostics)))
 	a.mux.Handle("GET /api/v1/admin/settings", a.admin(http.HandlerFunc(a.listSettings)))
 	a.mux.Handle("GET /api/v1/admin/settings/{category}", a.settingsAuthorize(http.HandlerFunc(a.getSetting)))
 	a.mux.Handle("DELETE /api/v1/admin/settings/{category}", a.settingsAuthorize(http.HandlerFunc(a.deleteSetting)))
 	a.mux.Handle("PUT /api/v1/admin/settings/{category}", a.settingsAuthorize(http.HandlerFunc(a.putSetting)))
 	a.mux.Handle("POST /api/v1/admin/settings/{category}/test", a.settingsAuthorize(http.HandlerFunc(a.testIntegrationSetting)))
+	a.mux.Handle("POST /api/v1/admin/settings/{category}/validate", a.settingsAuthorize(http.HandlerFunc(a.validateIntegrationSetting)))
 	a.mux.Handle("POST /api/v1/admin/settings/keycloak/preview", a.settingsAuthorize(http.HandlerFunc(a.previewKeycloak)))
 	a.mux.Handle("GET /api/v1/admin/settings/keycloak/status", a.settingsAuthorize(http.HandlerFunc(a.keycloakStatus)))
 	a.mux.Handle("GET /api/v1/admin/audit-logs", a.authorize(http.HandlerFunc(a.auditLogs), "auditor", "security-admin"))
@@ -471,7 +473,8 @@ func (a *App) authenticate(next http.Handler) http.Handler {
 			return
 		}
 		if cookie, err := r.Cookie("git_ctx_session"); err == nil {
-			if principal, ok := a.sessionPrincipal(r.Context(), cookie.Value); ok {
+			if principal, expires, ok := a.sessionPrincipal(r.Context(), cookie.Value); ok {
+				a.renewSession(w, r, cookie.Value, principal, expires)
 				next.ServeHTTP(w, r.WithContext(auth.WithPrincipal(r.Context(), principal)))
 				return
 			}
@@ -541,7 +544,7 @@ func (a *App) bootstrapLogin(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusInternalServerError, "bootstrap_login_failed", "Unable to persist bootstrap session")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: "git_ctx_session", Value: rawSession, Path: "/", HttpOnly: true, Secure: strings.HasPrefix(a.publicURL(r.Context()), "https://"), SameSite: http.SameSiteStrictMode, Expires: expires})
+	http.SetCookie(w, recoverySessionCookie(r, rawSession, expires))
 	a.audit(r, auth.Principal{UserID: id}, "bootstrap.login", "session", "bootstrap", "success", nil)
 	jsonOut(w, http.StatusOK, map[string]any{"status": "authenticated", "expiresAt": expires})
 }
@@ -607,7 +610,7 @@ func (a *App) recoveryLogin(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusInternalServerError, "recovery_login_failed", "Unable to persist recovery session")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: "git_ctx_session", Value: rawSession, Path: "/", HttpOnly: true, Secure: strings.HasPrefix(a.publicURL(r.Context()), "https://"), SameSite: http.SameSiteStrictMode, Expires: sessionExpires})
+	http.SetCookie(w, recoverySessionCookie(r, rawSession, sessionExpires))
 	a.audit(r, auth.Principal{UserID: id}, "recovery.login", "session", "break-glass", "success", map[string]any{"expiresAt": sessionExpires})
 	jsonOut(w, http.StatusOK, map[string]any{"status": "authenticated", "expiresAt": sessionExpires})
 }
@@ -745,16 +748,16 @@ func (a *App) callback(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, "internal_error", "Unable to create session")
 		return
 	}
-	sessionExpiry := token.Expiry
-	if sessionExpiry.IsZero() || sessionExpiry.After(time.Now().Add(8*time.Hour)) {
-		sessionExpiry = time.Now().Add(8 * time.Hour)
-	}
+	// The browser session is intentionally not tied to token.Expiry. Keycloak
+	// access tokens usually live a few minutes, which previously signed the user
+	// out on the next page refresh.
+	sessionExpiry := time.Now().UTC().Add(browserSessionLifetime)
 	_, err = a.store.DB.ExecContext(ctx, a.store.Rebind(`INSERT INTO user_sessions(id_hash,user_id,expires_at,last_seen_at) VALUES(?,?,?,?)`), sessionHash(rawSession), userID, sessionExpiry.UTC(), time.Now().UTC())
 	if err != nil {
 		problem(w, 500, "internal_error", "Unable to persist session")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: "git_ctx_session", Value: rawSession, Path: "/", HttpOnly: true, Secure: strings.HasPrefix(a.publicURL(r.Context()), "https://"), SameSite: http.SameSiteLaxMode, Expires: sessionExpiry})
+	http.SetCookie(w, sessionCookie(r, rawSession, sessionExpiry))
 	a.audit(r, auth.Principal{UserID: userID}, "login", "session", "browser", "success", nil)
 	if stringContains(identity.Roles, "platform-admin") {
 		a.disableBootstrapAdmin()
@@ -765,7 +768,7 @@ func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie("git_ctx_session"); err == nil {
 		_, _ = a.store.DB.ExecContext(r.Context(), a.store.Rebind(`DELETE FROM user_sessions WHERE id_hash=?`), sessionHash(cookie.Value))
 	}
-	http.SetCookie(w, &http.Cookie{Name: "git_ctx_session", Path: "/", MaxAge: -1, HttpOnly: true, Secure: strings.HasPrefix(a.publicURL(r.Context()), "https://"), SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "git_ctx_session", Path: "/", MaxAge: -1, HttpOnly: true, Secure: requestIsSecure(r), SameSite: http.SameSiteLaxMode})
 	if cfg, err := a.loadOIDCConfig(r.Context()); err == nil {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
@@ -776,15 +779,73 @@ func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
-func (a *App) sessionPrincipal(ctx context.Context, raw string) (auth.Principal, bool) {
+
+// browserSessionLifetime is how long a browser session stays valid. It is
+// deliberately independent from the Keycloak access token lifetime, which is
+// often five minutes: binding the cookie to that value logged administrators
+// out again on the next page refresh.
+const browserSessionLifetime = 12 * time.Hour
+
+// sessionRenewalThreshold slides the session forward while the user is active
+// so long admin work is never interrupted by a hard expiry.
+const sessionRenewalThreshold = 2 * time.Hour
+
+// requestIsSecure reports whether the browser reached this instance over TLS.
+// The Secure attribute must follow the actual request scheme: deriving it from
+// the configured public URL sets Secure on plain HTTP deployments, and the
+// browser then silently discards the session cookie on every refresh.
+func requestIsSecure(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]); strings.EqualFold(proto, "https") {
+		return true
+	}
+	return strings.EqualFold(r.Header.Get("X-Forwarded-Ssl"), "on")
+}
+
+// sessionCookie issues the SSO browser session. Lax keeps the cookie on the top
+// level redirect back from Keycloak while still blocking cross site form posts.
+func sessionCookie(r *http.Request, value string, expires time.Time) *http.Cookie {
+	return &http.Cookie{
+		Name: "git_ctx_session", Value: value, Path: "/", HttpOnly: true,
+		Secure: requestIsSecure(r), SameSite: http.SameSiteLaxMode, Expires: expires,
+	}
+}
+
+// recoverySessionCookie issues the short lived bootstrap and break-glass
+// sessions. They never involve an external redirect, so they stay Strict.
+func recoverySessionCookie(r *http.Request, value string, expires time.Time) *http.Cookie {
+	cookie := sessionCookie(r, value, expires)
+	cookie.SameSite = http.SameSiteStrictMode
+	return cookie
+}
+
+// renewSession extends an active browser session that is close to expiry.
+// Bootstrap and break-glass sessions keep their deliberately short lifetime.
+func (a *App) renewSession(w http.ResponseWriter, r *http.Request, raw string, p auth.Principal, expires time.Time) {
+	if p.UserID == "bootstrap-admin" || p.UserID == "break-glass-admin" {
+		return
+	}
+	if time.Until(expires) > sessionRenewalThreshold {
+		return
+	}
+	next := time.Now().UTC().Add(browserSessionLifetime)
+	if _, err := a.store.DB.ExecContext(r.Context(), a.store.Rebind(`UPDATE user_sessions SET expires_at=? WHERE id_hash=?`), next, sessionHash(raw)); err != nil {
+		return
+	}
+	http.SetCookie(w, sessionCookie(r, raw, next))
+}
+
+func (a *App) sessionPrincipal(ctx context.Context, raw string) (auth.Principal, time.Time, bool) {
 	if raw == "" {
-		return auth.Principal{}, false
+		return auth.Principal{}, time.Time{}, false
 	}
 	var userID, subject, username, bitbucketSlug, gitlabID, bitbucketGroups string
 	var expires time.Time
 	err := a.store.DB.QueryRowContext(ctx, a.store.Rebind(`SELECT s.user_id,u.subject,u.username,COALESCE(i.bitbucket_user_slug,''),COALESCE(i.gitlab_user_id,''),COALESCE(i.bitbucket_groups,''),s.expires_at FROM user_sessions s JOIN users u ON u.id=s.user_id LEFT JOIN user_identities i ON i.user_id=u.id WHERE s.id_hash=? AND u.status='active'`), sessionHash(raw)).Scan(&userID, &subject, &username, &bitbucketSlug, &gitlabID, &bitbucketGroups, &expires)
 	if err != nil || time.Now().After(expires) {
-		return auth.Principal{}, false
+		return auth.Principal{}, time.Time{}, false
 	}
 	acl := bitbucketSlug
 	if acl == "" && gitlabID != "" {
@@ -792,16 +853,16 @@ func (a *App) sessionPrincipal(ctx context.Context, raw string) (auth.Principal,
 	}
 	roles, err := a.userRoles(ctx, userID)
 	if err != nil {
-		return auth.Principal{}, false
+		return auth.Principal{}, time.Time{}, false
 	}
 	if userID == "bootstrap-admin" {
 		if !a.bootstrapAvailable(ctx) {
-			return auth.Principal{}, false
+			return auth.Principal{}, time.Time{}, false
 		}
 		roles = []string{"platform-admin"}
 	}
 	_, _ = a.store.DB.ExecContext(ctx, a.store.Rebind(`UPDATE user_sessions SET last_seen_at=? WHERE id_hash=?`), time.Now().UTC(), sessionHash(raw))
-	return auth.Principal{UserID: userID, Subject: subject, Username: username, ACLPrincipal: acl, ACLPrincipals: sourceACLPrincipals(bitbucketSlug, gitlabID, splitCSV(bitbucketGroups)), Roles: roles}, true
+	return auth.Principal{UserID: userID, Subject: subject, Username: username, ACLPrincipal: acl, ACLPrincipals: sourceACLPrincipals(bitbucketSlug, gitlabID, splitCSV(bitbucketGroups)), Roles: roles}, expires, true
 }
 func randomToken(size int) (string, error) {
 	raw := make([]byte, size)
@@ -880,7 +941,17 @@ func (a *App) settingsAuthorize(next http.Handler) http.Handler {
 			}
 		}
 		if !settingRoleAllowed(p, category) {
-			problem(w, 403, "forbidden", "Required setting administrator role is missing")
+			// State exactly which role is missing and which roles the caller has.
+			// A bare "forbidden" leaves an administrator with no way to tell a
+			// Keycloak role mapping problem from a revoked account.
+			required := append([]string{"platform-admin"}, settingCategoryRoles()[category]...)
+			current := "none"
+			if len(p.Roles) > 0 {
+				current = strings.Join(p.Roles, ", ")
+			}
+			problem(w, http.StatusForbidden, "insufficient_role", fmt.Sprintf(
+				"Changing the %q setting requires one of these platform roles: %s. This account currently has: %s. Map a Keycloak realm role to a platform role in the Keycloak setting, or assign the role in user management.",
+				category, strings.Join(required, ", "), current))
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -897,13 +968,70 @@ func roleAllowed(p auth.Principal, roles ...string) bool {
 	}
 	return false
 }
-func settingRoleAllowed(p auth.Principal, category string) bool {
-	required := map[string][]string{
+
+// settingCategoryRoles lists the delegated role that may change each setting
+// category in addition to platform-admin. Categories that are absent are
+// reserved for platform-admin only.
+func settingCategoryRoles() map[string][]string {
+	return map[string][]string{
 		"bitbucket": {"source-admin"}, "gitlab": {"source-admin"}, "confluence": {"source-admin"}, "jira": {"source-admin"}, "index": {"source-admin"},
 		"mcp": {"mcp-admin"}, "search": {"search-admin"}, "model": {"search-admin"}, "opensearch": {"search-admin"},
 		"security": {"security-admin"}, "vault": {"security-admin"},
 	}
-	return roleAllowed(p, required[category]...)
+}
+func settingRoleAllowed(p auth.Principal, category string) bool {
+	return roleAllowed(p, settingCategoryRoles()[category]...)
+}
+
+// accessDiagnostics explains why the signed in account can or cannot change
+// each setting category, and whether the source ACL identity required for code
+// search is present. The administration UI renders it in the ACL guide.
+func (a *App) accessDiagnostics(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	categories := make([]map[string]any, 0, len(settingCategories()))
+	names := make([]string, 0, len(settingCategories()))
+	for category := range settingCategories() {
+		names = append(names, category)
+	}
+	slices.Sort(names)
+	for _, category := range names {
+		categories = append(categories, map[string]any{
+			"category": category,
+			"allowed":  settingRoleAllowed(p, category),
+			"roles":    append([]string{"platform-admin"}, settingCategoryRoles()[category]...),
+		})
+	}
+	var rolesManaged int
+	_ = a.store.DB.QueryRowContext(r.Context(), a.store.Rebind(`SELECT roles_managed FROM users WHERE id=?`), p.UserID).Scan(&rolesManaged)
+	keycloak := map[string]any{"configured": false}
+	if cfg, err := a.loadOIDCConfig(r.Context()); err == nil {
+		mapped := make([]string, 0, len(cfg.RealmRoleMappings)+len(cfg.ClientRoleMappings))
+		for keycloakRole, platformRole := range cfg.RealmRoleMappings {
+			mapped = append(mapped, "realm:"+keycloakRole+" → "+platformRole)
+		}
+		for keycloakRole, platformRole := range cfg.ClientRoleMappings {
+			mapped = append(mapped, "client:"+keycloakRole+" → "+platformRole)
+		}
+		slices.Sort(mapped)
+		keycloak = map[string]any{
+			"configured": true, "issuerUrl": cfg.IssuerURL, "clientId": cfg.ClientID,
+			"roleMappings": mapped, "groupsClaim": cfg.GroupsClaim,
+			"bitbucketUserSlugClaim": cfg.BitbucketUserSlugClaim, "gitlabUserIdClaim": cfg.GitLabUserIDClaim,
+		}
+	}
+	principals := aclPrincipals(p.ACLPrincipal, p.ACLPrincipals)
+	jsonOut(w, http.StatusOK, map[string]any{
+		"username": p.Username, "subject": p.Subject, "roles": p.Roles, "groups": p.Groups,
+		"rolesManagedLocally": rolesManaged == 1,
+		"aclPrincipal":        p.ACLPrincipal, "aclPrincipals": principals,
+		"aclReady":       len(principals) > 0,
+		"settings":       categories,
+		"keycloak":       keycloak,
+		"platformAdmin":  p.HasRole("platform-admin"),
+		"platformRoles":  auth.PlatformRoles(),
+		"recoveryEntry":  p.UserID == "bootstrap-admin" || p.UserID == "break-glass-admin",
+		"sessionSeconds": int(browserSessionLifetime.Seconds()),
+	})
 }
 func (a *App) me(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
@@ -1672,6 +1800,54 @@ func (a *App) deleteSetting(w http.ResponseWriter, r *http.Request) {
 	a.audit(r, p, "settings.delete", category, category, "success", nil)
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// validateIntegrationSetting runs normalization and validation for any setting
+// category without persisting it, so every settings tab can be checked before
+// saving even when the category has no external endpoint to connect to.
+func (a *App) validateIntegrationSetting(w http.ResponseWriter, r *http.Request) {
+	category := r.PathValue("category")
+	if !settingCategories()[category] {
+		problem(w, http.StatusBadRequest, "invalid_category", "Unsupported setting category")
+		return
+	}
+	var value map[string]any
+	if decode(r, &value) != nil {
+		problem(w, http.StatusBadRequest, "invalid_request", "Invalid JSON")
+		return
+	}
+	if previous, err := a.loadSettingMapRaw(r.Context(), category); err == nil {
+		preserveMasked(previous, value)
+	}
+	if err := a.normalizeSetting(r.Context(), category, value); err != nil {
+		problem(w, http.StatusBadRequest, "setting_normalization_failed", err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if err := a.validateSetting(ctx, category, value); err != nil {
+		problem(w, http.StatusBadRequest, "setting_validation_failed", err.Error())
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]any{
+		"category": category, "status": "valid", "normalized": maskedCopy(value), "checkedAt": time.Now().UTC(),
+	})
+}
+
+// maskedCopy returns the value with every secret replaced, so a validation
+// response can echo the effective configuration without leaking credentials.
+func maskedCopy(value map[string]any) map[string]any {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return map[string]any{}
+	}
+	var clone map[string]any
+	if json.Unmarshal(raw, &clone) != nil {
+		return map[string]any{}
+	}
+	maskSecrets(clone)
+	return clone
+}
+
 func (a *App) testIntegrationSetting(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
 	category := r.PathValue("category")

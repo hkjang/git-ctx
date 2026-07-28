@@ -1,4 +1,66 @@
 const $ = (s) => document.querySelector(s);
+const $$ = (s) => [...document.querySelectorAll(s)];
+// rows는 목록 응답을 항상 배열로 만듭니다. Go는 빈 슬라이스를 JSON null로
+// 직렬화하므로, 보정하지 않으면 데이터가 없는 새 설치에서 화면이 깨집니다.
+const rows = (value) => (Array.isArray(value) ? value : []);
+
+/* ---------------------------------------------------------------------------
+ * 공용 UI 유틸리티
+ * 화면 로직 어디서나 같은 방식으로 알림·모달·테마를 다루기 위한 최소 도구입니다.
+ * ------------------------------------------------------------------------- */
+
+// toast는 화면 하단에 비차단 알림을 띄웁니다. action을 주면 버튼이 함께 붙습니다.
+function toast(message, level = "info", action = null) {
+  const stack = $("#toast-stack");
+  if (!stack) return;
+  const item = document.createElement("div");
+  item.className = `toast ${level}`;
+  const text = document.createElement("div");
+  text.className = "toast-message";
+  text.textContent = message;
+  item.append(text);
+  if (action) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary";
+    button.textContent = action.label;
+    button.onclick = () => {
+      action.run();
+      item.remove();
+    };
+    item.append(button);
+  }
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "secondary";
+  close.textContent = "×";
+  close.setAttribute("aria-label", "알림 닫기");
+  close.onclick = () => item.remove();
+  item.append(close);
+  stack.append(item);
+  setTimeout(() => item.remove(), level === "error" ? 15000 : 7000);
+}
+
+const THEME_KEY = "git_ctx_theme";
+function applyTheme(theme) {
+  if (theme === "light" || theme === "dark") {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem(THEME_KEY, theme);
+  } else {
+    delete document.documentElement.dataset.theme;
+    localStorage.removeItem(THEME_KEY);
+  }
+}
+function setupTheme() {
+  applyTheme(localStorage.getItem(THEME_KEY) || "");
+  $("#theme-toggle").onclick = () => {
+    const current =
+      document.documentElement.dataset.theme ||
+      (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    applyTheme(current === "dark" ? "light" : "dark");
+  };
+}
+
 const categories = [
   "keycloak",
   "bitbucket",
@@ -267,6 +329,144 @@ const api = async (url, options = {}) => {
   }
   return body;
 };
+/* ---------------------------------------------------------------------------
+ * 가이드 모달
+ * 내용은 guides.js 의 순수 데이터이며, 아래 렌더러가 공통 서식을 만듭니다.
+ * 새 가이드를 추가할 때 이 파일은 수정할 필요가 없습니다.
+ * ------------------------------------------------------------------------- */
+let lastAccessDiagnostics = null;
+
+function guideSectionHTML(section) {
+  const parts = [`<h4>${esc(section.title || "")}</h4>`];
+  for (const paragraph of section.body || []) parts.push(`<p>${esc(paragraph)}</p>`);
+  if (section.steps?.length) {
+    parts.push(`<ol>${section.steps.map((step) => `<li>${esc(step)}</li>`).join("")}</ol>`);
+  }
+  if (section.table) {
+    parts.push(
+      `<div class="table-wrap"><table><thead><tr>${section.table.head.map((cell) => `<th>${esc(cell)}</th>`).join("")}</tr></thead><tbody>${section.table.rows
+        .map((row) => `<tr>${row.map((cell) => `<td>${esc(cell)}</td>`).join("")}</tr>`)
+        .join("")}</tbody></table></div>`,
+    );
+  }
+  if (section.code) parts.push(`<pre>${esc(section.code)}</pre>`);
+  if (section.notice) parts.push(`<div class="guide-notice">${esc(section.notice)}</div>`);
+  return `<section class="guide-section">${parts.join("")}</section>`;
+}
+
+function accessDiagnosticsHTML(access) {
+  if (!access) return '<div class="notice">권한 진단을 불러오는 중입니다…</div>';
+  const chips = (values, ok) =>
+    values?.length
+      ? values.map((value) => `<span class="chip ${ok ? "ok" : ""}">${esc(value)}</span>`).join("")
+      : '<span class="chip error">없음</span>';
+  const blocked = (access.settings || []).filter((item) => !item.allowed);
+  return `<div class="access-grid">
+    <article><h4>계정</h4><div>${esc(access.username || "-")}</div><small>${esc(access.subject || "")}</small></article>
+    <article><h4>플랫폼 역할</h4>${chips(access.roles, true)}<div class="field-help">${access.rolesManagedLocally ? "사용자 관리 화면에서 수동 관리 중입니다." : "로그인할 때 Keycloak 역할로 동기화됩니다."}</div></article>
+    <article><h4>소스 ACL Principal</h4>${chips(access.aclPrincipals, access.aclReady)}<div class="field-help">${access.aclReady ? "저장소 ACL 검사에 사용됩니다." : "비어 있으면 모든 검색 결과가 차단됩니다."}</div></article>
+    <article><h4>Keycloak 역할 매핑</h4>${access.keycloak?.configured ? chips(access.keycloak.roleMappings?.length ? access.keycloak.roleMappings : ["이름이 같은 역할만 자동 인식"], true) : '<span class="chip error">미설정</span>'}</article>
+    <article><h4>수정할 수 없는 설정</h4>${blocked.length ? blocked.map((item) => `<span class="chip error">${esc(item.category)}</span>`).join("") : '<span class="chip ok">전체 수정 가능</span>'}</article>
+  </div>`;
+}
+
+async function loadAccessDiagnostics() {
+  try {
+    lastAccessDiagnostics = await api("/api/v1/me/access");
+  } catch {
+    lastAccessDiagnostics = null;
+  }
+  const target = $("#account-access");
+  if (target) target.innerHTML = accessDiagnosticsHTML(lastAccessDiagnostics);
+  return lastAccessDiagnostics;
+}
+
+function openGuide(topic) {
+  const guide = GitCtxGuides.get(topic);
+  const dialog = $("#guide-dialog");
+  if (!guide) {
+    toast(`'${topic}' 가이드는 아직 준비되지 않았습니다.`, "error");
+    return;
+  }
+  $("#guide-title").textContent = guide.title;
+  const body = [
+    `<div class="guide-summary">${esc(guide.summary || "")}</div>`,
+    guide.audience ? `<p class="guide-audience">필요 역할: <code>${esc(guide.audience)}</code></p>` : "",
+    ...(guide.sections || []).map(guideSectionHTML),
+  ];
+  if (guide.troubleshooting?.length) {
+    body.push(
+      `<section class="guide-section"><h4>자주 겪는 문제</h4>${guide.troubleshooting
+        .map(
+          (item) =>
+            `<div class="guide-trouble"><strong>${esc(item.symptom)}</strong><div class="field-help">원인: ${esc(item.cause || "")}</div><div>조치: ${esc(item.fix)}</div></div>`,
+        )
+        .join("")}</section>`,
+    );
+  }
+  if (guide.diagnostics) {
+    body.push(`<section class="guide-section" id="guide-diagnostics"><h4>내 권한 진단</h4>${accessDiagnosticsHTML(lastAccessDiagnostics)}</section>`);
+  }
+  $("#guide-body").innerHTML = body.join("");
+  $("#guide-diagnose").hidden = !guide.diagnostics;
+  dialog.showModal();
+  if (guide.diagnostics) {
+    loadAccessDiagnostics().then((access) => {
+      const target = document.querySelector("#guide-diagnostics");
+      if (target) target.innerHTML = `<h4>내 권한 진단</h4>${accessDiagnosticsHTML(access)}`;
+    });
+  }
+}
+
+// openGuideIndex는 전체 가이드 목록을 보여 줍니다. guides.js에 항목을 추가하면
+// 여기에도 자동으로 나타납니다.
+function openGuideIndex() {
+  $("#guide-title").textContent = "설정·운영 가이드";
+  $("#guide-body").innerHTML =
+    `<div class="guide-summary">필요한 주제를 선택하세요. 각 설정 탭에서도 [이 탭 가이드] 버튼으로 같은 내용을 열 수 있습니다.</div>
+     <section class="guide-section"><div class="guide-index">${GitCtxGuides.topics()
+       .map((topic) => {
+         const guide = GitCtxGuides.get(topic);
+         return `<button type="button" data-guide-topic="${esc(topic)}"><span>${esc(guide.title)}</span><small>${esc((guide.summary || "").slice(0, 70))}…</small></button>`;
+       })
+       .join("")}</div></section>`;
+  $("#guide-diagnose").hidden = true;
+  $$("[data-guide-topic]").forEach((button) => {
+    button.onclick = () => openGuide(button.dataset.guideTopic);
+  });
+  if (!$("#guide-dialog").open) $("#guide-dialog").showModal();
+}
+
+function setupGuides() {
+  $("#guide-close").onclick = () => $("#guide-dialog").close();
+  $("#guide-dismiss").onclick = () => $("#guide-dialog").close();
+  $("#guide-diagnose").onclick = () =>
+    loadAccessDiagnostics().then((access) => {
+      const target = document.querySelector("#guide-diagnostics");
+      if (target) target.innerHTML = `<h4>내 권한 진단</h4>${accessDiagnosticsHTML(access)}`;
+      toast("권한 정보를 다시 확인했습니다.", "ok");
+    });
+  $("#help-button").onclick = openGuideIndex;
+  document.addEventListener("click", (event) => {
+    const trigger = event.target.closest("[data-guide]");
+    if (trigger) openGuide(trigger.dataset.guide);
+  });
+}
+
+// reportError는 오류를 사용자 언어로 보여주고, 권한 오류에는 가이드를 바로 연결합니다.
+function reportError(error, context = "") {
+  const prefix = context ? `${context}: ` : "";
+  if (error?.status === 403) {
+    toast(prefix + error.message, "error", { label: "ACL 가이드 열기", run: () => openGuide("acl") });
+    return;
+  }
+  if (error?.status === 401) {
+    toast(prefix + "인증이 만료되었습니다. 다시 로그인하세요.", "error");
+    return;
+  }
+  toast(prefix + (error?.message || "알 수 없는 오류"), "error");
+}
+
 $("#endpoint").textContent = location.origin;
 async function loadBranding() {
   try {
@@ -374,6 +574,8 @@ async function boot() {
     const me = await api("/api/v1/me");
     $("#status").textContent = "Keycloak 인증이 완료되었습니다.";
     $("#status").classList.add("ok");
+    // 로그인 후에는 소개 문구 대신 작업 화면이 먼저 보이도록 환영 패널을 접습니다.
+    document.querySelector(".welcome-panel").classList.add("compact");
     $("#login").hidden = true;
     $("#bootstrap-login").hidden = true;
     $("#recovery-login").hidden = true;
@@ -400,6 +602,7 @@ async function boot() {
     loadKeys();
     loadActivity();
     setupKnowledgeSearch();
+    loadAccessDiagnostics();
   } catch (e) {
     $("#status").textContent =
       "Keycloak으로 로그인하면 개인 MCP 키와 관리자 기능을 사용할 수 있습니다.";
@@ -413,10 +616,42 @@ function setupKnowledgeSearch() {
   $("#search-code-form").onsubmit = async (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.currentTarget));
+    output.textContent = "검색 중…";
     try {
-      output.textContent = JSON.stringify(await api("/api/v1/tools/search-code/test", { method: "POST", body: JSON.stringify({ ...data, limit: 20 }) }), null, 2);
+      const result = await api("/api/v1/tools/search-code/test", {
+        method: "POST",
+        body: JSON.stringify({ ...data, limit: 20 }),
+      });
+      // 원시 JSON 대신 사람이 읽는 요약을 먼저 보여 주고, 왜 결과가 비었는지
+      // 알 수 있도록 서버 진단 메시지를 항상 함께 출력합니다.
+      const repositories = result.Repositories || [];
+      const hits = result.Hits || [];
+      const lines = [
+        `질의: ${result.Query}`,
+        `저장소 ${repositories.length}건 · 코드 ${hits.length}건`,
+        "",
+      ];
+      if (repositories.length) {
+        lines.push("── 저장소 ──");
+        for (const item of repositories) {
+          lines.push(`${item.LibraryID}  (${item.SourceType}, ${item.DefaultBranch || "-"})  ${item.Name || ""}`);
+        }
+        lines.push("");
+      }
+      if (hits.length) {
+        lines.push("── 코드 ──");
+        for (const hit of hits) {
+          lines.push(`${hit.LibraryID} · ${hit.Path}#L${hit.LineStart}-L${hit.LineEnd} @${hit.Ref || "-"}`);
+          lines.push(String(hit.Snippet || "").split("\n").slice(0, 6).join("\n"));
+          lines.push("");
+        }
+      }
+      if (result.Warning) lines.push(`⚠ ${result.Warning}`);
+      for (const diagnostic of result.Diagnostics || []) lines.push(`· ${diagnostic}`);
+      output.textContent = lines.join("\n");
     } catch (error) {
       output.textContent = error.message;
+      reportError(error, "코드 검색");
     }
   };
   $("#repository-map-form").onsubmit = async (event) => {
@@ -567,13 +802,24 @@ function configureMCPKeyScopes(roles) {
 let openWorkspaceView = () => {};
 let openPersonalView = () => {};
 function setupWorkspaceNavigation(hasAdmin) {
+  $("#app-sidebar").hidden = false;
+  $("#sidebar-toggle").hidden = false;
+  $("#sidebar-toggle").onclick = () => {
+    const sidebar = $("#app-sidebar");
+    const collapsed = sidebar.dataset.collapsed !== "true";
+    sidebar.dataset.collapsed = String(collapsed);
+    $("#sidebar-toggle").setAttribute("aria-expanded", String(!collapsed));
+  };
   $("#workspace-menu").hidden = false;
   $("#admin-workspace-button").hidden = !hasAdmin;
+  $("#profile-acl").onclick = () => openGuide("acl");
   setupPersonalNavigation();
   openWorkspaceView = (workspace) => {
     const admin = workspace === "admin" && hasAdmin;
     $("#personal-workspace").hidden = admin;
     $("#admin").hidden = !admin;
+    $("#personal-menu").hidden = admin;
+    $("#admin-menu").hidden = !admin;
     document.querySelectorAll("[data-workspace]").forEach((button) => {
       const active = button.dataset.workspace === (admin ? "admin" : "personal");
       button.classList.toggle("active", active);
@@ -709,12 +955,14 @@ function setupQuickNavigation(capabilities) {
 }
 async function loadActivity() {
   try {
-    const [notifications, repos, usage, calls] = await Promise.all([
-      api("/api/v1/me/notifications"),
-      api("/api/v1/me/repositories"),
-      api("/api/v1/me/usage"),
-      api("/api/v1/me/calls"),
-    ]);
+    const [notifications, repos, usage, calls] = (
+      await Promise.all([
+        api("/api/v1/me/notifications"),
+        api("/api/v1/me/repositories"),
+        api("/api/v1/me/usage"),
+        api("/api/v1/me/calls"),
+      ])
+    ).map(rows);
     $("#my-notifications").innerHTML = notifications.length
       ? `<table><tbody>${notifications.map((n) => `<tr><td>${n.read ? "" : "● "}${esc(n.title)}<br><small>${esc(n.message)}</small></td><td>${date(n.createdAt)}</td><td>${n.read ? "" : `<button data-read="${esc(n.id)}">읽음</button>`}</td></tr>`).join("")}</tbody></table>`
       : "새 알림이 없습니다.";
@@ -745,7 +993,7 @@ async function loadActivity() {
   }
 }
 async function loadKeys() {
-  const keys = await api("/api/v1/me/api-keys");
+  const keys = rows(await api("/api/v1/me/api-keys"));
   $("#key-list").innerHTML =
     `<table><thead><tr><th>이름</th><th>Prefix / 제한</th><th>상태</th><th>만료</th><th>마지막 사용</th><th></th></tr></thead><tbody>${keys.map((k) => `<tr><td>${esc(k.name)}</td><td>${esc(k.prefix)}<br><small>${esc((k.scopes || []).join(", "))}<br>${esc((k.restrictions?.allowedCidrs || []).join(", "))} ${esc((k.restrictions?.allowedRepositories || []).join(", "))}<br>분/시/일 ${k.restrictions?.ratePerMinute || 0}/${k.restrictions?.ratePerHour || 0}/${k.restrictions?.ratePerDay || 0}</small></td><td>${esc(k.status)}</td><td>${date(k.expiresAt)}</td><td>${date(k.lastUsedAt)}</td><td>${k.status === "active" || k.status === "disabled" ? `<button class="secondary" data-scopes="${k.id}">Scope 편집</button> ` : ""}${k.status === "active" ? `<button class="secondary" data-disable="${k.id}">중지</button> <button data-rotate="${k.id}">회전</button> <button class="danger" data-revoke="${k.id}">폐기</button>` : k.status === "disabled" ? `<button data-enable="${k.id}">재활성화</button> <button class="danger" data-revoke="${k.id}">폐기</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
   document.querySelectorAll("[data-scopes]").forEach(
@@ -839,20 +1087,24 @@ function showSecret(secret) {
   $("#secret").innerHTML =
     `<strong>지금 복사하세요. 다시 표시되지 않습니다.</strong><br><code>${esc(secret)}</code>`;
 }
+// 외부 연결 테스트가 있는 카테고리. 나머지는 [설정 검증]만 노출합니다.
+const connectionTestCategories = [
+  "keycloak",
+  "bitbucket",
+  "gitlab",
+  "confluence",
+  "jira",
+  "model",
+  "opensearch",
+  "observability",
+  "backup",
+  "vault",
+  "notifications",
+];
 function renderSettingFields(category, value) {
   const fields = integrationSettingFields[category] || [];
   $("#setting-fields").hidden = fields.length === 0;
-  $("#test-connection").hidden = ![
-    "keycloak",
-    "bitbucket",
-    "gitlab",
-    "model",
-    "opensearch",
-    "observability",
-    "backup",
-    "vault",
-    "notifications",
-  ].includes(category);
+  $("#test-connection").hidden = !connectionTestCategories.includes(category);
   $("#preview-keycloak").hidden = category !== "keycloak";
   $("#setting-fields").innerHTML = fields
     .map(([key, label, type, fallback]) => {
@@ -932,6 +1184,108 @@ function renderSettingFields(category, value) {
     );
   applyTLSFieldState();
 }
+function renderSettingResult(ok, title, lines, payload) {
+  const panel = $("#setting-test-result");
+  panel.hidden = false;
+  panel.className = `wide result-panel ${ok ? "ok" : "error"}`;
+  panel.innerHTML =
+    `<h4>${esc(title)}</h4><ul class="result-list">${(lines || []).map((line) => `<li>${esc(line)}</li>`).join("")}</ul>` +
+    (payload ? `<details><summary>적용될 설정 값 (마스킹됨)</summary><pre>${esc(JSON.stringify(payload, null, 2))}</pre></details>` : "");
+}
+
+/* ---------------------------------------------------------------------------
+ * Keycloak 역할·Claim 매핑 편집기
+ * 관리자가 ACL 문제로 설정을 저장하지 못하는 가장 흔한 원인이 역할 매핑 부재라서,
+ * JSON을 직접 편집하지 않고도 매핑을 추가·삭제할 수 있게 합니다.
+ * ------------------------------------------------------------------------- */
+const platformRoleChoices = [
+  "platform-admin",
+  "security-admin",
+  "mcp-admin",
+  "source-admin",
+  "search-admin",
+  "auditor",
+  "readonly-operator",
+  "developer",
+  "service-account",
+];
+
+function currentSettingValue() {
+  try {
+    return JSON.parse($("#setting-json").value || "{}");
+  } catch {
+    return {};
+  }
+}
+function writeSettingValue(value) {
+  $("#setting-json").value = JSON.stringify(value, null, 2);
+}
+
+function renderKeycloakMappings() {
+  const value = currentSettingValue();
+  const rows = [
+    ...Object.entries(value.realmRoleMappings || {}).map(([source, target]) => ["realm", source, target]),
+    ...Object.entries(value.clientRoleMappings || {}).map(([source, target]) => ["client", source, target]),
+  ];
+  $("#keycloak-role-mappings").innerHTML = rows.length
+    ? `<table><thead><tr><th>종류</th><th>Keycloak 역할</th><th>플랫폼 역할</th><th></th></tr></thead><tbody>${rows
+        .map(
+          ([kind, source, target]) =>
+            `<tr><td>${kind}</td><td><code>${esc(source)}</code></td><td><code>${esc(target)}</code></td><td><button type="button" class="danger" data-drop-mapping="${esc(kind)}:${esc(source)}">삭제</button></td></tr>`,
+        )
+        .join("")}</tbody></table>`
+    : '<div class="empty">등록된 매핑이 없습니다. Keycloak 역할 이름이 플랫폼 역할과 같으면 매핑 없이도 인식됩니다.</div>';
+  $$("[data-drop-mapping]").forEach((button) => {
+    button.onclick = () => {
+      const [kind, ...rest] = button.dataset.dropMapping.split(":");
+      const source = rest.join(":");
+      const next = currentSettingValue();
+      const bucket = kind === "realm" ? "realmRoleMappings" : "clientRoleMappings";
+      if (next[bucket]) delete next[bucket][source];
+      writeSettingValue(next);
+      renderKeycloakMappings();
+      toast("매핑을 제거했습니다. [저장]을 눌러야 반영됩니다.", "info");
+    };
+  });
+  $("#mapping-platform-role").innerHTML = platformRoleChoices
+    .map((role) => `<option value="${role}">${role}</option>`)
+    .join("");
+  $("#claim-bitbucket").value = value.bitbucketUserSlugClaim || "";
+  $("#claim-gitlab").value = value.gitlabUserIdClaim || "";
+  $("#claim-groups").value = value.groupsClaim || "";
+}
+
+function setupKeycloakMappingEditor() {
+  $("#add-role-mapping").onclick = () => {
+    const source = $("#mapping-source-role").value.trim();
+    if (!source) {
+      toast("Keycloak 역할 이름을 입력하세요.", "error");
+      return;
+    }
+    const bucket = $("#mapping-kind").value === "realm" ? "realmRoleMappings" : "clientRoleMappings";
+    const value = currentSettingValue();
+    value[bucket] = { ...(value[bucket] || {}), [source]: $("#mapping-platform-role").value };
+    writeSettingValue(value);
+    $("#mapping-source-role").value = "";
+    renderKeycloakMappings();
+    toast("매핑을 추가했습니다. [저장]을 눌러야 반영됩니다.", "ok");
+  };
+  const claimFields = [
+    ["#claim-bitbucket", "bitbucketUserSlugClaim"],
+    ["#claim-gitlab", "gitlabUserIdClaim"],
+    ["#claim-groups", "groupsClaim"],
+  ];
+  for (const [selector, key] of claimFields) {
+    $(selector).oninput = () => {
+      const value = currentSettingValue();
+      const entered = $(selector).value.trim();
+      if (entered) value[key] = entered;
+      else delete value[key];
+      writeSettingValue(value);
+    };
+  }
+}
+
 function applyTLSFieldState() {
   const toggle = document.querySelector('[data-setting-key="tlsVerify"]');
   if (!toggle) return;
@@ -977,8 +1331,20 @@ function setupAdmin(roles, capabilities) {
     .map((c) => `<option>${c}</option>`)
     .join("");
   $("#setting-tabs").innerHTML = allowedCategories
-    .map((category) => `<button type="button" role="tab" data-setting-tab="${category}">${esc(settingCategoryMeta[category]?.[0] || category)}</button>`)
+    .map(
+      (category) =>
+        `<button type="button" role="tab" data-setting-tab="${category}" title="${esc(settingCategoryMeta[category]?.[1] || "")}">${esc(settingCategoryMeta[category]?.[0] || category)}</button>`,
+    )
     .join("");
+  // 설정 탭이 19개까지 늘어나므로 이름·설명·카테고리 키로 즉시 필터링합니다.
+  $("#setting-search").oninput = () => {
+    const needle = $("#setting-search").value.trim().toLowerCase();
+    $$("[data-setting-tab]").forEach((tab) => {
+      const category = tab.dataset.settingTab;
+      const haystack = `${category} ${(settingCategoryMeta[category] || []).join(" ")}`.toLowerCase();
+      tab.hidden = needle !== "" && !haystack.includes(needle);
+    });
+  };
   const selectCategory = async (category) => {
     $("#category").value = category;
     document.querySelectorAll("[data-setting-tab]").forEach((tab) => {
@@ -991,6 +1357,11 @@ function setupAdmin(roles, capabilities) {
     $("#login-keycloak").hidden = category !== "keycloak";
     $("#keycloak-runtime-status").hidden = category !== "keycloak";
     $("#advanced-setting-json").hidden = category === "keycloak";
+    $("#keycloak-mapping-card").hidden = category !== "keycloak";
+    $("#source-test-card").hidden = !["bitbucket", "gitlab"].includes(category);
+    $("#setting-test-result").hidden = true;
+    $("#setting-guide-button").hidden = !GitCtxGuides.has(category);
+    $("#setting-guide-button").dataset.guide = category;
     await loadCurrentSetting(category);
   };
   document.querySelectorAll("[data-setting-tab]").forEach(
@@ -1008,7 +1379,10 @@ function setupAdmin(roles, capabilities) {
       $("#setting-load-status").textContent =
         `저장된 설정 v${x.version}을 불러왔습니다 · ${date(x.updatedAt)} · ${x.updatedBy || "알 수 없는 관리자"}${maskedCount ? ` · 비밀값 ${maskedCount}개 마스킹됨` : ""}`;
       $("#delete-setting").hidden = false;
-      if (category === "keycloak") refreshKeycloakStatus();
+      if (category === "keycloak") {
+        renderKeycloakMappings();
+        refreshKeycloakStatus();
+      }
     } catch (e) {
       if ($("#category").value !== category) return;
       if (e.status !== 404) {
@@ -1022,31 +1396,98 @@ function setupAdmin(roles, capabilities) {
       $("#setting-load-status").textContent =
         "저장된 설정이 없습니다. 기본값을 표시합니다.";
       $("#delete-setting").hidden = true;
-      if (category === "keycloak") refreshKeycloakStatus();
+      if (category === "keycloak") {
+        renderKeycloakMappings();
+        refreshKeycloakStatus();
+      }
     }
   };
-  $("#test-connection").onclick = async () => {
+  // 연결 테스트와 검증 결과는 배너 한 줄이 아니라 구조화된 패널로 남겨,
+  // 어떤 단계가 통과했고 무엇이 실패했는지 화면에서 바로 확인할 수 있게 합니다.
+  const runSettingCheck = async (kind) => {
     const category = $("#category").value;
+    const button = kind === "test" ? $("#test-connection") : $("#validate-setting");
+    const label = button.textContent;
+    button.disabled = true;
+    button.textContent = kind === "test" ? "테스트 중…" : "검증 중…";
     try {
-      const x = await api(`/api/v1/admin/settings/${category}/test`, {
+      const result = await api(`/api/v1/admin/settings/${category}/${kind}`, {
         method: "POST",
         body: $("#setting-json").value,
       });
-      const querySearch = x.details?.querySearch;
-      const queryMessage = querySearch
-        ? ` · Query Search ${querySearch.status}${querySearch.repository ? ` (${querySearch.project}/${querySearch.repository}, 결과 ${querySearch.matches})` : ""}`
-        : "";
-      showAdmin(`${x.category} 연결 테스트와 검증에 성공했습니다${queryMessage}.`, true);
-    } catch (e) {
-      showAdmin(e.message, false);
+      const rows = [];
+      if (kind === "test") {
+        rows.push("외부 연결과 자격 증명 검증 통과");
+        const querySearch = result.details?.querySearch;
+        if (querySearch) {
+          rows.push(
+            querySearch.status === "verified"
+              ? `코드 검색 API 확인: ${querySearch.project}/${querySearch.repository} @ ${querySearch.ref} · 질의 "${querySearch.query}" · 결과 ${querySearch.matches}건`
+              : `코드 검색 API 건너뜀: ${querySearch.reason || "확인 대상 없음"}`,
+          );
+        }
+      } else {
+        rows.push("입력값 형식과 정규화 검증 통과. 저장하지 않았습니다.");
+      }
+      renderSettingResult(true, `${category} ${kind === "test" ? "연결 테스트" : "설정 검증"} 성공`, rows, result.normalized);
+      toast(`${category} ${kind === "test" ? "연결 테스트" : "설정 검증"}에 성공했습니다.`, "ok");
+    } catch (error) {
+      renderSettingResult(false, `${category} ${kind === "test" ? "연결 테스트" : "설정 검증"} 실패`, [error.message]);
+      reportError(error);
+    } finally {
+      button.disabled = false;
+      button.textContent = label;
     }
   };
+  $("#test-connection").onclick = () => runSettingCheck("test");
+  $("#validate-setting").onclick = () => runSettingCheck("validate");
+  // 저장 전 설정으로 실제 원격 검색을 수행해 "연동은 됐는데 검색이 0건"인 상황을
+  // 설정 화면에서 바로 구분할 수 있게 합니다.
+  $("#source-test-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const category = $("#category").value;
+    const panel = $("#source-test-result");
+    panel.hidden = false;
+    panel.className = "result-panel";
+    panel.textContent = "원격 검색을 실행하고 있습니다…";
+    try {
+      const result = await api("/api/v1/tools/search-code/test", {
+        method: "POST",
+        body: JSON.stringify({
+          query: $("#source-test-query").value || "README",
+          sourceType: category,
+          project: $("#source-test-project").value,
+          limit: 10,
+        }),
+      });
+      const repositories = result.Repositories || [];
+      const hits = result.Hits || [];
+      panel.className = `result-panel ${hits.length || repositories.length ? "ok" : "error"}`;
+      panel.innerHTML =
+        `<h4>저장소 ${repositories.length}건 · 코드 ${hits.length}건</h4>` +
+        (repositories.length
+          ? `<div>${repositories.slice(0, 8).map((item) => `<span class="chip">${esc(item.LibraryID)}</span>`).join("")}</div>`
+          : "") +
+        (hits.length
+          ? `<ul class="result-list">${hits.slice(0, 8).map((hit) => `<li><code>${esc(hit.LibraryID)}</code> · ${esc(hit.Path)} (L${hit.LineStart})</li>`).join("")}</ul>`
+          : "") +
+        ((result.Diagnostics || []).length
+          ? `<ul class="result-list">${result.Diagnostics.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>`
+          : "") +
+        (result.Warning ? `<div class="guide-notice">${esc(result.Warning)}</div>` : "");
+    } catch (error) {
+      panel.className = "result-panel error";
+      panel.textContent = error.message;
+    }
+  };
+  setupKeycloakMappingEditor();
   $("#setting-json").oninput = () => {
     try {
       renderSettingFields(
         $("#category").value,
         JSON.parse($("#setting-json").value),
       );
+      if ($("#category").value === "keycloak") renderKeycloakMappings();
     } catch {}
   };
   if (allowedCategories.length) selectCategory(allowedCategories[0]);
@@ -1108,7 +1549,8 @@ function setupAdmin(roles, capabilities) {
       }
       await loadCurrentSetting($("#category").value);
     } catch (e) {
-      showAdmin(`저장하지 못했습니다: ${e.message}`, false);
+      renderSettingResult(false, "설정을 저장하지 못했습니다", [e.message]);
+      reportError(e, "저장 실패");
     } finally {
       button.disabled = false;
       button.textContent = "저장";
@@ -1222,20 +1664,22 @@ function setupOps(capabilities) {
 }
 function setupAdminNavigation(capabilities) {
   const entries = [
-    ["settings-admin", "설정", capabilities.settings],
-    ["users-admin-section", "사용자", capabilities.users],
-    ["mcp-admin-section", "MCP", capabilities.mcp],
-    ["source-admin-section", "소스·색인", capabilities.source],
-    ["quality-admin-section", "검색 품질", capabilities.quality],
-    ["security-admin-section", "보안·Secret", capabilities.security || capabilities.securityEvents],
-    ["audit-admin-section", "감사", capabilities.audit],
-    ["database-admin-section", "데이터베이스", capabilities.status],
-    ["status-admin-section", "운영 상태", capabilities.status],
-    ["backup-admin-section", "백업·복구", capabilities.backup],
+    ["settings-admin", "설정", capabilities.settings, "⚙️"],
+    ["users-admin-section", "사용자", capabilities.users, "👥"],
+    ["mcp-admin-section", "MCP", capabilities.mcp, "🧩"],
+    ["source-admin-section", "소스·색인", capabilities.source, "📚"],
+    ["quality-admin-section", "검색 품질", capabilities.quality, "🎯"],
+    ["security-admin-section", "보안·Secret", capabilities.security || capabilities.securityEvents, "🛡️"],
+    ["audit-admin-section", "감사", capabilities.audit, "🧾"],
+    ["database-admin-section", "데이터베이스", capabilities.status, "🗄️"],
+    ["status-admin-section", "운영 상태", capabilities.status, "📊"],
+    ["backup-admin-section", "백업·복구", capabilities.backup, "💾"],
   ].filter((entry) => entry[2]);
-  $("#admin-menu").innerHTML = entries
-    .map(([id, label]) => `<button type="button" data-admin-target="${id}">${label}</button>`)
-    .join("");
+  $("#admin-menu").innerHTML =
+    '<p class="side-nav-title">관리자</p>' +
+    entries
+      .map(([id, label, , icon]) => `<button type="button" data-admin-target="${id}"><span class="nav-icon">${icon}</span>${label}</button>`)
+      .join("");
   const open = (target) => {
     document.querySelectorAll(".admin-panel").forEach((panel) => (panel.hidden = panel.id !== target));
     document.querySelectorAll("[data-admin-target]").forEach((button) => button.classList.toggle("active", button.dataset.adminTarget === target));
@@ -1251,10 +1695,11 @@ function setupAdminNavigation(capabilities) {
 let adminUserRoles = [];
 async function refreshAdminUsers() {
   try {
-    const result = await api("/api/v1/admin/users");
+    const result = (await api("/api/v1/admin/users")) || {};
     adminUserRoles = result.roles || [];
     $("#admin-user-roles").innerHTML =
       `<legend>플랫폼 역할</legend>${adminUserRoles.map((role) => `<label><input type="checkbox" name="admin-role" value="${esc(role)}" /> ${esc(role)}${role === "platform-admin" ? " (최고관리자)" : ""}</label>`).join("")}`;
+    result.users = rows(result.users);
     $("#admin-users").innerHTML = result.users.length
       ? `<table><thead><tr><th>사용자</th><th>상태</th><th>역할</th><th>생성</th><th></th></tr></thead><tbody>${result.users.map((user) => `<tr><td>${esc(user.username)}<br><small>${esc(user.email || "")}<br>${esc(user.subject)}</small></td><td>${esc(user.status)}</td><td>${esc((user.roles || []).join(", "))}</td><td>${date(user.createdAt)}</td><td><button data-edit-user="${esc(user.id)}">수정</button> <button class="danger" data-delete-user="${esc(user.id)}">삭제</button></td></tr>`).join("")}</tbody></table>`
       : "등록된 사용자가 없습니다.";
@@ -1388,7 +1833,7 @@ async function saveContextPack(event, capabilities) {
 async function refreshContextPacks(capabilities) {
   if (!capabilities.quality) return;
   try {
-    const packs = await api("/api/v1/admin/context-packs");
+    const packs = rows(await api("/api/v1/admin/context-packs"));
     $("#context-pack-list").innerHTML =
       `<table><thead><tr><th>이름/Slug</th><th>Library</th><th>상태</th><th></th></tr></thead><tbody>${packs.map((pack) => `<tr><td>${esc(pack.name)}<br><code>${esc(pack.slug)}</code><br>${esc(pack.description || "")}</td><td>${(pack.items || []).map((item) => `<code>${esc(item.libraryId)}${item.ref ? `/${esc(item.ref)}` : ""}</code>${item.queryHint ? ` · ${esc(item.queryHint)}` : ""}`).join("<br>")}</td><td>${pack.enabled ? "활성" : "중지"}</td><td>${capabilities.qualityWrite ? `<button data-edit-pack="${esc(pack.id)}">수정</button> <button class="danger" data-delete-pack="${esc(pack.id)}">삭제</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
     document.querySelectorAll("[data-edit-pack]").forEach((button) => {
@@ -1454,10 +1899,9 @@ async function runQuality(capabilities) {
 async function refreshQuality(capabilities = activeCapabilities) {
   if (!capabilities.quality) return;
   try {
-    const [cases, runs] = await Promise.all([
-      api("/api/v1/admin/quality/cases"),
-      api("/api/v1/admin/quality/runs"),
-    ]);
+    const [cases, runs] = (
+      await Promise.all([api("/api/v1/admin/quality/cases"), api("/api/v1/admin/quality/runs")])
+    ).map(rows);
     $("#quality-cases").innerHTML =
       `<table><thead><tr><th>이름/Library</th><th>질의</th><th>ACL</th><th>정답 파일</th><th></th></tr></thead><tbody>${cases.map((item) => `<tr><td>${esc(item.name)}<br><code>${esc(item.libraryId)}</code></td><td>${esc(item.query)}</td><td>${item.principals.map(esc).join("<br>")}</td><td>${item.relevantSources.map(esc).join("<br>")}</td><td>${capabilities.qualityWrite ? `<button class="danger" data-delete-quality="${esc(item.id)}">삭제</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
     $("#quality-runs").innerHTML =
@@ -1481,8 +1925,8 @@ async function refreshQuality(capabilities = activeCapabilities) {
       (row) =>
         (row.onclick = async () => {
           try {
-            const results = await api(
-              `/api/v1/admin/quality/runs/${encodeURIComponent(row.dataset.qualityRun)}/results`,
+            const results = rows(
+              await api(`/api/v1/admin/quality/runs/${encodeURIComponent(row.dataset.qualityRun)}/results`),
             );
             $("#quality-results").innerHTML =
               `<table><thead><tr><th>사례</th><th>검색 결과</th><th>Recall/MRR/nDCG</th><th>시간/오류</th></tr></thead><tbody>${results.map((result) => `<tr><td>${esc(result.caseName)}</td><td>${result.retrievedSources.map(esc).join("<br>")}</td><td>${result.recallAtK.toFixed(3)} / ${result.reciprocalRank.toFixed(3)} / ${result.ndcgAtK.toFixed(3)}</td><td>${result.durationMs} ms<br>${esc(result.errorMessage)}</td></tr>`).join("")}</tbody></table>`;
@@ -1498,7 +1942,7 @@ async function refreshQuality(capabilities = activeCapabilities) {
 async function refreshBackups(capabilities = activeCapabilities) {
   if (!capabilities.backup) return;
   try {
-    const records = await api("/api/v1/admin/backups");
+    const records = rows(await api("/api/v1/admin/backups"));
     $("#backups").innerHTML =
       `<table><thead><tr><th>생성 시각</th><th>유형/상태</th><th>크기</th><th>SHA-256</th><th></th></tr></thead><tbody>${records.map((record) => `<tr><td>${date(record.createdAt)}<br><small>${esc(record.createdBy)}</small></td><td>${esc(record.triggerType)} / ${esc(record.status)}<br><small>${esc(record.errorMessage)}</small></td><td>${Math.ceil((record.sizeBytes || 0) / 1024)} KiB</td><td><code>${esc(record.sha256 || "-")}</code></td><td>${record.status === "completed" ? `<a class="button-link" href="/api/v1/admin/backups/${encodeURIComponent(record.id)}/download">다운로드</a> ${capabilities.backupWrite ? `<button class="danger" data-restore="${esc(record.id)}">복원</button>` : ""}` : ""}</td></tr>`).join("")}</tbody></table>`;
     document.querySelectorAll("[data-restore]").forEach(
@@ -1577,14 +2021,16 @@ async function registerRepository(sourceType, repository) {
 }
 async function refreshOps(capabilities = activeCapabilities) {
   try {
-    const tools = capabilities.mcp ? await api("/api/v1/admin/mcp/tools") : [];
-    const [repos, jobs, freshness] = capabilities.source
+    const tools = capabilities.mcp ? rows(await api("/api/v1/admin/mcp/tools")) : [];
+    let [repos, jobs, freshness] = capabilities.source
       ? await Promise.all([
           api("/api/v1/admin/repositories"),
           api("/api/v1/admin/index-jobs"),
           api("/api/v1/admin/freshness"),
         ])
       : [[], [], { repositories: [], staleCount: 0, sloMinutes: 0 }];
+    [repos, jobs] = [rows(repos), rows(jobs)];
+    freshness = freshness || { repositories: [], staleCount: 0, sloMinutes: 0 };
     $("#mcp-tools").innerHTML =
       `<table><thead><tr><th>도구</th><th>상태</th><th>Timeout</th><th>Cache</th><th></th></tr></thead><tbody>${tools.map((t) => `<tr><td>${esc(t.name)}<br><small>${esc(t.description)}</small></td><td>${t.enabled ? "활성" : "비활성"}</td><td>${t.timeoutMs} ms</td><td>${t.cacheSeconds} s</td><td><button data-tool="${esc(t.name)}" data-enabled="${t.enabled}" data-timeout="${t.timeoutMs}" data-cache="${t.cacheSeconds}">설정</button></td></tr>`).join("")}</tbody></table>`;
     document.querySelectorAll("[data-tool]").forEach(
@@ -1651,7 +2097,7 @@ async function refreshOps(capabilities = activeCapabilities) {
 }
 async function refreshSecurity(capabilities = activeCapabilities) {
   try {
-    const [health, keys, events, audits, secrets, deliveries] = await Promise.all([
+    const [health, rawKeys, rawEvents, rawAudits, rawSecrets, rawDeliveries] = await Promise.all([
       capabilities.status ? api("/api/v1/admin/health") : null,
       capabilities.security ? api("/api/v1/admin/api-keys") : [],
       capabilities.securityEvents ? api("/api/v1/admin/security-events") : [],
@@ -1661,6 +2107,7 @@ async function refreshSecurity(capabilities = activeCapabilities) {
         ? api("/api/v1/admin/notification-deliveries")
         : [],
     ]);
+    const [keys, events, audits, secrets, deliveries] = [rawKeys, rawEvents, rawAudits, rawSecrets, rawDeliveries].map(rows);
     if (health) {
       $("#system-health").textContent =
         `저장소 ${health.repositories} · 청크 ${health.chunks} · 활성 키 ${health.activeApiKeys} · 대기 ${health.indexJobs.pending} · 실패 ${health.indexJobs.failed} · Trace ${health.observability?.tracingEnabled ? "활성" : "비활성"}`;
@@ -1717,9 +2164,15 @@ async function refreshSecurity(capabilities = activeCapabilities) {
     showAdmin(e.message, false);
   }
 }
+// showAdmin은 관리자 화면 상단 배너와 토스트를 함께 갱신합니다. 배너는 마지막
+// 결과를 남겨 두고, 토스트는 다른 화면을 보고 있어도 결과를 알려 줍니다.
 function showAdmin(text, ok) {
-  $("#admin-result").textContent = text;
-  $("#admin-result").classList.toggle("ok", ok);
+  const banner = $("#admin-result");
+  banner.hidden = false;
+  banner.textContent = text;
+  banner.classList.toggle("ok", Boolean(ok));
+  banner.classList.toggle("error", !ok);
+  toast(text, ok ? "ok" : "error");
 }
 function esc(v) {
   return String(v ?? "").replace(
@@ -1733,4 +2186,6 @@ function esc(v) {
 function date(v) {
   return v ? new Date(v).toLocaleString() : "-";
 }
+setupTheme();
+setupGuides();
 Promise.allSettled([loadBranding(), loadPublicStatus()]).finally(boot);
