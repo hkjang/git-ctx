@@ -4,6 +4,16 @@ const $$ = (s) => [...document.querySelectorAll(s)];
 // 직렬화하므로, 보정하지 않으면 데이터가 없는 새 설치에서 화면이 깨집니다.
 const rows = (value) => (Array.isArray(value) ? value : []);
 
+// markEmptyTables는 머리글만 남은 표에 안내 문구를 넣습니다. 표를 그리는 코드가
+// 여러 곳에 흩어져 있어도 빈 상태 처리가 한 곳에서 일관되게 적용됩니다.
+function markEmptyTables(root = document) {
+  root.querySelectorAll(".table-wrap table > tbody").forEach((body) => {
+    if (body.querySelector("tr")) return;
+    const columns = body.closest("table").querySelectorAll("thead th").length || 1;
+    body.innerHTML = `<tr><td class="empty" colspan="${columns}">표시할 항목이 없습니다.</td></tr>`;
+  });
+}
+
 /* ---------------------------------------------------------------------------
  * 공용 UI 유틸리티
  * 화면 로직 어디서나 같은 방식으로 알림·모달·테마를 다루기 위한 최소 도구입니다.
@@ -988,6 +998,7 @@ async function loadActivity() {
             `<tr><td>${date(x.occurredAt)}</td><td>${esc(x.apiKeyPrefix)}</td><td>${esc(x.tool)}</td><td>${esc(x.libraryId)}</td><td>${esc(x.outcome)} / ${x.durationMs}ms</td></tr>`,
         )
         .join("")}</tbody></table>`;
+    markEmptyTables();
   } catch (e) {
     console.warn(e);
   }
@@ -1051,6 +1062,7 @@ async function loadKeys() {
         loadKeys();
       }),
   );
+  markEmptyTables();
 }
 $("#new-key").onclick = () => ($("#key-form").hidden = !$("#key-form").hidden);
 $("#key-form").onsubmit = async (e) => {
@@ -1184,6 +1196,21 @@ function renderSettingFields(category, value) {
     );
   applyTLSFieldState();
 }
+// loadSettingHistory는 누가 언제 몇 번째 버전을 저장했는지만 보여 줍니다.
+// 저장된 값 자체는 암호문으로만 남아 있어 화면에 노출하지 않습니다.
+async function loadSettingHistory(category) {
+  const target = $("#setting-history-list");
+  try {
+    const versions = rows(await api(`/api/v1/admin/settings/${category}/versions`));
+    target.innerHTML = `<table><thead><tr><th>버전</th><th>변경자</th><th>변경 시각</th></tr></thead><tbody>${versions
+      .map((item) => `<tr><td>v${item.version}</td><td>${esc(item.changedBy)}</td><td>${date(item.changedAt)}</td></tr>`)
+      .join("")}</tbody></table>`;
+    markEmptyTables();
+  } catch (error) {
+    target.innerHTML = `<div class="empty">${esc(error.message)}</div>`;
+  }
+}
+
 function renderSettingResult(ok, title, lines, payload) {
   const panel = $("#setting-test-result");
   panel.hidden = false;
@@ -1379,6 +1406,7 @@ function setupAdmin(roles, capabilities) {
       $("#setting-load-status").textContent =
         `저장된 설정 v${x.version}을 불러왔습니다 · ${date(x.updatedAt)} · ${x.updatedBy || "알 수 없는 관리자"}${maskedCount ? ` · 비밀값 ${maskedCount}개 마스킹됨` : ""}`;
       $("#delete-setting").hidden = false;
+      loadSettingHistory(category);
       if (category === "keycloak") {
         renderKeycloakMappings();
         refreshKeycloakStatus();
@@ -1396,6 +1424,7 @@ function setupAdmin(roles, capabilities) {
       $("#setting-load-status").textContent =
         "저장된 설정이 없습니다. 기본값을 표시합니다.";
       $("#delete-setting").hidden = true;
+      loadSettingHistory(category);
       if (category === "keycloak") {
         renderKeycloakMappings();
         refreshKeycloakStatus();
@@ -1584,6 +1613,81 @@ async function refreshKeycloakStatus() {
 }
 let discovered = [];
 let activeCapabilities = {};
+
+/* ---------------------------------------------------------------------------
+ * 초기 설정 진행 상황
+ * 새로 설치한 인스턴스에서 무엇이 남았는지 한 화면에 보여 주고, 각 단계에서
+ * 필요한 설정 화면으로 바로 이동시킵니다.
+ * ------------------------------------------------------------------------- */
+const setupStatusLabels = { done: "완료", warn: "확인 필요", todo: "미완료" };
+
+async function refreshSetupStatus() {
+  const panel = $("#setup-status-panel");
+  try {
+    const status = await api("/api/v1/admin/setup-status");
+    panel.hidden = false;
+    $("#setup-status-summary").textContent = status.ready
+      ? `초기 설정 ${status.completed}/${status.total} 단계가 모두 준비되었습니다.`
+      : `초기 설정 ${status.completed}/${status.total} 단계 완료 — 남은 단계를 눌러 바로 이동하세요.`;
+    $("#setup-status-steps").innerHTML = rows(status.steps)
+      .map(
+        (step) =>
+          `<article class="setup-step ${esc(step.status)}"><header><span class="chip ${step.status === "done" ? "ok" : step.status === "todo" ? "error" : ""}">${esc(setupStatusLabels[step.status] || step.status)}</span><strong>${esc(step.title)}</strong></header><p>${esc(step.detail)}</p><button type="button" class="secondary" data-setup-target="${esc(step.target)}" data-setup-category="${esc(step.category || "")}">이동</button></article>`,
+      )
+      .join("");
+    $$("[data-setup-target]").forEach((button) => {
+      button.onclick = () => {
+        document.querySelector(`[data-admin-target="${button.dataset.setupTarget}"]`)?.click();
+        if (button.dataset.setupCategory) {
+          document.querySelector(`[data-setting-tab="${button.dataset.setupCategory}"]`)?.click();
+        }
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      };
+    });
+  } catch {
+    // 운영 권한이 없는 관리자는 이 카드를 보지 않습니다.
+    panel.hidden = true;
+  }
+}
+
+// runSearchDiagnostics는 다른 사용자의 ACL로 검색을 재현합니다. 서버는 코드
+// 조각과 파일 경로를 제외한 판정 근거만 돌려줍니다.
+async function runSearchDiagnostics(event) {
+  event.preventDefault();
+  const panel = $("#search-diagnostics-result");
+  panel.hidden = false;
+  panel.className = "result-panel";
+  panel.textContent = "진단 중…";
+  try {
+    const result = await api("/api/v1/admin/search-diagnostics", {
+      method: "POST",
+      body: JSON.stringify({
+        username: $("#diagnostics-username").value,
+        query: $("#diagnostics-query").value,
+        sourceType: $("#diagnostics-source").value,
+      }),
+    });
+    const target = result.target || {};
+    panel.className = `result-panel ${result.hitCount || result.repositoryCount ? "ok" : "error"}`;
+    panel.innerHTML =
+      `<h4>${esc(target.username || "")} · 저장소 ${result.repositoryCount}건 · 코드 ${result.hitCount}건</h4>` +
+      `<div>역할 ${(target.roles || []).map((role) => `<span class="chip">${esc(role)}</span>`).join("") || '<span class="chip error">없음</span>'}</div>` +
+      `<div>ACL Principal ${(target.aclPrincipals || []).map((principal) => `<span class="chip ${target.aclReady ? "ok" : ""}">${esc(principal)}</span>`).join("") || '<span class="chip error">매핑 없음</span>'}</div>` +
+      (rows(result.repositories).length
+        ? `<ul class="result-list">${result.repositories.map((item) => `<li><code>${esc(item.libraryId)}</code> · ${esc(item.sourceType)} · 코드 ${item.hits}건</li>`).join("")}</ul>`
+        : "") +
+      (rows(result.diagnostics).length
+        ? `<ul class="result-list">${result.diagnostics.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>`
+        : "") +
+      (result.warning ? `<div class="guide-notice">${esc(result.warning)}</div>` : "") +
+      (result.error ? `<div class="guide-notice">${esc(result.error)}</div>` : "") +
+      `<small class="field-help">${esc(result.note || "")}</small>`;
+  } catch (error) {
+    panel.className = "result-panel error";
+    panel.textContent = error.message;
+    reportError(error, "검색 진단");
+  }
+}
 function setupOps(capabilities) {
   activeCapabilities = capabilities;
   $("#mcp-admin-section").hidden = !capabilities.mcp;
@@ -1648,6 +1752,13 @@ function setupOps(capabilities) {
   refreshOps(capabilities);
   refreshSecurity(capabilities);
   refreshBackups(capabilities);
+  $("#refresh-setup-status").onclick = refreshSetupStatus;
+  refreshSetupStatus();
+  if (capabilities.qualityWrite) {
+    $("#search-diagnostics-form").onsubmit = runSearchDiagnostics;
+  } else {
+    $("#search-diagnostics-form").hidden = true;
+  }
   if (capabilities.quality) {
     $("#refresh-quality").onclick = () => refreshQuality(capabilities);
     $("#refresh-context-packs").onclick = () => refreshContextPacks(capabilities);
@@ -1713,6 +1824,7 @@ async function refreshAdminUsers() {
         refreshAdminUsers();
       };
     });
+    markEmptyTables();
   } catch (error) {
     $("#admin-users").innerHTML = `<div class="notice error">${esc(error.message)}</div>`;
   }
@@ -1854,6 +1966,7 @@ async function refreshContextPacks(capabilities) {
         refreshContextPacks(capabilities);
       };
     });
+    markEmptyTables();
   } catch (error) {
     $("#context-pack-list").textContent = error.message;
   }
@@ -1935,6 +2048,7 @@ async function refreshQuality(capabilities = activeCapabilities) {
           }
         }),
     );
+    markEmptyTables();
   } catch (error) {
     showAdmin(error.message, false);
   }
@@ -1973,6 +2087,7 @@ async function refreshBackups(capabilities = activeCapabilities) {
           }
         }),
     );
+    markEmptyTables();
   } catch (e) {
     showAdmin(e.message, false);
   }
@@ -1991,8 +2106,22 @@ async function discover() {
       return;
     }
     discovered = x.repositories || [];
+    $("#discovery-actions").hidden = discovered.length === 0;
     $("#discovery").innerHTML =
-      `<table><thead><tr><th>저장소</th><th>기본 브랜치</th><th></th></tr></thead><tbody>${discovered.map((r, n) => `<tr><td>${esc(r.ProjectKey)}/${esc(r.Slug)}<br><small>${esc(r.Description)}</small></td><td>${esc(r.DefaultBranch)}</td><td><button data-register="${n}">등록·색인</button></td></tr>`).join("")}</tbody></table>`;
+      `<table><thead><tr><th><span class="sr-only">선택</span></th><th>저장소</th><th>기본 브랜치</th><th></th></tr></thead><tbody>${discovered.map((r, n) => `<tr><td><input type="checkbox" data-discovered="${n}" aria-label="${esc(r.ProjectKey)}/${esc(r.Slug)} 선택" /></td><td>${esc(r.ProjectKey)}/${esc(r.Slug)}<br><small>${esc(r.Description)}</small></td><td>${esc(r.DefaultBranch)}</td><td><button data-register="${n}">등록·색인</button></td></tr>`).join("")}</tbody></table>`;
+    markEmptyTables();
+    const updateSelection = () => {
+      const selected = $$("[data-discovered]:checked").length;
+      $("#discovery-selection").textContent = selected ? `${selected}개 선택됨` : "";
+    };
+    $$("[data-discovered]").forEach((box) => (box.onchange = updateSelection));
+    updateSelection();
+    $("#select-all-discovered").onclick = () => {
+      const target = $$("[data-discovered]:checked").length !== discovered.length;
+      $$("[data-discovered]").forEach((box) => (box.checked = target));
+      updateSelection();
+    };
+    $("#register-selected").onclick = () => registerSelected(sourceType);
     document
       .querySelectorAll("[data-register]")
       .forEach(
@@ -2004,8 +2133,41 @@ async function discover() {
             )),
       );
   } catch (e) {
-    showAdmin(e.message, false);
+    reportError(e, "소스 탐색");
   }
+}
+// registerSelected는 탐색 결과를 한 번에 등록합니다. 저장소가 수십 개인 최초
+// 구축에서 한 건씩 누르는 부담을 없애고, 실패 건은 따로 보고합니다.
+async function registerSelected(sourceType) {
+  const selected = $$("[data-discovered]:checked").map((box) => discovered[Number(box.dataset.discovered)]);
+  if (!selected.length) {
+    toast("등록할 저장소를 선택하세요.", "error");
+    return;
+  }
+  if (!confirm(`${selected.length}개 저장소를 등록하고 초기 색인 작업을 생성할까요?`)) return;
+  const button = $("#register-selected");
+  button.disabled = true;
+  let registered = 0;
+  const failures = [];
+  for (const repository of selected) {
+    try {
+      await api("/api/v1/admin/repositories", {
+        method: "POST",
+        body: JSON.stringify({ sourceType, repository }),
+      });
+      registered++;
+    } catch (error) {
+      failures.push(`${repository.ProjectKey}/${repository.Slug}: ${error.message}`);
+    }
+  }
+  button.disabled = false;
+  showAdmin(
+    failures.length
+      ? `${registered}개 등록, ${failures.length}개 실패 — ${failures[0]}`
+      : `${registered}개 저장소를 등록하고 초기 색인 작업을 생성했습니다.`,
+    failures.length === 0,
+  );
+  refreshOps(activeCapabilities);
 }
 async function registerRepository(sourceType, repository) {
   try {
@@ -2016,7 +2178,7 @@ async function registerRepository(sourceType, repository) {
     showAdmin("저장소를 등록하고 초기 색인 작업을 생성했습니다.", true);
     refreshOps(activeCapabilities);
   } catch (e) {
-    showAdmin(e.message, false);
+    reportError(e, "저장소 등록");
   }
 }
 async function refreshOps(capabilities = activeCapabilities) {
@@ -2091,6 +2253,7 @@ async function refreshOps(capabilities = activeCapabilities) {
           refreshOps(capabilities);
         }),
     );
+    markEmptyTables();
   } catch (e) {
     showAdmin(e.message, false);
   }
@@ -2160,6 +2323,7 @@ async function refreshSecurity(capabilities = activeCapabilities) {
     );
     $("#audit-logs").innerHTML =
       `<table><thead><tr><th>시간</th><th>수행자</th><th>행위</th><th>대상</th><th>결과</th></tr></thead><tbody>${audits.map((x) => `<tr><td>${date(x.at)}</td><td>${esc(x.actor)}</td><td>${esc(x.action)}</td><td>${esc(x.resourceType)} / ${esc(x.resourceId)}</td><td>${esc(x.outcome)}</td></tr>`).join("")}</tbody></table>`;
+    markEmptyTables();
   } catch (e) {
     showAdmin(e.message, false);
   }

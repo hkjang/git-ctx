@@ -3,8 +3,11 @@ package search
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"git-ctx/internal/embedding"
 	"git-ctx/internal/rerank"
@@ -296,6 +299,72 @@ func TestSearchCodeFindsContentThatNoRepositoryNameMatches(t *testing.T) {
 	fallback, err := service.SearchCode(ctx, []string{"alice"}, "dify", "gitlab", "", "", "", 10)
 	if err != nil || len(fallback.Hits) == 0 || remote.calls == 0 {
 		t.Fatalf("fallback search did not run: %#v calls=%d err=%v", fallback, remote.calls, err)
+	}
+}
+
+// slowACLSource reports how many permission lookups overlapped, so the scan can
+// be shown to verify repositories concurrently instead of one at a time.
+type slowACLSource struct {
+	querySource
+	repositories []source.Repository
+	mu           sync.Mutex
+	active, peak int
+}
+
+func (q *slowACLSource) ListProjects(context.Context) ([]source.Project, error) {
+	return []source.Project{{Key: "apps", Name: "Applications"}}, nil
+}
+func (q *slowACLSource) ListRepositories(context.Context, string) ([]source.Repository, error) {
+	return q.repositories, nil
+}
+func (q *slowACLSource) GetPermissions(context.Context, source.RepositoryRef) ([]source.Permission, error) {
+	q.mu.Lock()
+	q.active++
+	if q.active > q.peak {
+		q.peak = q.active
+	}
+	q.mu.Unlock()
+	time.Sleep(20 * time.Millisecond)
+	q.mu.Lock()
+	q.active--
+	q.mu.Unlock()
+	return []source.Permission{{Principal: "alice", Kind: "user", Permission: "read"}}, nil
+}
+
+func TestRemoteDiscoveryVerifiesRepositoryACLsConcurrently(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:concurrent-acl?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	remote := &slowACLSource{}
+	for index := 0; index < 12; index++ {
+		remote.repositories = append(remote.repositories, source.Repository{
+			ID: int64(index), ProjectKey: "apps", Slug: fmt.Sprintf("dify-%d", index),
+			Name: fmt.Sprintf("Dify %d", index), DefaultBranch: "main",
+		})
+	}
+	service := New(db)
+	service.SetSourceLoader(func(_ context.Context, sourceType string) (source.RepositorySource, error) {
+		if sourceType != "gitlab" {
+			return nil, errors.New("not configured")
+		}
+		return remote, nil
+	})
+	started := time.Now()
+	result, err := service.SearchCode(ctx, []string{"alice"}, "dify", "gitlab", "", "", "", 20)
+	if err != nil || len(result.Repositories) == 0 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	remote.mu.Lock()
+	peak := remote.peak
+	remote.mu.Unlock()
+	if peak < 2 {
+		t.Fatalf("ACL lookups ran serially: peak concurrency %d", peak)
+	}
+	if elapsed := time.Since(started); elapsed > 12*20*time.Millisecond {
+		t.Fatalf("concurrent ACL verification was not faster than a serial scan: %v", elapsed)
 	}
 }
 

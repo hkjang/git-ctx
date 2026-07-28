@@ -55,6 +55,17 @@ endpoint를 표시하므로 입력값 시험과 실제 적용 상태를 구분�
 모달이 이 응답을 그대로 표시하므로, 403 `insufficient_role`이 발생하면 어떤 역할이
 빠졌는지 화면에서 바로 확인할 수 있다.
 
+`GET /api/v1/admin/setup-status`는 Keycloak, ACL claim 매핑, 소스 연결, 저장소 등록,
+초기 색인, 백업 예약 여섯 단계의 진행 상태를 판정해 관리자 화면 상단 카드에 표시한다.
+
+`POST /api/v1/admin/search-diagnostics`는 `search-admin` 이상 권한으로 다른 사용자의
+ACL Principal을 사용해 같은 질의를 재현한다. 응답에는 저장소별 결과 수와 판정 근거만
+담기고 코드 조각·파일 경로는 포함하지 않으며, 실행은 `search.diagnostics` 감사 로그로
+남는다.
+
+`GET /api/v1/admin/settings/{category}/versions`는 버전·변경자·변경 시각만 반환한다.
+저장된 값은 암호문으로만 보관되며 이력 조회로도 복호화되지 않는다.
+
 브라우저 세션은 Keycloak Access Token 수명과 분리된 12시간이며 활동 중에는 자동
 연장된다. 세션 쿠키의 `Secure` 속성은 실제 요청 스킴(`X-Forwarded-Proto` 포함)을
 따르므로 HTTP로 접속하는 내부망 배포에서도 새로고침에 로그인이 풀리지 않는다.

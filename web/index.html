@@ -273,6 +273,19 @@
           </section>
         </div>
         <div id="admin" hidden>
+          <section id="setup-status-panel" class="panel" hidden>
+            <div class="section-title">
+              <div>
+                <h2>초기 설정 진행 상황</h2>
+                <p id="setup-status-summary">연결과 색인이 어디까지 준비되었는지 확인합니다.</p>
+              </div>
+              <div class="button-row">
+                <button class="secondary" type="button" data-guide="setup">초기 설정 가이드</button>
+                <button id="refresh-setup-status" class="secondary" type="button">다시 확인</button>
+              </div>
+            </div>
+            <div id="setup-status-steps" class="setup-steps"></div>
+          </section>
           <div id="admin-result" class="notice" hidden></div>
           <section id="settings-admin" class="panel admin-panel" hidden>
             <div class="section-title">
@@ -335,6 +348,10 @@
                   <summary>고급 JSON 설정</summary>
                   <label>JSON 설정<textarea id="setting-json" rows="16" spellcheck="false">{}</textarea></label>
                 </details>
+                <details id="setting-history" class="wide advanced-json">
+                  <summary>변경 이력</summary>
+                  <div id="setting-history-list" class="table-wrap"></div>
+                </details>
                 <div id="setting-test-result" class="wide result-panel" hidden></div>
                 <div class="wide setting-actions">
                   <button id="validate-setting" class="secondary">설정 검증</button>
@@ -390,6 +407,11 @@
                 <button id="discover">소스 탐색</button>
                 <button id="refresh-ops" class="secondary">현황 새로고침</button>
               </div>
+            </div>
+            <div id="discovery-actions" class="button-row" hidden>
+              <button id="select-all-discovered" class="secondary" type="button">전체 선택</button>
+              <button id="register-selected" type="button">선택 항목 등록·색인</button>
+              <span id="discovery-selection" class="field-help"></span>
             </div>
             <div id="discovery" class="table-wrap"></div>
             <h3>최신성 SLO</h3>
@@ -447,6 +469,20 @@
             </div>
             <h3>실행 이력</h3>
             <div id="quality-runs" class="table-wrap"></div>
+            <hr />
+            <div class="section-title">
+              <div>
+                <h2>사용자 검색 진단</h2>
+                <p>특정 사용자의 ACL Principal로 검색을 재현해 “왜 결과가 없는지”를 확인합니다. 코드 조각과 파일 경로는 표시하지 않습니다.</p>
+              </div>
+            </div>
+            <form id="search-diagnostics-form" class="form-row">
+              <label>사용자명 또는 Subject<input id="diagnostics-username" required placeholder="alice" /></label>
+              <label>질의<input id="diagnostics-query" required placeholder="verify_token" /></label>
+              <label>소스<select id="diagnostics-source"><option value="">전체</option><option value="bitbucket">Bitbucket</option><option value="gitlab">GitLab</option><option value="confluence">Confluence</option><option value="jira">Jira</option></select></label>
+              <div class="button-row"><button type="submit">진단 실행</button></div>
+            </form>
+            <div id="search-diagnostics-result" class="result-panel" hidden></div>
             <h3>사례별 결과</h3>
             <div id="quality-results" class="table-wrap"></div>
           </section>

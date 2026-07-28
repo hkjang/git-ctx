@@ -1002,6 +1002,96 @@ func TestSettingDenialAndAccessDiagnosticsExplainMissingRole(t *testing.T) {
 	}
 }
 
+// The setup dashboard must report the real blockers of a fresh install and the
+// search diagnostics must explain another user's empty result set without
+// exposing snippets or file paths to an administrator who lacks source access.
+func TestSetupStatusAndSearchDiagnostics(t *testing.T) {
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:setup-and-diagnostics?mode=memory&cache=shared&_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	call := func(method, path, payload string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, path, strings.NewReader(payload))
+		request.Header.Set("Authorization", "Bearer bootstrap")
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	var setup struct {
+		Completed int `json:"completed"`
+		Total     int `json:"total"`
+		Steps     []struct {
+			Key, Status, Target string
+		} `json:"steps"`
+	}
+	if err = json.Unmarshal(call(http.MethodGet, "/api/v1/admin/setup-status", "").Body.Bytes(), &setup); err != nil {
+		t.Fatal(err)
+	}
+	status := map[string]string{}
+	for _, step := range setup.Steps {
+		status[step.Key] = step.Status
+	}
+	if setup.Total != 6 || status["keycloak"] != "todo" || status["source"] != "todo" || status["repositories"] != "todo" {
+		t.Fatalf("a fresh install must report its blockers: %#v", setup)
+	}
+
+	// A configured source flips the matching step without touching the others.
+	if saved := call(http.MethodPut, "/api/v1/admin/settings/ui", `{"serviceName":"git-ctx","publicUrl":"http://localhost:4747"}`); saved.Code != http.StatusOK {
+		t.Fatalf("ui setting status=%d body=%s", saved.Code, saved.Body.String())
+	}
+	if _, err = a.store.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,enabled) VALUES('r','core','demo','Demo','','gitlab','1','/core/demo','main',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal(call(http.MethodGet, "/api/v1/admin/setup-status", "").Body.Bytes(), &setup); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range setup.Steps {
+		if step.Key == "repositories" && step.Status != "done" {
+			t.Fatalf("registered repository was not detected: %#v", step)
+		}
+	}
+
+	_, _ = a.store.DB.Exec(`INSERT INTO users(id,subject,username,email,status) VALUES('u1','kc-1','alice','','active')`)
+	_, _ = a.store.DB.Exec(`INSERT INTO user_roles(user_id,role_code) VALUES('u1','developer')`)
+	diagnostics := call(http.MethodPost, "/api/v1/admin/search-diagnostics", `{"username":"alice","query":"verify_token"}`)
+	if diagnostics.Code != http.StatusOK {
+		t.Fatalf("diagnostics status=%d body=%s", diagnostics.Code, diagnostics.Body.String())
+	}
+	body := diagnostics.Body.String()
+	for _, expected := range []string{`"aclReady":false`, `"hitCount":0`, "bitbucket_user_slug"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("diagnostics is missing %q: %s", expected, body)
+		}
+	}
+	for _, forbidden := range []string{`"snippet":`, `"Snippet":`, `"filePath":`, `"path":`, `"Path":`} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("diagnostics leaked source content (%q): %s", forbidden, body)
+		}
+	}
+	if missing := call(http.MethodPost, "/api/v1/admin/search-diagnostics", `{"username":"ghost","query":"x"}`); missing.Code != http.StatusNotFound {
+		t.Fatalf("unknown user status=%d", missing.Code)
+	}
+	var audited int
+	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE action='search.diagnostics'`).Scan(&audited); err != nil || audited != 1 {
+		t.Fatalf("diagnostics must be audited: count=%d err=%v", audited, err)
+	}
+
+	// Setting history exposes who changed which version, never the value.
+	history := call(http.MethodGet, "/api/v1/admin/settings/ui/versions", "")
+	if history.Code != http.StatusOK || !strings.Contains(history.Body.String(), `"version":1`) {
+		t.Fatalf("history status=%d body=%s", history.Code, history.Body.String())
+	}
+	if strings.Contains(history.Body.String(), "publicUrl") {
+		t.Fatalf("history leaked setting values: %s", history.Body.String())
+	}
+}
+
 // A session close to expiry is extended while the user is active, so long
 // administrative work is never interrupted by a forced re-login.
 func TestActiveSessionIsRenewedBeforeExpiry(t *testing.T) {

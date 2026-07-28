@@ -731,6 +731,53 @@ dd {
   color: var(--text-muted);
   font-size: 12px;
 }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.setup-steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: var(--space-3);
+}
+.setup-step {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-muted);
+}
+.setup-step.done {
+  border-left-color: var(--success);
+}
+.setup-step.warn {
+  border-left-color: var(--warning);
+}
+.setup-step.todo {
+  border-left-color: var(--danger);
+}
+.setup-step header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.setup-step p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  flex: 1;
+}
+.setup-step button {
+  align-self: start;
+}
 .access-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));

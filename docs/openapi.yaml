@@ -238,6 +238,25 @@ paths:
         parameters: [{ $ref: "#/components/parameters/Category" }],
         responses: { "200": { description: Valid with masked normalized value }, "400": { description: Validation failed } },
       }
+  /api/v1/admin/settings/{category}/versions:
+    get:
+      {
+        summary: List setting change history metadata without returning any stored value,
+        parameters: [{ $ref: "#/components/parameters/Category" }],
+        responses: { "200": { description: Version author and timestamp list } },
+      }
+  /api/v1/admin/setup-status:
+    get:
+      {
+        summary: Report which initial configuration steps are complete for this installation,
+        responses: { "200": { description: Setup steps with status and target screen } },
+      }
+  /api/v1/admin/search-diagnostics:
+    post:
+      {
+        summary: Replay a code search with another platform user's ACL principals and return only counts and decision reasons,
+        responses: { "200": { description: Diagnostics without snippets or file paths }, "404": { description: Unknown platform user } },
+      }
   /api/v1/admin/settings/keycloak/status:
     get:
       {

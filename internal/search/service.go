@@ -8,6 +8,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync"
 
 	"git-ctx/internal/contentsecurity"
 	"git-ctx/internal/embedding"
@@ -931,12 +932,65 @@ type remoteScan struct {
 	query, project, ref     string
 	limit                   int
 	seenRepository, seenHit map[string]bool
+	mu                      sync.Mutex
 	allowed                 map[string]bool
 	repositories            []RepositoryResult
 	hits                    []SourceResult
 	diagnostics             []string
 	failures                int
 	candidates              []source.Repository
+}
+
+// aclLookupConcurrency bounds parallel permission calls. Repository ACL lookups
+// are one or two remote requests each, so a serial scan of a discovery page adds
+// seconds of latency, while an unbounded fan-out would hammer the source server.
+const aclLookupConcurrency = 8
+
+// prefetchPermissions resolves the ACL decision for a batch of repositories in
+// parallel and stores it in the cache that authorize reads, keeping the result
+// order and the rest of the scan deterministic.
+func (r *remoteScan) prefetchPermissions(ctx context.Context, repositories []source.Repository) {
+	pending := make([]source.Repository, 0, len(repositories))
+	seen := map[string]bool{}
+	r.mu.Lock()
+	for _, repository := range repositories {
+		key := aclCacheKey(repository.ProjectKey, repository.Slug)
+		if repository.Slug == "" || seen[key] {
+			continue
+		}
+		if _, cached := r.allowed[key]; cached {
+			continue
+		}
+		seen[key] = true
+		pending = append(pending, repository)
+	}
+	r.mu.Unlock()
+	if len(pending) < 2 {
+		return
+	}
+	slots := make(chan struct{}, aclLookupConcurrency)
+	var wait sync.WaitGroup
+	for _, repository := range pending {
+		wait.Add(1)
+		slots <- struct{}{}
+		go func(repository source.Repository) {
+			defer wait.Done()
+			defer func() { <-slots }()
+			permissions, err := r.adapter.GetPermissions(ctx, source.RepositoryRef{ProjectKey: repository.ProjectKey, Slug: repository.Slug})
+			decision := err == nil && permissionsAllowPrincipals(permissions, r.principals)
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			if err != nil {
+				r.failures++
+			}
+			r.allowed[aclCacheKey(repository.ProjectKey, repository.Slug)] = decision
+		}(repository)
+	}
+	wait.Wait()
+}
+
+func aclCacheKey(projectKey, slug string) string {
+	return strings.ToLower(projectKey + "/" + slug)
 }
 
 func (r *remoteScan) discoverRepositories(ctx context.Context) {
@@ -986,6 +1040,20 @@ func (r *remoteScan) discoverRepositories(ctx context.Context) {
 // collect ACL-verifies remote repositories and keeps them as both result rows
 // and candidates for the per repository code search fallback.
 func (r *remoteScan) collect(ctx context.Context, repositories []source.Repository, requireMetadataMatch bool) {
+	eligible := make([]source.Repository, 0, len(repositories))
+	for _, repository := range repositories {
+		if repository.Archived || repository.Slug == "" {
+			continue
+		}
+		if r.project != "" && !strings.EqualFold(r.project, repository.ProjectKey) {
+			continue
+		}
+		if requireMetadataMatch && !repositoryMetadataMatches(repository, r.query) {
+			continue
+		}
+		eligible = append(eligible, repository)
+	}
+	r.prefetchPermissions(ctx, eligible)
 	for _, repository := range repositories {
 		if repository.Archived || repository.Slug == "" {
 			continue
@@ -1014,17 +1082,20 @@ func (r *remoteScan) collect(ctx context.Context, repositories []source.Reposito
 }
 
 func (r *remoteScan) authorize(ctx context.Context, projectKey, slug string) bool {
-	cacheKey := strings.ToLower(projectKey + "/" + slug)
-	if decision, ok := r.allowed[cacheKey]; ok {
+	cacheKey := aclCacheKey(projectKey, slug)
+	r.mu.Lock()
+	decision, cached := r.allowed[cacheKey]
+	r.mu.Unlock()
+	if cached {
 		return decision
 	}
 	permissions, err := r.adapter.GetPermissions(ctx, source.RepositoryRef{ProjectKey: projectKey, Slug: slug})
+	decision = err == nil && permissionsAllowPrincipals(permissions, r.principals)
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if err != nil {
 		r.failures++
-		r.allowed[cacheKey] = false
-		return false
 	}
-	decision := permissionsAllowPrincipals(permissions, r.principals)
 	r.allowed[cacheKey] = decision
 	return decision
 }
@@ -1071,6 +1142,11 @@ func (r *remoteScan) searchCode(ctx context.Context) {
 }
 
 func (r *remoteScan) appendGlobalHits(ctx context.Context, results []source.GlobalQueryResult) {
+	pending := make([]source.Repository, 0, len(results))
+	for _, item := range results {
+		pending = append(pending, source.Repository{ProjectKey: item.ProjectKey, Slug: item.Slug})
+	}
+	r.prefetchPermissions(ctx, pending)
 	for _, item := range results {
 		if len(r.hits) >= r.limit {
 			return

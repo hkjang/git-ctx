@@ -407,6 +407,9 @@ func (a *App) routes() {
 	a.mux.Handle("PUT /api/v1/admin/repositories/{id}/policy", a.authorize(http.HandlerFunc(a.putRepositoryPolicy), "source-admin"))
 	a.mux.Handle("GET /api/v1/admin/index-jobs", a.authorize(http.HandlerFunc(a.indexJobs), "source-admin", "readonly-operator"))
 	a.mux.Handle("POST /api/v1/admin/index-jobs/{id}/retry", a.authorize(http.HandlerFunc(a.retryIndexJob), "source-admin"))
+	a.mux.Handle("GET /api/v1/admin/setup-status", a.authorize(http.HandlerFunc(a.setupStatus), "readonly-operator", "source-admin", "search-admin", "mcp-admin", "security-admin"))
+	a.mux.Handle("POST /api/v1/admin/search-diagnostics", a.authorize(http.HandlerFunc(a.searchDiagnostics), "search-admin"))
+	a.mux.Handle("GET /api/v1/admin/settings/{category}/versions", a.settingsAuthorize(http.HandlerFunc(a.settingVersions)))
 	a.mux.Handle("GET /api/v1/admin/health", a.authorize(http.HandlerFunc(a.adminHealth), "readonly-operator"))
 	a.mux.Handle("GET /api/v1/admin/freshness", a.authorize(http.HandlerFunc(a.adminFreshness), "source-admin", "readonly-operator"))
 	a.mux.Handle("GET /api/v1/admin/database/status", a.authorize(http.HandlerFunc(a.adminDatabaseStatus), "readonly-operator"))
@@ -4087,6 +4090,165 @@ func (a *App) adminHealth(w http.ResponseWriter, r *http.Request) {
 	runtime.ReadMemStats(&memory)
 	jsonOut(w, 200, map[string]any{"status": "ok", "version": version.Version, "database": "ok", "repositories": repositories, "chunks": chunks, "indexJobs": map[string]int64{"pending": pending, "failed": failed}, "notificationDeliveries": map[string]int64{"pending": notificationPending, "failed": notificationFailed, "dead": notificationDead}, "activeApiKeys": activeKeys, "activeManagedSecrets": activeSecrets, "observability": map[string]bool{"tracingEnabled": a.traces.Enabled()}, "go": map[string]any{"goroutines": runtime.NumGoroutine(), "allocatedBytes": memory.Alloc}})
 }
+
+// setupStatus reports how far the initial configuration has progressed. A fresh
+// on-prem install needs Keycloak, an identity claim mapping, a source connector,
+// registered repositories and an index before any search returns a result, and
+// every one of those failures otherwise looks like "search is broken".
+func (a *App) setupStatus(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	configured := map[string]bool{}
+	rows, err := a.store.DB.QueryContext(ctx, `SELECT category FROM system_settings`)
+	if err == nil {
+		for rows.Next() {
+			var category string
+			if rows.Scan(&category) == nil {
+				configured[category] = true
+			}
+		}
+		rows.Close()
+	}
+	count := func(query string) int64 {
+		var value int64
+		_ = a.store.DB.QueryRowContext(ctx, query).Scan(&value)
+		return value
+	}
+	repositories := count(`SELECT COUNT(*) FROM repositories WHERE enabled=1`)
+	chunks := count(`SELECT COUNT(*) FROM document_chunks`)
+	failedJobs := count(`SELECT COUNT(*) FROM index_jobs WHERE status='failed'`)
+	mappedIdentities := count(`SELECT COUNT(*) FROM user_identities WHERE bitbucket_user_slug<>'' OR gitlab_user_id<>''`)
+	users := count(`SELECT COUNT(*) FROM users WHERE status='active' AND id NOT IN ('bootstrap-admin','break-glass-admin')`)
+	sourceConfigured := configured["bitbucket"] || configured["gitlab"] || configured["confluence"] || configured["jira"]
+
+	keycloakDetail := "Keycloak 설정이 없어 SSO 로그인을 사용할 수 없습니다."
+	keycloakStatus := "todo"
+	if configured["keycloak"] {
+		keycloakStatus, keycloakDetail = "done", "SSO 설정이 저장되었습니다."
+		if _, cfgErr := a.loadOIDCConfig(ctx); cfgErr != nil {
+			keycloakStatus, keycloakDetail = "warn", "저장된 OIDC 설정을 적용할 수 없습니다: "+truncateText(cfgErr.Error(), 200)
+		}
+	}
+	step := func(key, title, detail, status, target, category string) map[string]any {
+		return map[string]any{"key": key, "title": title, "detail": detail, "status": status, "target": target, "category": category}
+	}
+	steps := []map[string]any{
+		step("keycloak", "Keycloak SSO 연결", keycloakDetail, keycloakStatus, "settings-admin", "keycloak"),
+		step("identity", "소스 ACL Claim 매핑",
+			fmt.Sprintf("활성 사용자 %d명 중 %d명에게 Bitbucket·GitLab 신원이 매핑되었습니다.", users, mappedIdentities),
+			map[bool]string{true: "done", false: "todo"}[mappedIdentities > 0 || users == 0], "settings-admin", "keycloak"),
+		step("source", "소스 시스템 연결",
+			map[bool]string{true: "Bitbucket 또는 GitLab 연결이 저장되었습니다.", false: "연결된 소스가 없어 검색할 대상이 없습니다."}[sourceConfigured],
+			map[bool]string{true: "done", false: "todo"}[sourceConfigured], "settings-admin", "gitlab"),
+		step("repositories", "저장소 등록",
+			fmt.Sprintf("등록된 저장소 %d개", repositories),
+			map[bool]string{true: "done", false: "todo"}[repositories > 0], "source-admin-section", ""),
+		step("index", "초기 색인",
+			fmt.Sprintf("색인 청크 %d개, 실패한 작업 %d개", chunks, failedJobs),
+			map[bool]string{true: "done", false: "todo"}[chunks > 0 && failedJobs == 0], "source-admin-section", ""),
+		step("backup", "백업 예약",
+			map[bool]string{true: "백업 설정이 저장되었습니다.", false: "예약 백업이 설정되지 않았습니다."}[configured["backup"]],
+			map[bool]string{true: "done", false: "warn"}[configured["backup"]], "backup-admin-section", "backup"),
+	}
+	if failedJobs > 0 && chunks > 0 {
+		steps[4]["status"] = "warn"
+	}
+	done := 0
+	for _, item := range steps {
+		if item["status"] == "done" {
+			done++
+		}
+	}
+	jsonOut(w, http.StatusOK, map[string]any{
+		"steps": steps, "completed": done, "total": len(steps),
+		"ready": done == len(steps),
+	})
+}
+
+// searchDiagnostics replays a code search with another user's ACL principals so
+// an administrator can tell a missing claim from a missing index without asking
+// the user to reproduce it. Snippets and file paths are never returned: the
+// caller may legitimately administer the platform without holding source access.
+func (a *App) searchDiagnostics(w http.ResponseWriter, r *http.Request) {
+	actor, _ := auth.FromContext(r.Context())
+	var in struct {
+		Username   string `json:"username"`
+		Query      string `json:"query"`
+		SourceType string `json:"sourceType"`
+	}
+	if decode(r, &in) != nil || strings.TrimSpace(in.Query) == "" || strings.TrimSpace(in.Username) == "" {
+		problem(w, http.StatusBadRequest, "invalid_request", "username and query are required")
+		return
+	}
+	var userID, subject, username, bitbucketSlug, gitlabID, groups, status string
+	err := a.store.DB.QueryRowContext(r.Context(), a.store.Rebind(`SELECT u.id,u.subject,u.username,COALESCE(i.bitbucket_user_slug,''),COALESCE(i.gitlab_user_id,''),COALESCE(i.bitbucket_groups,''),u.status
+FROM users u LEFT JOIN user_identities i ON i.user_id=u.id WHERE u.username=? OR u.subject=? OR u.id=?`),
+		strings.TrimSpace(in.Username), strings.TrimSpace(in.Username), strings.TrimSpace(in.Username)).
+		Scan(&userID, &subject, &username, &bitbucketSlug, &gitlabID, &groups, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		problem(w, http.StatusNotFound, "not_found", "No platform user matches that username, subject, or id")
+		return
+	}
+	if err != nil {
+		problem(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	roles, _ := a.userRoles(r.Context(), userID)
+	principals := sourceACLPrincipals(bitbucketSlug, gitlabID, splitCSV(groups))
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	result, searchErr := a.search.SearchCode(ctx, principals, in.Query, in.SourceType, "", "", "", 20)
+	a.audit(r, actor, "search.diagnostics", "user", userID, "success", map[string]any{"query": truncateText(in.Query, 200), "sourceType": in.SourceType})
+	hitsByRepository := map[string]int{}
+	for _, hit := range result.Hits {
+		hitsByRepository[hit.LibraryID]++
+	}
+	repositories := make([]map[string]any, 0, len(result.Repositories))
+	for _, item := range result.Repositories {
+		repositories = append(repositories, map[string]any{"libraryId": item.LibraryID, "sourceType": item.SourceType, "hits": hitsByRepository[item.LibraryID]})
+	}
+	response := map[string]any{
+		"target": map[string]any{
+			"userId": userID, "username": username, "subject": subject, "status": status, "roles": roles,
+			"aclPrincipals": principals, "aclReady": len(principals) > 0,
+		},
+		"query": result.Query, "repositoryCount": len(result.Repositories), "hitCount": len(result.Hits),
+		"repositories": repositories, "diagnostics": result.Diagnostics, "warning": result.Warning,
+		"note": "Snippets and file paths are omitted; this view only explains why results are or are not visible.",
+	}
+	if searchErr != nil {
+		response["error"] = searchErr.Error()
+	}
+	jsonOut(w, http.StatusOK, response)
+}
+
+// settingVersions lists the change history metadata of a setting category.
+// Stored values stay encrypted and are never returned.
+func (a *App) settingVersions(w http.ResponseWriter, r *http.Request) {
+	category := r.PathValue("category")
+	if !settingCategories()[category] {
+		problem(w, http.StatusNotFound, "not_found", "Setting category not found")
+		return
+	}
+	rows, err := a.store.DB.QueryContext(r.Context(), a.store.Rebind(`SELECT version,changed_by,created_at FROM setting_versions WHERE category=? ORDER BY version DESC LIMIT 50`), category)
+	if err != nil {
+		problem(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var version int
+		var changedBy string
+		var createdAt time.Time
+		if err = rows.Scan(&version, &changedBy, &createdAt); err != nil {
+			problem(w, http.StatusInternalServerError, "internal_error", err.Error())
+			return
+		}
+		out = append(out, map[string]any{"version": version, "changedBy": changedBy, "changedAt": createdAt})
+	}
+	jsonOut(w, http.StatusOK, out)
+}
+
 func (a *App) adminFreshness(w http.ResponseWriter, r *http.Request) {
 	sloMinutes := 60
 	if settings, err := a.loadSettingMap(r.Context(), "index"); err == nil {

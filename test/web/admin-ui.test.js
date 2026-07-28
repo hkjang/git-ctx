@@ -63,6 +63,17 @@ for (const id of [
   "source-test-form",
   "source-test-result",
   "account-access",
+  "setup-status-panel",
+  "setup-status-steps",
+  "refresh-setup-status",
+  "setting-history",
+  "setting-history-list",
+  "search-diagnostics-form",
+  "diagnostics-username",
+  "search-diagnostics-result",
+  "discovery-actions",
+  "select-all-discovered",
+  "register-selected",
 ]) {
   assert.match(html, new RegExp(`id=["']${id}["']`), `missing ${id}`);
 }
@@ -99,6 +110,12 @@ assert.match(script, /reportError/);
 assert.match(script, /ACL 가이드 열기/);
 assert.match(script, /Diagnostics/);
 assert.match(html, /<script src="\/guides\.js">/);
+// 초기 설정 진행, 사용자 검색 진단, 설정 이력, 빈 상태와 일괄 등록
+assert.match(script, /api\/v1\/admin\/setup-status/);
+assert.match(script, /api\/v1\/admin\/search-diagnostics/);
+assert.match(script, /settings\/\$\{category\}\/versions/);
+assert.match(script, /function markEmptyTables/);
+assert.match(script, /registerSelected/);
 assert.match(html, /search-repositories/);
 assert.match(html, /search-code/);
 assert.match(script, /api\/v1\/tools\/search-code\/test/);
