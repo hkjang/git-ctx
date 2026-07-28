@@ -143,11 +143,59 @@ func TestCodeSearchResponseGuidesTheClient(t *testing.T) {
 	}
 }
 
+// The file triad and history must work end to end through MCP, and initialize
+// must teach the client which tool to reach for.
+func TestFileTriadHistoryAndServerInstructions(t *testing.T) {
+	s := fixture(t)
+	must := func(query string, args ...any) {
+		t.Helper()
+		if _, err := s.store.DB.Exec(query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(`INSERT INTO repository_files(repository_id,ref_name,path,base_name,size_bytes,content_indexed,commit_id) VALUES('r1','main','docs/gpu.md','gpu.md',80,1,'4fa21bd')`)
+	must(`INSERT INTO repository_files(repository_id,ref_name,path,base_name,size_bytes,content_indexed,commit_id) VALUES('r1','main','docs/runbooks/gpu.md','gpu.md',60,1,'4fa21bd')`)
+	must(`INSERT INTO repository_files(repository_id,ref_name,path,base_name,size_bytes,content_indexed,commit_id) VALUES('r1','main','service.go','service.go',40,1,'4fa21bd')`)
+
+	files := call(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"find-file","arguments":{"pattern":"*.md"}}}`)
+	text := files["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "docs/gpu.md") || !strings.Contains(text, "docs/runbooks/gpu.md") {
+		t.Fatalf("find-file=%s", text)
+	}
+
+	read := call(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read-file","arguments":{"path":"docs/gpu.md"}}}`)
+	text = read["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "DCGM exporter") || !strings.Contains(text, "Source: `") {
+		t.Fatalf("read-file=%s", text)
+	}
+
+	listing := call(t, s, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list-directory","arguments":{"path":"docs"}}}`)
+	text = listing["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "runbooks/") || !strings.Contains(text, "gpu.md") {
+		t.Fatalf("list-directory must show folders first and files after: %s", text)
+	}
+
+	// No source connector is configured in the fixture, so history reports that
+	// instead of pretending the file has none.
+	history := call(t, s, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get-file-history","arguments":{"path":"docs/gpu.md"}}}`)
+	if history["result"].(map[string]any)["isError"] != true {
+		t.Fatalf("history without a connector must report an error: %#v", history)
+	}
+
+	initialize := call(t, s, `{"jsonrpc":"2.0","id":5,"method":"initialize","params":{}}`)
+	instructions, _ := initialize["result"].(map[string]any)["instructions"].(string)
+	for _, expected := range []string{"search-code", "find-file", "read-file", "get-file-history", "Notes"} {
+		if !strings.Contains(instructions, expected) {
+			t.Fatalf("initialize instructions must mention %q: %q", expected, instructions)
+		}
+	}
+}
+
 func TestToolsListExtendedAndStrictCompatibility(t *testing.T) {
 	s := fixture(t)
 	out := call(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
 	tools := out["result"].(map[string]any)["tools"].([]any)
-	if len(tools) != 17 {
+	if len(tools) != 19 {
 		t.Fatalf("got %d tools", len(tools))
 	}
 	if tools[0].(map[string]any)["name"] != "resolve-library-id" || tools[1].(map[string]any)["name"] != "query-docs" {

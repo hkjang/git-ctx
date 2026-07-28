@@ -156,6 +156,45 @@ func (c *Client) GetCommit(ctx context.Context, r source.RepositoryRef, id strin
 	e := c.json(ctx, http.MethodGet, c.repo(r)+"/commits/"+escape(id), nil, nil, &x)
 	return source.Commit{ID: x.ID, DisplayID: x.DisplayID, Message: x.Message, Author: x.Author.Name}, e
 }
+
+// ListCommits returns the commits that touched a path, newest first.
+func (c *Client) ListCommits(ctx context.Context, r source.RepositoryRef, refName, filePath string, limit int) ([]source.Commit, error) {
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	q := url.Values{"limit": []string{fmt.Sprint(limit)}}
+	if refName != "" {
+		q.Set("until", refName)
+	}
+	if filePath != "" {
+		q.Set("path", filePath)
+	}
+	var page struct {
+		Values []struct {
+			ID              string `json:"id"`
+			DisplayID       string `json:"displayId"`
+			Message         string `json:"message"`
+			AuthorTimestamp int64  `json:"authorTimestamp"`
+			Author          struct {
+				Name         string `json:"name"`
+				EmailAddress string `json:"emailAddress"`
+			} `json:"author"`
+		} `json:"values"`
+	}
+	if err := c.json(ctx, http.MethodGet, c.repo(r)+"/commits", q, nil, &page); err != nil {
+		return nil, err
+	}
+	out := make([]source.Commit, 0, len(page.Values))
+	for _, item := range page.Values {
+		commit := source.Commit{ID: item.ID, DisplayID: item.DisplayID, Message: item.Message, Author: item.Author.Name, AuthorEmail: item.Author.EmailAddress}
+		if item.AuthorTimestamp > 0 {
+			commit.AuthoredAt = time.UnixMilli(item.AuthorTimestamp).UTC()
+		}
+		out = append(out, commit)
+	}
+	return out, nil
+}
+
 func (c *Client) ListFiles(ctx context.Context, r source.RepositoryRef, ref string) ([]source.File, error) {
 	q := url.Values{"at": []string{ref}}
 	var p struct {

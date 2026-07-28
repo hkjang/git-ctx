@@ -167,7 +167,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Mcp-Session-Id", sessionID)
 		write(w, response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
 			"protocolVersion": protocol, "capabilities": map[string]any{"tools": map[string]any{"listChanged": false}},
-			"serverInfo": map[string]any{"name": "git-ctx", "version": version.Version}}})
+			"serverInfo":   map[string]any{"name": "git-ctx", "version": version.Version},
+			"instructions": serverInstructions}})
 	case "notifications/initialized":
 		w.WriteHeader(http.StatusAccepted)
 	case "ping":
@@ -190,6 +191,27 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		write(w, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32601, Message: "Method not found"}})
 	}
 }
+
+// serverInstructions is returned by initialize. MCP clients hand it to the
+// model, so it is the one place where tool choice can be taught once instead of
+// being rediscovered in every conversation.
+const serverInstructions = `git-ctx searches internal Bitbucket and GitLab repositories. Every result is filtered by the caller's repository permissions.
+
+Choosing a tool:
+- Any question about source code, configuration or "where is X": start with search-code. It returns matching repositories AND file contents in one call.
+- Looking for a file by name or extension: find-file (Dockerfile, *.tf, **/migrations/*.sql).
+- Need the file itself: read-file, optionally with startLine and endLine.
+- Orienting in an unknown repository: list-directory, then get-repository-map.
+- "Why is this like this", "when did this change": get-file-history.
+- Exact identifier: find-symbol, then get-symbol-context.
+- Documentation for a known library id: query-docs.
+- search-repositories returns repository names only, never file contents.
+
+Reading the results:
+- Search responses end with Notes explaining which path ran, what the ACL filtered and whether a timeout was hit. An empty result with an ACL or indexing note is not proof that the code does not exist.
+- Repositories that are still indexing are answered live from the source code search API and the response says so.
+- Snippets and files are secret-masked. Cite the Source line, which points at the exact ref and lines.`
+
 func (s *Server) newSession(ctx context.Context) (string, error) {
 	raw := make([]byte, 24)
 	if _, err := rand.Read(raw); err != nil {
@@ -308,6 +330,19 @@ func Catalog() []map[string]any {
 				"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"},
 				"startLine":  map[string]any{"type": "integer", "minimum": 1, "description": "Optional first line, 1-based"},
 				"endLine":    map[string]any{"type": "integer", "minimum": 1, "description": "Optional last line, inclusive"}}}},
+		{"name": "get-file-history", "description": "Lists the commits that changed a file, newest first, with author, date and message. Use it to explain why code looks the way it does, when a behaviour changed, or who to ask.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"path"}, "properties": map[string]any{
+				"path":       map[string]string{"type": "string", "description": "Repository-relative file path"},
+				"libraryId":  map[string]string{"type": "string", "description": "Library ID; required when the path exists in more than one repository"},
+				"repository": map[string]string{"type": "string", "description": "Optional repository slug or library ID"},
+				"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"},
+				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}}},
+		{"name": "list-directory", "description": "Lists the immediate contents of a repository directory, folders first. Use it to orient yourself before reading files.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
+				"path":       map[string]string{"type": "string", "description": "Directory path; omit or use an empty string for the repository root"},
+				"libraryId":  map[string]string{"type": "string", "description": "Library ID; required when several repositories are accessible"},
+				"repository": map[string]string{"type": "string", "description": "Optional repository slug or library ID"},
+				"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"}}}},
 		{"name": "get-repository-map", "description": "Returns the indexed languages, directories, key files, and entry points for a repository.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId"}, "properties": map[string]any{
 				"libraryId": map[string]string{"type": "string", "description": "Context7-compatible library ID"},
@@ -515,6 +550,28 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 		}
 		if err == nil {
 			text = formatFileContent(file)
+		}
+	case "get-file-history":
+		var history search.FileHistory
+		history, err = s.search.FileHistory(r.Context(), principalACLs(p), stringArg(params.Arguments, "libraryId"), stringArg(params.Arguments, "repository"),
+			stringArg(params.Arguments, "path"), stringArg(params.Arguments, "ref"), intArg(params.Arguments, "limit", 20))
+		if err == nil && p.KeyID != "" && !libraryAllowed(history.LibraryID, p.AllowedRepositories) {
+			err = errors.New("file is unavailable or access is denied")
+		}
+		if err == nil {
+			empty = len(history.Commits) == 0
+			text = formatFileHistory(history)
+		}
+	case "list-directory":
+		var listing search.DirectoryListing
+		listing, err = s.search.ListDirectory(r.Context(), principalACLs(p), stringArg(params.Arguments, "libraryId"), stringArg(params.Arguments, "repository"),
+			stringArg(params.Arguments, "path"), stringArg(params.Arguments, "ref"))
+		if err == nil && p.KeyID != "" && !libraryAllowed(listing.LibraryID, p.AllowedRepositories) {
+			err = errors.New("directory is unavailable or access is denied")
+		}
+		if err == nil {
+			empty = len(listing.Entries) == 0
+			text = formatDirectory(listing)
 		}
 	case "get-repository-map":
 		if p.KeyID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
@@ -1064,6 +1121,50 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func formatFileHistory(history search.FileHistory) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "## History of %s\n\n`%s` · ref `%s` · %d commit(s)\n", history.Path, history.LibraryID, history.Ref, len(history.Commits))
+	for _, commit := range history.Commits {
+		when := ""
+		if !commit.AuthoredAt.IsZero() {
+			when = commit.AuthoredAt.UTC().Format("2006-01-02 15:04 MST")
+		}
+		subject := commit.Message
+		if index := strings.Index(subject, "\n"); index > 0 {
+			subject = subject[:index]
+		}
+		fmt.Fprintf(&b, "\n- `%s` %s — %s\n  %s\n", commit.DisplayID, when, commit.Author, subject)
+		if commit.URL != "" {
+			fmt.Fprintf(&b, "  %s\n", commit.URL)
+		}
+	}
+	for _, diagnostic := range history.Diagnostics {
+		fmt.Fprintf(&b, "\n- %s\n", diagnostic)
+	}
+	return b.String()
+}
+
+func formatDirectory(listing search.DirectoryListing) string {
+	var b strings.Builder
+	root := listing.Path
+	if root == "" {
+		root = "(repository root)"
+	}
+	fmt.Fprintf(&b, "## %s\n\n`%s` · ref `%s` · %d entries\n\n", root, listing.LibraryID, listing.Ref, len(listing.Entries))
+	for _, entry := range listing.Entries {
+		if entry.Directory {
+			fmt.Fprintf(&b, "- %s/ (%d files)\n", entry.Name, entry.Files)
+			continue
+		}
+		state := ""
+		if !entry.ContentIndexed {
+			state = " — content not indexed"
+		}
+		fmt.Fprintf(&b, "- %s%s\n", entry.Name, state)
+	}
+	return b.String()
 }
 
 func formatRepositoryMap(item search.RepositoryMap) string {

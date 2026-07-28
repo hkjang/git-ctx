@@ -114,6 +114,8 @@
                   <dd>저장소 이름과 코드 본문을 한 번에 검색</dd>
                   <dt>find-file / read-file</dt>
                   <dd>파일명·경로 패턴 검색과 파일 본문(줄 범위) 조회</dd>
+                  <dt>list-directory / get-file-history</dt>
+                  <dd>디렉터리 탐색과 파일 커밋 이력 조회</dd>
                   <dt>get-repository-map</dt>
                   <dd>저장소 언어·구조·진입점과 주요 설정 파일 조회</dd>
                   <dt>find-symbol / get-symbol-context</dt>
@@ -152,6 +154,8 @@
                   <label><input type="checkbox" name="scope" value="search-code" checked /> search-code</label>
                   <label><input type="checkbox" name="scope" value="find-file" checked /> find-file</label>
                   <label><input type="checkbox" name="scope" value="read-file" checked /> read-file</label>
+                  <label><input type="checkbox" name="scope" value="get-file-history" checked /> get-file-history</label>
+                  <label><input type="checkbox" name="scope" value="list-directory" checked /> list-directory</label>
                   <label><input type="checkbox" name="scope" value="get-repository-map" checked /> get-repository-map</label>
                   <label><input type="checkbox" name="scope" value="find-symbol" checked /> find-symbol</label>
                   <label><input type="checkbox" name="scope" value="get-symbol-context" checked /> get-symbol-context</label>
@@ -220,6 +224,24 @@
                   <label>시작 줄<input name="startLine" type="number" min="1" /></label>
                   <label>끝 줄<input name="endLine" type="number" min="1" /></label>
                   <div class="wide button-row"><button type="submit">파일 열기</button></div>
+                </form>
+              </article>
+              <article class="card">
+                <h3>Directory</h3>
+                <form id="directory-form" class="form-row">
+                  <label class="wide">디렉터리 경로 (비우면 루트)<input name="path" placeholder="internal/app" /></label>
+                  <label>Library ID (선택)<input name="libraryId" placeholder="/kcb/clustara" /></label>
+                  <label>Ref (선택)<input name="ref" placeholder="main" /></label>
+                  <div class="wide button-row"><button type="submit">목록 보기</button></div>
+                </form>
+              </article>
+              <article class="card">
+                <h3>File History</h3>
+                <form id="file-history-form" class="form-row">
+                  <label class="wide">파일 경로<input name="path" required placeholder="internal/app/app.go" /></label>
+                  <label>Library ID (선택)<input name="libraryId" placeholder="/kcb/clustara" /></label>
+                  <label>Ref (선택)<input name="ref" placeholder="main" /></label>
+                  <div class="wide button-row"><button type="submit">이력 보기</button></div>
                 </form>
               </article>
               <article class="card">

@@ -205,6 +205,17 @@ MCP 호출 기록은 결과가 0건인 성공 호출을 `empty` outcome으로 �
 화면과 관리자 통계에서 "실패"와 "결과 없음"을 구분할 수 있고, 빈 결과는 캐시하지
 않으므로 색인이 끝나면 다음 호출에서 바로 반영된다.
 
+## 이력·디렉터리 도구
+
+`get-file-history`는 GitLab `/repository/commits?path=`, Bitbucket
+`/commits?path=` 를 사용해 해당 경로를 바꾼 커밋을 최신순으로 반환한다(migration
+032). `list-directory`는 저장된 파일 목록으로 하위 항목을 폴더 우선 정렬해 보여
+주므로 원격 호출이 없다. 두 도구 모두 `read-file` 과 같은 ACL·모호성 규칙을 쓴다.
+
+MCP `initialize` 응답에는 `instructions` 가 포함된다. 어떤 질문에 어떤 도구를 먼저
+써야 하는지, 응답의 `Notes` 를 어떻게 읽어야 하는지를 클라이언트 모델에 한 번만
+알려 주어 도구 선택 오류를 줄인다.
+
 ## MCP 코드 검색 동작
 
 `search-code`는 저장소 이름 검색과 파일 내용 검색을 한 번에 수행하는 기본 진입점이다.

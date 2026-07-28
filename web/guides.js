@@ -832,13 +832,15 @@
               ["search-code", "코드·심볼·설정 위치를 찾을 때 (기본)", "저장소 + 파일 내용 + 실행 경로 Notes"],
               ["find-file", "파일 위치를 물을 때 (Dockerfile, *.tf, **/migrations/*.sql)", "저장소별 경로 목록과 본문 색인 여부"],
               ["read-file", "찾은 파일 전체 또는 특정 줄 범위를 볼 때", "파일 본문(코드 블록)과 출처 인용, 필요 시 마스킹·잘림 안내"],
+              ["list-directory", "낯선 저장소 구조를 훑을 때", "폴더 우선 정렬된 하위 항목과 본문 색인 여부"],
+              ["get-file-history", "왜 이렇게 됐는지·언제 바뀌었는지 물을 때", "커밋 해시·작성자·시각·메시지"],
               ["search-repositories", "저장소 이름만 찾을 때", "저장소 목록 (파일 내용 없음)"],
               ["query-docs", "특정 Library ID의 문서를 물을 때", "색인 결과, 없으면 소스 API failover"],
               ["find-symbol", "정확한 식별자를 알 때", "심볼 정의 위치"],
             ],
           },
           notice:
-            "코드 질문에 search-repositories만 호출하면 파일 내용이 나오지 않습니다. 결과 안내 문구가 search-code 재호출을 유도하도록 되어 있습니다.",
+            "MCP initialize 응답에 도구 선택 지침(instructions)이 포함되어 클라이언트 모델이 첫 호출부터 올바른 도구를 고릅니다. 코드 질문에 search-repositories만 호출하면 파일 내용이 나오지 않습니다. 결과 안내 문구가 search-code 재호출을 유도하도록 되어 있습니다.",
         },
         {
           title: "3. 결과가 비어 있을 때",

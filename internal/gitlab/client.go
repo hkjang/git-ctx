@@ -287,6 +287,46 @@ func (c *Client) GetCommit(ctx context.Context, r source.RepositoryRef, id strin
 	}
 	return source.Commit{ID: x.ID, DisplayID: x.ShortID, Message: x.Message, Author: x.AuthorName}, nil
 }
+
+// ListCommits returns the commits that touched a path, newest first.
+func (c *Client) ListCommits(ctx context.Context, r source.RepositoryRef, refName, filePath string, limit int) ([]source.Commit, error) {
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	var items []struct {
+		ID            string    `json:"id"`
+		ShortID       string    `json:"short_id"`
+		Title         string    `json:"title"`
+		Message       string    `json:"message"`
+		AuthorName    string    `json:"author_name"`
+		AuthorEmail   string    `json:"author_email"`
+		CommittedDate time.Time `json:"committed_date"`
+		WebURL        string    `json:"web_url"`
+	}
+	params := url.Values{"per_page": []string{strconv.Itoa(limit)}}
+	if refName != "" {
+		params.Set("ref_name", refName)
+	}
+	if filePath != "" {
+		params.Set("path", filePath)
+	}
+	if err := c.json(ctx, http.MethodGet, c.repo(r)+"/repository/commits", params, nil, &items); err != nil {
+		return nil, err
+	}
+	out := make([]source.Commit, 0, len(items))
+	for _, item := range items {
+		message := item.Message
+		if strings.TrimSpace(message) == "" {
+			message = item.Title
+		}
+		out = append(out, source.Commit{
+			ID: item.ID, DisplayID: item.ShortID, Message: message, Author: item.AuthorName,
+			AuthorEmail: item.AuthorEmail, AuthoredAt: item.CommittedDate, URL: item.WebURL,
+		})
+	}
+	return out, nil
+}
+
 func (c *Client) ListFiles(ctx context.Context, r source.RepositoryRef, ref string) ([]source.File, error) {
 	var items []struct{ Path, Type string }
 	q := url.Values{"ref": []string{ref}, "recursive": []string{"true"}}

@@ -403,6 +403,8 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/tools/search-code/test", a.authenticate(http.HandlerFunc(a.testSearchCode)))
 	a.mux.Handle("POST /api/v1/tools/find-file/test", a.authenticate(http.HandlerFunc(a.testFindFile)))
 	a.mux.Handle("POST /api/v1/tools/read-file/test", a.authenticate(http.HandlerFunc(a.testReadFile)))
+	a.mux.Handle("POST /api/v1/tools/file-history/test", a.authenticate(http.HandlerFunc(a.testFileHistory)))
+	a.mux.Handle("POST /api/v1/tools/directory/test", a.authenticate(http.HandlerFunc(a.testDirectory)))
 	a.mux.Handle("POST /api/v1/tools/repository-map/test", a.authenticate(http.HandlerFunc(a.testRepositoryMap)))
 	a.mux.Handle("POST /api/v1/tools/symbols/test", a.authenticate(http.HandlerFunc(a.testSymbols)))
 	a.mux.Handle("POST /api/v1/tools/symbol-context/test", a.authenticate(http.HandlerFunc(a.testSymbolContext)))
@@ -1494,6 +1496,63 @@ func (a *App) testReadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, http.StatusOK, file)
+}
+
+func (a *App) testFileHistory(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	if p.KeyID != "" && !stringContains(p.Scopes, "get-file-history") {
+		problem(w, http.StatusForbidden, "forbidden", "API key is not allowed to call get-file-history")
+		return
+	}
+	var in struct {
+		Path       string `json:"path"`
+		LibraryID  string `json:"libraryId"`
+		Repository string `json:"repository"`
+		Ref        string `json:"ref"`
+		Limit      int    `json:"limit"`
+	}
+	if decode(r, &in) != nil || strings.TrimSpace(in.Path) == "" {
+		problem(w, http.StatusBadRequest, "invalid_request", "path is required")
+		return
+	}
+	history, err := a.search.FileHistory(r.Context(), searchPrincipals(p), in.LibraryID, in.Repository, in.Path, in.Ref, in.Limit)
+	if err != nil {
+		problem(w, http.StatusBadRequest, "history_failed", err.Error())
+		return
+	}
+	if p.KeyID != "" && !repositoryAllowed(history.LibraryID, p.AllowedRepositories) {
+		problem(w, http.StatusForbidden, "forbidden", "File is unavailable or access is denied")
+		return
+	}
+	jsonOut(w, http.StatusOK, history)
+}
+
+func (a *App) testDirectory(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	if p.KeyID != "" && !stringContains(p.Scopes, "list-directory") {
+		problem(w, http.StatusForbidden, "forbidden", "API key is not allowed to call list-directory")
+		return
+	}
+	var in struct {
+		Path       string `json:"path"`
+		LibraryID  string `json:"libraryId"`
+		Repository string `json:"repository"`
+		Ref        string `json:"ref"`
+	}
+	if decode(r, &in) != nil {
+		problem(w, http.StatusBadRequest, "invalid_request", "Invalid JSON")
+		return
+	}
+	listing, err := a.search.ListDirectory(r.Context(), searchPrincipals(p), in.LibraryID, in.Repository, in.Path, in.Ref)
+	if err != nil {
+		problem(w, http.StatusBadRequest, "listing_failed", err.Error())
+		return
+	}
+	if p.KeyID != "" && !repositoryAllowed(listing.LibraryID, p.AllowedRepositories) {
+		problem(w, http.StatusForbidden, "forbidden", "Directory is unavailable or access is denied")
+		return
+	}
+	jsonOut(w, http.StatusOK, listing)
 }
 
 func (a *App) testRepositoryMap(w http.ResponseWriter, r *http.Request) {

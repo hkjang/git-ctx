@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"git-ctx/internal/contentsecurity"
 	"git-ctx/internal/embedding"
@@ -1420,6 +1421,232 @@ func (s *Service) fileBody(ctx context.Context, repositoryID, sourceType, projec
 		return "", "remote", []string{"remote: " + readErr.Error()}
 	}
 	return string(raw), "remote", []string{"remote: read live from the source server because this file has no indexed content."}
+}
+
+// CommitEntry is one commit that touched a path.
+type CommitEntry struct {
+	ID, DisplayID, Message, Author, AuthorEmail, URL string
+	AuthoredAt                                       time.Time
+}
+
+type FileHistory struct {
+	LibraryID, SourceType, Ref, Path string
+	Commits                          []CommitEntry
+	Diagnostics                      []string
+}
+
+// FileHistory answers "why is this code like this" by returning the commits that
+// touched a path. The content tools can only show the current state, so a
+// regression or a design decision is otherwise invisible.
+func (s *Service) FileHistory(ctx context.Context, principals []string, libraryID, repository, filePath, ref string, limit int) (FileHistory, error) {
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	target, err := s.resolveRepositoryPath(ctx, principals, libraryID, repository, filePath, ref)
+	if err != nil {
+		return FileHistory{}, err
+	}
+	if s.sources == nil {
+		return FileHistory{}, errors.New("no source connector is configured")
+	}
+	adapter, adapterErr := s.sources(ctx, target.sourceType)
+	if adapterErr != nil {
+		return FileHistory{}, adapterErr
+	}
+	history, ok := adapter.(source.HistoryProvider)
+	if !ok {
+		return FileHistory{}, fmt.Errorf("%s does not expose commit history", target.sourceType)
+	}
+	commits, historyErr := history.ListCommits(ctx, source.RepositoryRef{ProjectKey: target.project, Slug: target.slug}, target.refName, target.path, limit)
+	if historyErr != nil {
+		return FileHistory{}, historyErr
+	}
+	out := FileHistory{LibraryID: target.libraryID, SourceType: target.sourceType, Ref: target.refName, Path: target.path}
+	for _, commit := range commits {
+		out.Commits = append(out.Commits, CommitEntry{
+			ID: commit.ID, DisplayID: commit.DisplayID, Message: strings.TrimSpace(commit.Message),
+			Author: commit.Author, AuthorEmail: commit.AuthorEmail, AuthoredAt: commit.AuthoredAt, URL: commit.URL,
+		})
+	}
+	if len(out.Commits) == 0 {
+		out.Diagnostics = append(out.Diagnostics, "history: the source server returned no commits for this path on this ref.")
+	}
+	return out, nil
+}
+
+// DirectoryEntry is one child of a directory in the stored file listing.
+type DirectoryEntry struct {
+	Name           string
+	Directory      bool
+	Files          int
+	SizeBytes      int64
+	ContentIndexed bool
+}
+
+type DirectoryListing struct {
+	LibraryID, SourceType, Ref, Path string
+	Entries                          []DirectoryEntry
+	Diagnostics                      []string
+}
+
+// ListDirectory shows the immediate children of a directory so an agent can
+// orient itself in an unfamiliar repository without downloading the tree.
+func (s *Service) ListDirectory(ctx context.Context, principals []string, libraryID, repository, directory, ref string) (DirectoryListing, error) {
+	if len(principals) == 0 {
+		return DirectoryListing{}, errors.New("directory is unavailable or access is denied")
+	}
+	directory = strings.Trim(strings.TrimPrefix(strings.TrimSpace(filepath.ToSlash(directory)), "./"), "/")
+	prefix := ""
+	if directory != "" {
+		prefix = directory + "/"
+	}
+	join, predicate, args := repositoryACL(principals)
+	statement := `SELECT r.library_id,r.source_type,f.ref_name,f.path,f.size_bytes,f.content_indexed
+FROM repository_files f JOIN repositories r ON r.id=f.repository_id ` + join + `
+WHERE r.enabled=1 AND ` + predicate
+	if libraryID != "" {
+		base, version, ok := splitLibraryID(libraryID)
+		if !ok {
+			return DirectoryListing{}, errors.New("libraryId must use /organization/project[/version]")
+		}
+		statement += ` AND r.library_id=?`
+		args = append(args, base)
+		if ref == "" {
+			ref = version
+		}
+	}
+	if repository != "" {
+		statement += ` AND (LOWER(r.slug)=LOWER(?) OR LOWER(r.library_id)=LOWER(?))`
+		args = append(args, repository, repository)
+	}
+	if ref != "" {
+		statement += ` AND f.ref_name=?`
+		args = append(args, ref)
+	}
+	if prefix != "" {
+		statement += ` AND f.path LIKE ?`
+		args = append(args, prefix+"%")
+	}
+	statement += ` LIMIT 20000`
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
+	if err != nil {
+		return DirectoryListing{}, err
+	}
+	defer rows.Close()
+	listing := DirectoryListing{Path: directory}
+	libraries := map[string]bool{}
+	directories := map[string]*DirectoryEntry{}
+	var files []DirectoryEntry
+	for rows.Next() {
+		var library, sourceType, refName, path string
+		var size int64
+		var indexed int
+		if err = rows.Scan(&library, &sourceType, &refName, &path, &size, &indexed); err != nil {
+			return DirectoryListing{}, err
+		}
+		libraries[library] = true
+		listing.LibraryID, listing.SourceType, listing.Ref = library, sourceType, refName
+		rest := strings.TrimPrefix(path, prefix)
+		if rest == path && prefix != "" {
+			continue
+		}
+		if index := strings.Index(rest, "/"); index >= 0 {
+			name := rest[:index]
+			entry, ok := directories[name]
+			if !ok {
+				entry = &DirectoryEntry{Name: name, Directory: true}
+				directories[name] = entry
+			}
+			entry.Files++
+			entry.SizeBytes += size
+			continue
+		}
+		files = append(files, DirectoryEntry{Name: rest, SizeBytes: size, ContentIndexed: indexed == 1})
+	}
+	if err = rows.Err(); err != nil {
+		return DirectoryListing{}, err
+	}
+	if len(libraries) > 1 {
+		return DirectoryListing{}, fmt.Errorf("%d repositories contain this path; pass libraryId to choose one", len(libraries))
+	}
+	if len(libraries) == 0 {
+		return DirectoryListing{}, fmt.Errorf("no accessible repository has an indexed listing for %q", directory)
+	}
+	for _, entry := range directories {
+		listing.Entries = append(listing.Entries, *entry)
+	}
+	listing.Entries = append(listing.Entries, files...)
+	sort.SliceStable(listing.Entries, func(i, j int) bool {
+		if listing.Entries[i].Directory != listing.Entries[j].Directory {
+			return listing.Entries[i].Directory
+		}
+		return listing.Entries[i].Name < listing.Entries[j].Name
+	})
+	return listing, nil
+}
+
+// resolvedPath is one ACL-approved repository path.
+type resolvedPath struct {
+	repositoryID, libraryID, sourceType, project, slug, refName, path string
+}
+
+// resolveRepositoryPath finds the single repository that holds a path, using the
+// same ACL rules and the same disambiguation contract as ReadFile.
+func (s *Service) resolveRepositoryPath(ctx context.Context, principals []string, libraryID, repository, filePath, ref string) (resolvedPath, error) {
+	filePath = strings.TrimPrefix(strings.TrimSpace(filepath.ToSlash(filePath)), "./")
+	if filePath == "" {
+		return resolvedPath{}, errors.New("path is required")
+	}
+	if len(principals) == 0 {
+		return resolvedPath{}, errors.New("file is unavailable or access is denied")
+	}
+	join, predicate, args := repositoryACL(principals)
+	statement := `SELECT DISTINCT r.id,r.library_id,r.source_type,r.project_key,r.slug,f.ref_name,f.path
+FROM repository_files f JOIN repositories r ON r.id=f.repository_id ` + join + `
+WHERE r.enabled=1 AND ` + predicate + ` AND LOWER(f.path)=LOWER(?)`
+	args = append(args, filePath)
+	if libraryID != "" {
+		base, version, ok := splitLibraryID(libraryID)
+		if !ok {
+			return resolvedPath{}, errors.New("libraryId must use /organization/project[/version]")
+		}
+		statement += ` AND r.library_id=?`
+		args = append(args, base)
+		if ref == "" {
+			ref = version
+		}
+	}
+	if repository != "" {
+		statement += ` AND (LOWER(r.slug)=LOWER(?) OR LOWER(r.library_id)=LOWER(?))`
+		args = append(args, repository, repository)
+	}
+	if ref != "" {
+		statement += ` AND f.ref_name=?`
+		args = append(args, ref)
+	}
+	statement += ` ORDER BY r.library_id,f.ref_name LIMIT 25`
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
+	if err != nil {
+		return resolvedPath{}, err
+	}
+	defer rows.Close()
+	var matches []resolvedPath
+	libraries := map[string]bool{}
+	for rows.Next() {
+		var item resolvedPath
+		if err = rows.Scan(&item.repositoryID, &item.libraryID, &item.sourceType, &item.project, &item.slug, &item.refName, &item.path); err != nil {
+			return resolvedPath{}, err
+		}
+		libraries[item.libraryID] = true
+		matches = append(matches, item)
+	}
+	if len(matches) == 0 {
+		return resolvedPath{}, fmt.Errorf("no accessible repository contains %q; run find-file first or pass libraryId", filePath)
+	}
+	if len(libraries) > 1 {
+		return resolvedPath{}, fmt.Errorf("%q exists in %d repositories; pass libraryId to choose one", filePath, len(libraries))
+	}
+	return matches[0], nil
 }
 
 // SearchCode combines repository discovery with source query APIs so callers

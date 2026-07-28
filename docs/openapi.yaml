@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.25.0
+  version: 0.26.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -156,6 +156,18 @@ paths:
       {
         summary: Read one ACL-filtered file or line range with credential masking and a response cap,
         responses: { "200": { description: File content with origin and line accounting }, "400": { description: Unknown or ambiguous path } },
+      }
+  /api/v1/tools/file-history/test:
+    post:
+      {
+        summary: List the commits that changed an ACL-filtered file,
+        responses: { "200": { description: Commit list with author date and message } },
+      }
+  /api/v1/tools/directory/test:
+    post:
+      {
+        summary: List the immediate contents of an ACL-filtered repository directory,
+        responses: { "200": { description: Folders first then files } },
       }
   /api/v1/tools/repository-map/test:
     post:

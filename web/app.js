@@ -728,6 +728,40 @@ function setupKnowledgeSearch() {
       reportError(error, "파일 열기");
     }
   };
+  $("#directory-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.currentTarget));
+    output.textContent = "목록을 불러오는 중…";
+    try {
+      const listing = await api("/api/v1/tools/directory/test", { method: "POST", body: JSON.stringify(data) });
+      const lines = [`${listing.Path || "(루트)"} · ${listing.LibraryID} · ref ${listing.Ref}`, ""];
+      for (const entry of rows(listing.Entries)) {
+        lines.push(entry.Directory ? `  ${entry.Name}/  (파일 ${entry.Files}개)` : `  ${entry.Name}${entry.ContentIndexed ? "" : "  [본문 미색인]"}`);
+      }
+      output.textContent = lines.join("\n");
+    } catch (error) {
+      output.textContent = error.message;
+      reportError(error, "디렉터리 조회");
+    }
+  };
+  $("#file-history-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.currentTarget));
+    output.textContent = "이력을 불러오는 중…";
+    try {
+      const history = await api("/api/v1/tools/file-history/test", { method: "POST", body: JSON.stringify({ ...data, limit: 30 }) });
+      const lines = [`${history.Path} · ${history.LibraryID} · ref ${history.Ref}`, ""];
+      for (const commit of rows(history.Commits)) {
+        lines.push(`${commit.DisplayID}  ${date(commit.AuthoredAt)}  ${commit.Author}`);
+        lines.push(`  ${String(commit.Message || "").split("\n")[0]}`);
+      }
+      for (const diagnostic of rows(history.Diagnostics)) lines.push(`· ${diagnostic}`);
+      output.textContent = lines.join("\n");
+    } catch (error) {
+      output.textContent = error.message;
+      reportError(error, "파일 이력");
+    }
+  };
   $("#repository-map-form").onsubmit = async (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.currentTarget));
@@ -797,7 +831,7 @@ let currentRoleSet = new Set();
 let activeScopeEditor = null;
 const userMCPScopes = [
   "resolve-library-id", "query-docs", "search-repositories", "search-source",
-  "search-code", "find-file", "read-file", "get-repository-map", "find-symbol", "get-symbol-context",
+  "search-code", "find-file", "read-file", "get-file-history", "list-directory", "get-repository-map", "find-symbol", "get-symbol-context",
   "trace-dependencies", "compare-refs", "get-change-impact", "get-context-pack",
   "find-runbook", "export-context", "explain-search-result",
 ];

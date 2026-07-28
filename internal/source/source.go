@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -50,7 +51,18 @@ type Reference struct {
 	ID, Name, LatestCommit string
 	Default                bool
 }
-type Commit struct{ ID, DisplayID, Message, Author string }
+type Commit struct {
+	ID, DisplayID, Message, Author string
+	AuthorEmail                    string
+	AuthoredAt                     time.Time
+	URL                            string
+}
+
+// HistoryProvider returns the commits that touched a path. "Why is this code
+// like this" is a normal debugging question and needs history, not content.
+type HistoryProvider interface {
+	ListCommits(ctx context.Context, repo RepositoryRef, refName, path string, limit int) ([]Commit, error)
+}
 type File struct {
 	Path string
 	Size int64
