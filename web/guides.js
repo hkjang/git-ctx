@@ -26,12 +26,22 @@
         "git-ctx는 두 종류의 권한을 사용합니다. ① 화면과 설정 API를 여는 '플랫폼 역할', ② 저장소 문서를 검색할 수 있는 '소스 ACL Principal'입니다. 설정 저장이 403으로 막힌다면 ①이, 검색 결과가 0건이면 ②가 비어 있는 경우가 대부분입니다.",
       sections: [
         {
+          title: "0. 관리자는 저장소 ACL 없이 검색합니다",
+          body: [
+            "platform-admin, source-admin, search-admin 역할은 카탈로그를 운영하는 역할이므로, Bitbucket·GitLab 계정이 매핑되지 않아도 등록된 모든 저장소와 원격 소스를 검색합니다.",
+            "이 경우 검색 결과의 diagnostics에 'repository ACL checks are bypassed'가 표시되고, 내 계정 화면에도 '관리자 — 전체 저장소 검색'으로 나타납니다.",
+            "그 외 역할(developer 등)은 기존대로 Fail-Closed입니다. claim이 없으면 결과가 0건입니다.",
+          ],
+          notice:
+            "운영 역할에 실제 소스 접근 권한이 없어도 색인된 내용을 볼 수 있다는 뜻이므로, 세 역할은 꼭 필요한 담당자에게만 부여하세요.",
+        },
+        {
           title: "1. 두 가지 권한의 차이",
           table: {
             head: ["구분", "값의 출처", "없으면 생기는 증상"],
             rows: [
               ["플랫폼 역할", "Keycloak 역할 → 역할 매핑, 또는 사용자 관리 화면에서 직접 부여", "관리자 메뉴가 보이지 않거나 설정 저장 시 403 insufficient_role"],
-              ["소스 ACL Principal", "Keycloak 토큰의 bitbucket_user_slug / gitlab_user_id claim", "검색·MCP 도구가 항상 0건 (Fail-Closed)"],
+              ["소스 ACL Principal", "Keycloak 토큰의 bitbucket_user_slug / gitlab_user_id claim", "검색·MCP 도구가 항상 0건 (Fail-Closed, 관리자 역할은 예외)"],
             ],
           },
         },
@@ -108,7 +118,7 @@
         {
           symptom: "검색·MCP 결과가 항상 0건",
           cause: "소스 ACL Principal 이 비어 있어 모든 저장소가 Fail-Closed 로 차단됩니다.",
-          fix: "5단계 claim 매퍼를 추가하고 재로그인한 뒤, 진단 패널의 'ACL Principal' 값이 채워졌는지 확인하세요.",
+          fix: "5단계 claim 매퍼를 추가하고 재로그인한 뒤, 진단 패널의 'ACL Principal' 값이 채워졌는지 확인하세요. 운영 담당자라면 source-admin 또는 search-admin 역할로도 즉시 검색할 수 있습니다.",
         },
         {
           symptom: "사용자 관리에서 역할을 바꿔도 로그인하면 되돌아감",

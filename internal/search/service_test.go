@@ -368,6 +368,77 @@ func TestRemoteDiscoveryVerifiesRepositoryACLsConcurrently(t *testing.T) {
 	}
 }
 
+// Platform, source and search administrators operate the catalog, so their
+// searches must cover every registered and remote repository even when no
+// Bitbucket or GitLab account is mapped to them.
+func TestAdministratorRolesSearchWithoutRepositoryACL(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:admin-acl-bypass?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	// The repository is readable only by bob, and one row has no permission at all.
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch) VALUES('r','core','dify','Dify','AI platform','gitlab','1','/core/dify','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r','bob','read')`)
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch) VALUES('r2','core','orphan','Dify Orphan','no permission rows','gitlab','2','/core/orphan','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('c','r','main','abc','docs/dify.md',1,4,'Dify','document','dify platform guide','h')`)
+
+	for _, role := range []string{"platform-admin", "source-admin", "search-admin"} {
+		principals := WithUnrestricted(nil, []string{role})
+		if !Unrestricted(principals) {
+			t.Fatalf("%s did not receive catalog-wide search", role)
+		}
+		repositories, repoErr := New(db).SearchRepositories(ctx, principals, "dify", "", 10)
+		if repoErr != nil || len(repositories) != 2 {
+			t.Fatalf("%s repositories=%#v err=%v", role, repositories, repoErr)
+		}
+		libraries, resolveErr := New(db).Resolve(ctx, principals, "dify", "platform guide")
+		if resolveErr != nil || len(libraries) == 0 {
+			t.Fatalf("%s resolve=%#v err=%v", role, libraries, resolveErr)
+		}
+		text, queryErr := New(db).Query(ctx, principals, "/core/dify/main", "dify platform")
+		if queryErr != nil || !strings.Contains(text, "docs/dify.md") {
+			t.Fatalf("%s query=%q err=%v", role, text, queryErr)
+		}
+	}
+
+	// A developer without a matching principal still sees nothing.
+	developer := WithUnrestricted([]string{"alice"}, []string{"developer"})
+	if Unrestricted(developer) {
+		t.Fatal("developer must not receive catalog-wide search")
+	}
+	if repositories, err := New(db).SearchRepositories(ctx, developer, "dify", "", 10); err != nil || len(repositories) != 0 {
+		t.Fatalf("developer leak=%#v err=%v", repositories, err)
+	}
+
+	// Remote discovery must skip the permission API entirely for administrators.
+	remote := &discoveryQuerySource{allowed: false}
+	service := New(db)
+	service.SetSourceLoader(func(_ context.Context, sourceType string) (source.RepositorySource, error) {
+		if sourceType != "gitlab" {
+			return nil, errors.New("not configured")
+		}
+		return remote, nil
+	})
+	result, err := service.SearchCode(ctx, WithUnrestricted(nil, []string{"source-admin"}), "dify", "gitlab", "", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Repositories) == 0 {
+		t.Fatalf("administrator remote discovery returned nothing: %#v", result)
+	}
+	found := false
+	for _, diagnostic := range result.Diagnostics {
+		if strings.Contains(diagnostic, "bypassed") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the ACL bypass must be stated in the diagnostics: %v", result.Diagnostics)
+	}
+}
+
 // An account with no Bitbucket or GitLab claim must be told why the result set
 // is empty instead of receiving a silent zero-result response.
 func TestSearchCodeExplainsMissingACLPrincipal(t *testing.T) {

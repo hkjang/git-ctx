@@ -55,6 +55,18 @@ endpoint를 표시하므로 입력값 시험과 실제 적용 상태를 구분�
 모달이 이 응답을 그대로 표시하므로, 403 `insufficient_role`이 발생하면 어떤 역할이
 빠졌는지 화면에서 바로 확인할 수 있다.
 
+## 검색 권한 모델
+
+검색과 MCP 도구는 저장소 ACL을 Fail-Closed로 적용한다. 예외적으로
+`platform-admin`, `source-admin`, `search-admin` 역할은 카탈로그를 운영하는
+역할이므로 Bitbucket·GitLab 계정이 매핑되지 않아도 등록된 모든 저장소와 원격 소스
+검색 결과를 볼 수 있다. 이때 원격 저장소 권한 API 호출도 생략하므로 검색이 빨라진다.
+
+우회가 적용되면 `search-code` 응답 `Diagnostics`에 `repository ACL checks are
+bypassed` 문구가 남고, `GET /api/v1/me/access`는 `unrestrictedSearch: true`를
+반환한다. 세 역할은 실제 소스 접근 권한과 무관하게 색인된 내용을 볼 수 있으므로 꼭
+필요한 담당자에게만 부여한다. 그 외 역할은 종전과 동일하게 claim 기반으로 제한된다.
+
 `GET /api/v1/admin/setup-status`는 Keycloak, ACL claim 매핑, 소스 연결, 저장소 등록,
 초기 색인, 백업 예약 여섯 단계의 진행 상태를 판정해 관리자 화면 상단 카드에 표시한다.
 
@@ -65,6 +77,10 @@ ACL Principal을 사용해 같은 질의를 재현한다. 응답에는 저장소
 
 `GET /api/v1/admin/settings/{category}/versions`는 버전·변경자·변경 시각만 반환한다.
 저장된 값은 암호문으로만 보관되며 이력 조회로도 복호화되지 않는다.
+
+`/api/` 응답에는 `Cache-Control: no-store`가 적용되어 공용 PC의 브라우저·프록시
+캐시에 ACL 결과가 남지 않는다. 최초 관리자 토큰과 일회용 복구 토큰 로그인은 같은
+클라이언트 주소에서 5분당 10회로 제한되고, 초과 시 429와 감사 로그가 남는다.
 
 브라우저 세션은 Keycloak Access Token 수명과 분리된 12시간이며 활동 중에는 자동
 연장된다. 세션 쿠키의 `Secure` 속성은 실제 요청 스킴(`X-Forwarded-Proto` 포함)을

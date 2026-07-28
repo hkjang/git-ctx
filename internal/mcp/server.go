@@ -1086,12 +1086,17 @@ func filterLibraries(items []search.Library, allowed []string) []search.Library 
 	}
 	return out
 }
+
+// principalACLs resolves the principals used for every MCP search. Platform,
+// source and search administrators receive the catalog-wide principal so their
+// tools work without a Bitbucket or GitLab account.
 func principalACLs(p auth.Principal) []string {
-	if len(p.ACLPrincipals) > 0 {
-		return p.ACLPrincipals
+	var principals []string
+	switch {
+	case len(p.ACLPrincipals) > 0:
+		principals = p.ACLPrincipals
+	case p.ACLPrincipal != "":
+		principals = []string{p.ACLPrincipal}
 	}
-	if p.ACLPrincipal != "" {
-		return []string{p.ACLPrincipal}
-	}
-	return nil
+	return search.WithUnrestricted(principals, p.Roles)
 }

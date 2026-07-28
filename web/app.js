@@ -376,7 +376,17 @@ function accessDiagnosticsHTML(access) {
   return `<div class="access-grid">
     <article><h4>계정</h4><div>${esc(access.username || "-")}</div><small>${esc(access.subject || "")}</small></article>
     <article><h4>플랫폼 역할</h4>${chips(access.roles, true)}<div class="field-help">${access.rolesManagedLocally ? "사용자 관리 화면에서 수동 관리 중입니다." : "로그인할 때 Keycloak 역할로 동기화됩니다."}</div></article>
-    <article><h4>소스 ACL Principal</h4>${chips(access.aclPrincipals, access.aclReady)}<div class="field-help">${access.aclReady ? "저장소 ACL 검사에 사용됩니다." : "비어 있으면 모든 검색 결과가 차단됩니다."}</div></article>
+    <article><h4>소스 ACL Principal</h4>${
+      access.unrestrictedSearch
+        ? '<span class="chip ok">관리자 — 전체 저장소 검색</span>' + chips(access.aclPrincipals, true)
+        : chips(access.aclPrincipals, access.aclReady)
+    }<div class="field-help">${
+      access.unrestrictedSearch
+        ? "platform-admin, source-admin, search-admin 역할은 저장소 ACL과 무관하게 검색합니다."
+        : access.aclReady
+          ? "저장소 ACL 검사에 사용됩니다."
+          : "비어 있으면 모든 검색 결과가 차단됩니다."
+    }</div></article>
     <article><h4>Keycloak 역할 매핑</h4>${access.keycloak?.configured ? chips(access.keycloak.roleMappings?.length ? access.keycloak.roleMappings : ["이름이 같은 역할만 자동 인식"], true) : '<span class="chip error">미설정</span>'}</article>
     <article><h4>수정할 수 없는 설정</h4>${blocked.length ? blocked.map((item) => `<span class="chip error">${esc(item.category)}</span>`).join("") : '<span class="chip ok">전체 수정 가능</span>'}</article>
   </div>`;
@@ -596,8 +606,13 @@ async function boot() {
     $("#quick-nav-button").hidden = false;
     $("#profile-name").textContent = me.Username || "내 프로필";
     $("#profile-avatar").textContent = (me.Username || "U").slice(0, 1).toUpperCase();
+    // 운영 역할은 소스 계정 매핑 없이도 전체 저장소를 검색하므로 Fail Closed로
+    // 표시하지 않습니다.
+    const unrestricted = (me.Roles || []).some((role) =>
+      ["platform-admin", "source-admin", "search-admin"].includes(role),
+    );
     $("#identity").textContent =
-      `${me.Username} · 역할: ${(me.Roles || []).join(", ")} · ACL: ${me.ACLPrincipal || "매핑되지 않음(Fail Closed)"}`;
+      `${me.Username} · 역할: ${(me.Roles || []).join(", ")} · ACL: ${me.ACLPrincipal || (unrestricted ? "관리자 역할로 전체 저장소 검색" : "매핑되지 않음(Fail Closed)")}`;
     $("#profile-version").textContent = `서비스 버전 v${me.Version || "unknown"}`;
     const roles = new Set(me.Roles || []);
     configureMCPKeyScopes(roles);

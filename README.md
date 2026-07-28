@@ -18,6 +18,7 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - PostgreSQL `tsvector` 후보 선별, 원격 line 기반 인접 청크 hydration
 - 검색어 일치 근거·retrieval 모드·embedding 버전을 보여주는 `explain-search-result`
 - 검색 후보 단계의 저장소 ACL 적용과 브랜치·태그별 조회
+- 카탈로그 운영 역할(platform-admin·source-admin·search-admin)의 ACL 무관 전체 검색
 - 사용자 API 키 생성·목록·중지·폐기 및 HMAC 기반 비가역 저장
 - SQLite와 PostgreSQL 공통 스키마
 - PostgreSQL 기동 실패 시 SQLite 복구 모드와 관리자 연결 시험·논리 데이터 이전
@@ -143,7 +144,9 @@ Search API를 전역·저장소 범위로 모두 사용하며, 로컬 색인이 
 검색되고, 어떤 경로가 실행됐는지와 ACL로 걸러진 건수는 응답 `Diagnostics`로
 설명합니다. 소스 ACL Principal이 매핑되지 않은 계정은 결과가 0건인 이유를 함께
 반환합니다. 아직 카탈로그에 등록되지 않은 저장소도 원격 발견 후 저장소 ACL이 현재
-사용자 Principal과 일치할 때만 표시합니다. 예를 들어 `dify 소스 검색해`는 검색 명령
+사용자 Principal과 일치할 때만 표시합니다. 다만 카탈로그를 운영하는
+`platform-admin`, `source-admin`, `search-admin` 역할은 소스 계정 매핑 없이도 전체
+저장소를 검색하며, 이때 응답 `Diagnostics`에 ACL 우회 사실이 기록됩니다. 예를 들어 `dify 소스 검색해`는 검색 명령
 표현을 제거한 `dify`를 원격 API에 전달합니다. 기존 `search-source`와 `query-docs`도 같은 안전한 원격
 검색 결과 경로를 사용합니다.
 

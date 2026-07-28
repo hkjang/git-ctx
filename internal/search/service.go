@@ -73,6 +73,69 @@ func (s *Service) SetConfigLoader(loader ConfigLoader) {
 	}
 }
 
+// UnrestrictedPrincipal is a synthetic principal that grants catalog-wide read
+// access. Platform, source and search administrators receive it so operating the
+// platform never depends on holding a Bitbucket or GitLab account, while every
+// other caller stays fail-closed on the repository ACL.
+const UnrestrictedPrincipal = "git-ctx:unrestricted"
+
+// unrestrictedSearchRoles are the platform roles that operate the catalog and
+// therefore search across every registered repository.
+var unrestrictedSearchRoles = []string{"platform-admin", "source-admin", "search-admin"}
+
+// GrantsUnrestrictedSearch reports whether any of the roles operates the catalog.
+func GrantsUnrestrictedSearch(roles []string) bool {
+	for _, role := range roles {
+		for _, granted := range unrestrictedSearchRoles {
+			if role == granted {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// WithUnrestricted appends the synthetic principal when the caller's roles allow
+// catalog-wide search, so every tool applies the same rule.
+func WithUnrestricted(principals []string, roles []string) []string {
+	if !GrantsUnrestrictedSearch(roles) {
+		return principals
+	}
+	return append(append([]string{}, principals...), UnrestrictedPrincipal)
+}
+
+// Unrestricted reports whether this principal set skips repository ACL checks.
+func Unrestricted(principals []string) bool {
+	for _, principal := range principals {
+		if principal == UnrestrictedPrincipal {
+			return true
+		}
+	}
+	return false
+}
+
+// repositoryACL returns the join and predicate that limit a query to the
+// repositories the caller may read. An unrestricted caller keeps the `p` alias
+// valid with a join that matches nothing, so repositories without any permission
+// row are still visible.
+// RepositoryACLClause exposes the same join and predicate to callers outside the
+// search package so every repository listing applies one ACL rule.
+func RepositoryACLClause(principals []string) (join, predicate string, args []any) {
+	return repositoryACL(principals)
+}
+
+func repositoryACL(principals []string) (join, predicate string, args []any) {
+	if Unrestricted(principals) {
+		return "LEFT JOIN repository_permissions p ON 1=0", "1=1", nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(principals)), ",")
+	args = make([]any, 0, len(principals))
+	for _, principal := range principals {
+		args = append(args, principal)
+	}
+	return "JOIN repository_permissions p ON p.repository_id=r.id", "(p.principal IN (" + placeholders + ") OR p.principal='*')", args
+}
+
 type Library struct {
 	Name, ID, Description, Reputation string
 	Snippets                          int
@@ -155,14 +218,11 @@ func (s *Service) RepositoryMap(ctx context.Context, principals []string, librar
 	if !ok || len(principals) == 0 {
 		return RepositoryMap{}, errors.New("library is unavailable or access is denied")
 	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(principals)), ",")
-	args := []any{baseID}
-	for _, principal := range principals {
-		args = append(args, principal)
-	}
+	join, predicate, aclArgs := repositoryACL(principals)
+	args := append([]any{baseID}, aclArgs...)
 	var repositoryID, defaultRef string
-	err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT r.id,r.default_branch FROM repositories r JOIN repository_permissions p ON p.repository_id=r.id
-WHERE r.library_id=? AND r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p.principal='*') LIMIT 1`), args...).Scan(&repositoryID, &defaultRef)
+	err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT r.id,r.default_branch FROM repositories r `+join+`
+WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(&repositoryID, &defaultRef)
 	if err != nil {
 		return RepositoryMap{}, errors.New("library is unavailable or access is denied")
 	}
@@ -193,14 +253,11 @@ func (s *Service) FindSymbols(ctx context.Context, principals []string, libraryI
 	if limit < 1 || limit > 100 {
 		limit = 20
 	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(principals)), ",")
-	args := make([]any, 0, len(principals)+8)
-	for _, principal := range principals {
-		args = append(args, principal)
-	}
+	join, predicate, aclArgs := repositoryACL(principals)
+	args := append(make([]any, 0, len(principals)+8), aclArgs...)
 	statement := `SELECT DISTINCT r.library_id,s.ref_name,s.commit_id,s.file_path,s.name,s.qualified_name,s.symbol_kind,s.language,s.signature,s.documentation,s.line_start,s.line_end
-FROM code_symbols s JOIN repositories r ON r.id=s.repository_id JOIN repository_permissions p ON p.repository_id=r.id
-WHERE r.enabled=1 AND (p.principal IN (` + placeholders + `) OR p.principal='*')`
+FROM code_symbols s JOIN repositories r ON r.id=s.repository_id ` + join + `
+WHERE r.enabled=1 AND ` + predicate
 	if strings.TrimSpace(libraryID) != "" {
 		baseID, version, ok := splitLibraryID(libraryID)
 		if !ok {
@@ -407,14 +464,11 @@ func (s *Service) authorizedRepository(ctx context.Context, principals []string,
 	if !ok || len(principals) == 0 {
 		return "", "", "", errors.New("library is unavailable or access is denied")
 	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(principals)), ",")
-	args := []any{baseID}
-	for _, principal := range principals {
-		args = append(args, principal)
-	}
+	join, predicate, aclArgs := repositoryACL(principals)
+	args := append([]any{baseID}, aclArgs...)
 	var defaultRef string
-	err = s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT r.id,r.default_branch FROM repositories r JOIN repository_permissions p ON p.repository_id=r.id
-WHERE r.library_id=? AND r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p.principal='*') LIMIT 1`), args...).Scan(&repositoryID, &defaultRef)
+	err = s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT r.id,r.default_branch FROM repositories r `+join+`
+WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(&repositoryID, &defaultRef)
 	if err != nil {
 		return "", "", "", errors.New("library is unavailable or access is denied")
 	}
@@ -489,14 +543,11 @@ func (s *Service) FindRunbooks(ctx context.Context, principals []string, library
 	if limit < 1 || limit > 50 {
 		limit = 10
 	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(principals)), ",")
-	args := make([]any, 0, len(principals)+2)
-	for _, principal := range principals {
-		args = append(args, principal)
-	}
+	join, predicate, aclArgs := repositoryACL(principals)
+	args := append(make([]any, 0, len(principals)+2), aclArgs...)
 	statement := `SELECT DISTINCT r.library_id,c.ref_name,c.commit_id,c.file_path,c.heading,c.content,c.line_start,c.line_end
-FROM document_chunks c JOIN repositories r ON r.id=c.repository_id JOIN repository_permissions p ON p.repository_id=r.id
-WHERE r.enabled=1 AND (p.principal IN (` + placeholders + `) OR p.principal='*') AND
+FROM document_chunks c JOIN repositories r ON r.id=c.repository_id ` + join + `
+WHERE r.enabled=1 AND ` + predicate + ` AND
 (LOWER(c.file_path) LIKE '%runbook%' OR LOWER(c.file_path) LIKE '%playbook%' OR LOWER(c.file_path) LIKE '%operations%' OR LOWER(c.heading) LIKE '%runbook%')`
 	if libraryID != "" {
 		baseID, _, ok := splitLibraryID(libraryID)
@@ -659,14 +710,11 @@ func (s *Service) SearchRepositories(ctx context.Context, principals []string, q
 	if limit < 1 || limit > 50 {
 		limit = 20
 	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(principals)), ",")
-	args := make([]any, 0, len(principals)+1)
-	for _, principal := range principals {
-		args = append(args, principal)
-	}
+	join, predicate, aclArgs := repositoryACL(principals)
+	args := append(make([]any, 0, len(principals)+1), aclArgs...)
 	statement := `SELECT DISTINCT r.id,r.project_key,r.slug,r.name,r.description,r.library_id,r.default_branch,r.source_type,r.indexed_at
-FROM repositories r JOIN repository_permissions p ON p.repository_id=r.id
-WHERE r.enabled=1 AND (p.principal IN (` + placeholders + `) OR p.principal='*')`
+FROM repositories r ` + join + `
+WHERE r.enabled=1 AND ` + predicate
 	if sourceType != "" {
 		statement += ` AND r.source_type=?`
 		args = append(args, sourceType)
@@ -734,14 +782,11 @@ func (s *Service) SearchSource(ctx context.Context, principals []string, query, 
 	if limit < 1 || limit > 50 {
 		limit = 20
 	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(principals)), ",")
-	args := make([]any, 0, len(principals)+3)
-	for _, principal := range principals {
-		args = append(args, principal)
-	}
+	join, predicate, aclArgs := repositoryACL(principals)
+	args := append(make([]any, 0, len(principals)+3), aclArgs...)
 	statement := `SELECT DISTINCT r.id,r.project_key,r.slug,r.library_id,r.default_branch,r.source_type
-FROM repositories r JOIN repository_permissions p ON p.repository_id=r.id
-WHERE r.enabled=1 AND (p.principal IN (` + placeholders + `) OR p.principal='*')`
+FROM repositories r ` + join + `
+WHERE r.enabled=1 AND ` + predicate
 	if sourceType != "" {
 		statement += ` AND r.source_type=?`
 		args = append(args, sourceType)
@@ -833,6 +878,9 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 	repositories, repoErr := s.SearchRepositories(ctx, principals, normalized, sourceType, limit)
 	hits, sourceErr := s.SearchSource(ctx, principals, normalized, sourceType, project, repository, ref, limit)
 	result := CodeSearchResult{Query: normalized, Repositories: repositories, Hits: hits}
+	if Unrestricted(principals) {
+		result.Diagnostics = append(result.Diagnostics, "acl: platform, source or search administrator role - repository ACL checks are bypassed for this search.")
+	}
 	if sourceErr != nil {
 		result.Warning = "The remote source query API was unavailable; repository matches are still shown."
 		result.Diagnostics = append(result.Diagnostics, "indexed-source: "+sourceErr.Error())
@@ -950,6 +998,9 @@ const aclLookupConcurrency = 8
 // parallel and stores it in the cache that authorize reads, keeping the result
 // order and the rest of the scan deterministic.
 func (r *remoteScan) prefetchPermissions(ctx context.Context, repositories []source.Repository) {
+	if Unrestricted(r.principals) {
+		return
+	}
 	pending := make([]source.Repository, 0, len(repositories))
 	seen := map[string]bool{}
 	r.mu.Lock()
@@ -1082,6 +1133,9 @@ func (r *remoteScan) collect(ctx context.Context, repositories []source.Reposito
 }
 
 func (r *remoteScan) authorize(ctx context.Context, projectKey, slug string) bool {
+	if Unrestricted(r.principals) {
+		return true
+	}
 	cacheKey := aclCacheKey(projectKey, slug)
 	r.mu.Lock()
 	decision, cached := r.allowed[cacheKey]
@@ -1214,6 +1268,9 @@ func permissionsAllowPrincipals(permissions []source.Permission, principals []st
 	if len(principals) == 0 {
 		return false
 	}
+	if Unrestricted(principals) {
+		return true
+	}
 	allowed := map[string]bool{}
 	for _, principal := range principals {
 		allowed[strings.ToLower(strings.TrimSpace(principal))] = true
@@ -1276,15 +1333,11 @@ func (s *Service) Resolve(ctx context.Context, principals []string, name, query 
 	if len(principals) == 0 {
 		return []Library{}, nil
 	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(principals)), ",")
-	args := make([]any, len(principals))
-	for i := range principals {
-		args[i] = principals[i]
-	}
+	join, predicate, args := repositoryACL(principals)
 	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(`
 SELECT r.id,r.name,r.library_id,r.description,r.reputation
-FROM repositories r JOIN repository_permissions p ON p.repository_id=r.id
-WHERE r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p.principal='*')`), args...)
+FROM repositories r `+join+`
+WHERE r.enabled=1 AND `+predicate), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1322,18 +1375,11 @@ WHERE r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p.principal='*')`), 
 	// writes cannot race. Finish the repository cursor before issuing per-repo
 	// aggregate queries, otherwise database/sql waits for the connection held by
 	// that same cursor.
+	// Keep only scored matches before touching the chunk table: an administrator
+	// resolves against the whole catalog, and two queries per repository turned
+	// that into hundreds of round trips.
 	selected := found[:0]
 	for _, x := range found {
-		cr, _ := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT DISTINCT ref_name FROM document_chunks WHERE repository_id=?`), x.repoID)
-		for cr != nil && cr.Next() {
-			var ref string
-			_ = cr.Scan(&ref)
-			x.Versions = append(x.Versions, ref)
-		}
-		if cr != nil {
-			cr.Close()
-		}
-		_ = s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT COUNT(*) FROM document_chunks WHERE repository_id=?`), x.repoID).Scan(&x.Snippets)
 		if x.score > 0 {
 			selected = append(selected, x)
 		}
@@ -1342,6 +1388,36 @@ WHERE r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p.principal='*')`), 
 	sort.Slice(found, func(i, j int) bool { return found[i].score > found[j].score })
 	if len(found) > 10 {
 		found = found[:10]
+	}
+	if len(found) > 0 {
+		ids := make([]any, 0, len(found))
+		positions := map[string]int{}
+		for index := range found {
+			ids = append(ids, found[index].repoID)
+			positions[found[index].repoID] = index
+		}
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+		refRows, refErr := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT repository_id,ref_name,COUNT(*) FROM document_chunks WHERE repository_id IN (`+placeholders+`) GROUP BY repository_id,ref_name ORDER BY repository_id,ref_name`), ids...)
+		if refErr != nil {
+			return nil, refErr
+		}
+		for refRows.Next() {
+			var repositoryID, refName string
+			var chunks int
+			if err := refRows.Scan(&repositoryID, &refName, &chunks); err != nil {
+				refRows.Close()
+				return nil, err
+			}
+			if index, ok := positions[repositoryID]; ok {
+				found[index].Versions = append(found[index].Versions, refName)
+				found[index].Snippets += chunks
+			}
+		}
+		if err := refRows.Err(); err != nil {
+			refRows.Close()
+			return nil, err
+		}
+		refRows.Close()
 	}
 	out := make([]Library, len(found))
 	for i := range found {
@@ -1369,15 +1445,12 @@ func (s *Service) Query(ctx context.Context, principals []string, libraryID, que
 	if len(principals) == 0 {
 		return "", errors.New("library is unavailable or access is denied")
 	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(principals)), ",")
-	args := []any{baseID}
-	for _, principal := range principals {
-		args = append(args, principal)
-	}
+	join, predicate, aclArgs := repositoryACL(principals)
+	args := append([]any{baseID}, aclArgs...)
 	var repoID, name, defaultRef, sourceType, projectKey, repositorySlug string
 	err = s.store.DB.QueryRowContext(ctx, s.store.Rebind(`
-SELECT r.id,r.name,r.default_branch,r.source_type,r.project_key,r.slug FROM repositories r JOIN repository_permissions p ON p.repository_id=r.id
-WHERE r.library_id=? AND r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p.principal='*') LIMIT 1`), args...).Scan(&repoID, &name, &defaultRef, &sourceType, &projectKey, &repositorySlug)
+SELECT r.id,r.name,r.default_branch,r.source_type,r.project_key,r.slug FROM repositories r `+join+`
+WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(&repoID, &name, &defaultRef, &sourceType, &projectKey, &repositorySlug)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", errors.New("library is unavailable or access is denied")
 	}

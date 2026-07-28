@@ -90,6 +90,46 @@ type App struct {
 	databaseRestart    atomic.Bool
 	cancel             context.CancelFunc
 	wg                 sync.WaitGroup
+	credentialAttempts attemptLimiter
+}
+
+// attemptLimiter throttles the credential endpoints per client address. The
+// bootstrap and recovery tokens are high entropy, but an unthrottled endpoint
+// still lets an attacker probe continuously and floods the audit log.
+type attemptLimiter struct {
+	mu       sync.Mutex
+	attempts map[string][]time.Time
+}
+
+const (
+	credentialAttemptLimit  = 10
+	credentialAttemptWindow = 5 * time.Minute
+)
+
+// allow records an attempt and reports whether it stays within the window.
+func (l *attemptLimiter) allow(key string, limit int, window time.Duration) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.attempts == nil {
+		l.attempts = map[string][]time.Time{}
+	}
+	now := time.Now()
+	kept := l.attempts[key][:0]
+	for _, at := range l.attempts[key] {
+		if now.Sub(at) < window {
+			kept = append(kept, at)
+		}
+	}
+	// Drop idle keys so a long running instance does not accumulate addresses.
+	if len(kept) == 0 {
+		delete(l.attempts, key)
+	}
+	if len(kept) >= limit {
+		l.attempts[key] = kept
+		return false
+	}
+	l.attempts[key] = append(kept, now)
+	return true
 }
 
 func New(ctx context.Context, c config.Config) (*App, error) {
@@ -527,6 +567,12 @@ func (a *App) bootstrapLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if !a.credentialAttempts.allow("bootstrap:"+a.requestIP(r), credentialAttemptLimit, credentialAttemptWindow) {
+		w.Header().Set("Retry-After", fmt.Sprint(int(credentialAttemptWindow.Seconds())))
+		a.audit(r, auth.Principal{UserID: "anonymous"}, "bootstrap.login", "session", "bootstrap", "throttled", nil)
+		problem(w, http.StatusTooManyRequests, "too_many_attempts", "Too many bootstrap login attempts from this address")
+		return
+	}
 	var in struct {
 		Token string `json:"token"`
 	}
@@ -562,6 +608,12 @@ func (a *App) recoveryLogin(w http.ResponseWriter, r *http.Request) {
 			problem(w, http.StatusForbidden, "origin_not_allowed", "Recovery login Origin is not allowed")
 			return
 		}
+	}
+	if !a.credentialAttempts.allow("recovery:"+a.requestIP(r), credentialAttemptLimit, credentialAttemptWindow) {
+		w.Header().Set("Retry-After", fmt.Sprint(int(credentialAttemptWindow.Seconds())))
+		a.audit(r, auth.Principal{UserID: "anonymous"}, "recovery.login", "session", "break-glass", "throttled", nil)
+		problem(w, http.StatusTooManyRequests, "too_many_attempts", "Too many recovery login attempts from this address")
+		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	var in struct {
@@ -1026,17 +1078,19 @@ func (a *App) accessDiagnostics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	principals := aclPrincipals(p.ACLPrincipal, p.ACLPrincipals)
+	unrestricted := search.GrantsUnrestrictedSearch(p.Roles)
 	jsonOut(w, http.StatusOK, map[string]any{
 		"username": p.Username, "subject": p.Subject, "roles": p.Roles, "groups": p.Groups,
 		"rolesManagedLocally": rolesManaged == 1,
 		"aclPrincipal":        p.ACLPrincipal, "aclPrincipals": principals,
-		"aclReady":       len(principals) > 0,
-		"settings":       categories,
-		"keycloak":       keycloak,
-		"platformAdmin":  p.HasRole("platform-admin"),
-		"platformRoles":  auth.PlatformRoles(),
-		"recoveryEntry":  p.UserID == "bootstrap-admin" || p.UserID == "break-glass-admin",
-		"sessionSeconds": int(browserSessionLifetime.Seconds()),
+		"unrestrictedSearch": unrestricted,
+		"aclReady":           len(principals) > 0 || unrestricted,
+		"settings":           categories,
+		"keycloak":           keycloak,
+		"platformAdmin":      p.HasRole("platform-admin"),
+		"platformRoles":      auth.PlatformRoles(),
+		"recoveryEntry":      p.UserID == "bootstrap-admin" || p.UserID == "break-glass-admin",
+		"sessionSeconds":     int(browserSessionLifetime.Seconds()),
 	})
 }
 func (a *App) me(w http.ResponseWriter, r *http.Request) {
@@ -1048,17 +1102,13 @@ func (a *App) me(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) meRepositories(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	principals := aclPrincipals(p.ACLPrincipal, p.ACLPrincipals)
+	principals := searchPrincipals(p)
 	if len(principals) == 0 {
 		jsonOut(w, 200, []any{})
 		return
 	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(principals)), ",")
-	args := make([]any, len(principals))
-	for n := range principals {
-		args[n] = principals[n]
-	}
-	rows, err := a.store.DB.QueryContext(r.Context(), a.store.Rebind(`SELECT DISTINCT r.library_id,r.name,r.description,r.default_branch,r.reputation,r.indexed_at FROM repositories r JOIN repository_permissions p ON p.repository_id=r.id WHERE r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p.principal='*') ORDER BY r.library_id`), args...)
+	join, predicate, args := search.RepositoryACLClause(principals)
+	rows, err := a.store.DB.QueryContext(r.Context(), a.store.Rebind(`SELECT DISTINCT r.library_id,r.name,r.description,r.default_branch,r.reputation,r.indexed_at FROM repositories r `+join+` WHERE r.enabled=1 AND `+predicate+` ORDER BY r.library_id`), args...)
 	if err != nil {
 		problem(w, 500, "internal_error", err.Error())
 		return
@@ -1294,7 +1344,7 @@ func (a *App) testResolve(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "libraryName and query are required")
 		return
 	}
-	items, err := a.search.Resolve(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.LibraryName, in.Query)
+	items, err := a.search.Resolve(r.Context(), searchPrincipals(p), in.LibraryName, in.Query)
 	if err != nil {
 		problem(w, 400, "search_failed", err.Error())
 		return
@@ -1328,7 +1378,7 @@ func (a *App) testQuery(w http.ResponseWriter, r *http.Request) {
 		problem(w, 403, "forbidden", "Library is unavailable or access is denied")
 		return
 	}
-	text, err := a.search.Query(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.LibraryID, in.Query)
+	text, err := a.search.Query(r.Context(), searchPrincipals(p), in.LibraryID, in.Query)
 	if err != nil {
 		problem(w, 400, "search_failed", err.Error())
 		return
@@ -1354,7 +1404,7 @@ func (a *App) testSearchCode(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "query is required")
 		return
 	}
-	result, err := a.search.SearchCode(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.Query, in.SourceType, in.Project, in.Repository, in.Ref, in.Limit)
+	result, err := a.search.SearchCode(r.Context(), searchPrincipals(p), in.Query, in.SourceType, in.Project, in.Repository, in.Ref, in.Limit)
 	if err != nil {
 		problem(w, 400, "search_failed", err.Error())
 		return
@@ -1395,7 +1445,7 @@ func (a *App) testRepositoryMap(w http.ResponseWriter, r *http.Request) {
 		problem(w, 403, "forbidden", "Library is unavailable or access is denied")
 		return
 	}
-	item, err := a.search.RepositoryMap(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.LibraryID, in.Ref)
+	item, err := a.search.RepositoryMap(r.Context(), searchPrincipals(p), in.LibraryID, in.Ref)
 	if err != nil {
 		problem(w, 400, "search_failed", err.Error())
 		return
@@ -1425,7 +1475,7 @@ func (a *App) testSymbols(w http.ResponseWriter, r *http.Request) {
 		problem(w, 403, "forbidden", "Library is unavailable or access is denied")
 		return
 	}
-	items, err := a.search.FindSymbols(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.LibraryID, in.Ref, in.Query, in.Kind, in.Limit)
+	items, err := a.search.FindSymbols(r.Context(), searchPrincipals(p), in.LibraryID, in.Ref, in.Query, in.Kind, in.Limit)
 	if err != nil {
 		problem(w, 400, "search_failed", err.Error())
 		return
@@ -1460,7 +1510,7 @@ func (a *App) testSymbolContext(w http.ResponseWriter, r *http.Request) {
 		problem(w, 403, "forbidden", "Library is unavailable or access is denied")
 		return
 	}
-	item, err := a.search.SymbolContext(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.LibraryID, in.Ref, in.Symbol)
+	item, err := a.search.SymbolContext(r.Context(), searchPrincipals(p), in.LibraryID, in.Ref, in.Symbol)
 	if err != nil {
 		problem(w, 400, "search_failed", err.Error())
 		return
@@ -1487,7 +1537,7 @@ func (a *App) testDependencies(w http.ResponseWriter, r *http.Request) {
 		problem(w, 403, "forbidden", "Library is unavailable or access is denied")
 		return
 	}
-	items, err := a.search.TraceDependencies(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.LibraryID, in.Ref, in.Symbol, in.Limit)
+	items, err := a.search.TraceDependencies(r.Context(), searchPrincipals(p), in.LibraryID, in.Ref, in.Symbol, in.Limit)
 	if err != nil {
 		problem(w, 400, "search_failed", err.Error())
 		return
@@ -1525,7 +1575,7 @@ func (a *App) refAnalysis(w http.ResponseWriter, r *http.Request, impact bool) {
 		return
 	}
 	if impact {
-		item, err := a.search.ChangeImpact(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.LibraryID, in.BaseRef, in.HeadRef, in.Limit)
+		item, err := a.search.ChangeImpact(r.Context(), searchPrincipals(p), in.LibraryID, in.BaseRef, in.HeadRef, in.Limit)
 		if err != nil {
 			problem(w, 400, "search_failed", err.Error())
 			return
@@ -1533,7 +1583,7 @@ func (a *App) refAnalysis(w http.ResponseWriter, r *http.Request, impact bool) {
 		jsonOut(w, 200, item)
 		return
 	}
-	item, err := a.search.CompareRefs(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.LibraryID, in.BaseRef, in.HeadRef)
+	item, err := a.search.CompareRefs(r.Context(), searchPrincipals(p), in.LibraryID, in.BaseRef, in.HeadRef)
 	if err != nil {
 		problem(w, 400, "search_failed", err.Error())
 		return
@@ -1554,7 +1604,7 @@ func (a *App) testContextPack(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "pack and query are required")
 		return
 	}
-	item, err := a.search.ContextPack(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.Pack, in.Query)
+	item, err := a.search.ContextPack(r.Context(), searchPrincipals(p), in.Pack, in.Query)
 	if err != nil {
 		problem(w, 400, "search_failed", err.Error())
 		return
@@ -1580,7 +1630,7 @@ func (a *App) testRunbooks(w http.ResponseWriter, r *http.Request) {
 		problem(w, 403, "forbidden", "Library is unavailable or access is denied")
 		return
 	}
-	items, err := a.search.FindRunbooks(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.LibraryID, in.Query, in.Limit)
+	items, err := a.search.FindRunbooks(r.Context(), searchPrincipals(p), in.LibraryID, in.Query, in.Limit)
 	if err != nil {
 		problem(w, 400, "search_failed", err.Error())
 		return
@@ -1609,7 +1659,7 @@ func (a *App) testContextExport(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	content, err := a.search.ExportContext(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.LibraryIDs, in.Query)
+	content, err := a.search.ExportContext(r.Context(), searchPrincipals(p), in.LibraryIDs, in.Query)
 	if err != nil {
 		problem(w, 400, "search_failed", err.Error())
 		return
@@ -3891,6 +3941,14 @@ func splitCSV(value string) []string {
 	}
 	return strings.Split(value, ",")
 }
+
+// searchPrincipals returns the ACL principals used for catalog and source
+// searches. Platform, source and search administrators operate the catalog, so
+// they search every registered repository even without a Bitbucket or GitLab
+// account; all other callers stay fail-closed on the repository ACL.
+func searchPrincipals(p auth.Principal) []string {
+	return search.WithUnrestricted(aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), p.Roles)
+}
 func aclPrincipals(primary string, groups []string) []string {
 	var out []string
 	if primary != "" {
@@ -4198,7 +4256,9 @@ FROM users u LEFT JOIN user_identities i ON i.user_id=u.id WHERE u.username=? OR
 		return
 	}
 	roles, _ := a.userRoles(r.Context(), userID)
-	principals := sourceACLPrincipals(bitbucketSlug, gitlabID, splitCSV(groups))
+	// The diagnostic must mirror the real search path, including the
+	// administrator ACL bypass, or it explains a different system.
+	principals := search.WithUnrestricted(sourceACLPrincipals(bitbucketSlug, gitlabID, splitCSV(groups)), roles)
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 	result, searchErr := a.search.SearchCode(ctx, principals, in.Query, in.SourceType, "", "", "", 20)
@@ -4215,6 +4275,7 @@ FROM users u LEFT JOIN user_identities i ON i.user_id=u.id WHERE u.username=? OR
 		"target": map[string]any{
 			"userId": userID, "username": username, "subject": subject, "status": status, "roles": roles,
 			"aclPrincipals": principals, "aclReady": len(principals) > 0,
+			"unrestrictedSearch": search.GrantsUnrestrictedSearch(roles),
 		},
 		"query": result.Query, "repositoryCount": len(result.Repositories), "hitCount": len(result.Hits),
 		"repositories": repositories, "diagnostics": result.Diagnostics, "warning": result.Warning,
@@ -4568,6 +4629,13 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'")
+		// API responses carry ACL-filtered source content and administrative
+		// state. Keeping them out of the browser and proxy caches stops that data
+		// from being replayed to the next user of a shared machine.
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Pragma", "no-cache")
+		}
 		next.ServeHTTP(w, r)
 	})
 }

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.20.0
+  version: 0.21.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -124,7 +124,7 @@ paths:
   /api/v1/me/access:
     get:
       {
-        summary: Explain the signed-in platform roles per setting category and whether a source ACL principal is mapped,
+        summary: Explain the signed-in platform roles per setting category whether a source ACL principal is mapped and whether administrator roles search without the repository ACL,
         responses: { "200": { description: Access diagnostics } },
       }
   /api/v1/tools/resolve/test:

@@ -21,6 +21,7 @@ import (
 	runtimelogging "git-ctx/internal/logging"
 	"git-ctx/internal/observability"
 	"git-ctx/internal/recovery"
+	"git-ctx/internal/search"
 	"git-ctx/internal/version"
 )
 
@@ -1089,6 +1090,58 @@ func TestSetupStatusAndSearchDiagnostics(t *testing.T) {
 	}
 	if strings.Contains(history.Body.String(), "publicUrl") {
 		t.Fatalf("history leaked setting values: %s", history.Body.String())
+	}
+}
+
+// Credential endpoints must throttle, API responses must never be cached, and
+// administrators must search the catalog without a source ACL principal.
+func TestCredentialThrottlingCacheHeadersAndAdminSearchAccess(t *testing.T) {
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:hardening?mode=memory&cache=shared&_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	attempt := func() int {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/bootstrap/login", strings.NewReader(`{"token":"wrong"}`))
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		return recorder.Code
+	}
+	for count := 0; count < credentialAttemptLimit; count++ {
+		if code := attempt(); code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d status=%d", count, code)
+		}
+	}
+	if code := attempt(); code != http.StatusTooManyRequests {
+		t.Fatalf("guessing was not throttled: status=%d", code)
+	}
+
+	status := httptest.NewRequest(http.MethodGet, "/api/v1/public/status", nil)
+	statusResult := httptest.NewRecorder()
+	a.Handler().ServeHTTP(statusResult, status)
+	if statusResult.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("API responses must not be cached: %v", statusResult.Header())
+	}
+
+	// A source administrator with no Bitbucket or GitLab identity still searches.
+	_, _ = a.store.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,enabled) VALUES('gitlab:1','core','dify','Dify','AI platform','gitlab','1','/core/dify','main',1)`)
+	_, _ = a.store.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('gitlab:1','someone-else','read')`)
+	admin := auth.Principal{UserID: "u1", Username: "ops", Roles: []string{"source-admin"}}
+	if principals := searchPrincipals(admin); !search.Unrestricted(principals) {
+		t.Fatalf("source-admin did not receive catalog-wide search: %v", principals)
+	}
+	repositories, err := a.search.SearchRepositories(context.Background(), searchPrincipals(admin), "dify", "", 10)
+	if err != nil || len(repositories) != 1 {
+		t.Fatalf("administrator search=%#v err=%v", repositories, err)
+	}
+	developer := auth.Principal{UserID: "u2", Username: "dev", Roles: []string{"developer"}, ACLPrincipal: "alice"}
+	hidden, err := a.search.SearchRepositories(context.Background(), searchPrincipals(developer), "dify", "", 10)
+	if err != nil || len(hidden) != 0 {
+		t.Fatalf("developer ACL leak=%#v err=%v", hidden, err)
 	}
 }
 
