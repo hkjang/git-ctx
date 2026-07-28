@@ -567,6 +567,43 @@ Scan·경로 정책을 통과한 로컬 청크로 대체한다. 검색 API가 �
 Bitbucket code search는 기본 브랜치 계약이므로 비기본 branch/tag 질의는 버전별 로컬
 색인만 사용한다.
 
+## 벡터 데이터베이스
+
+기본값은 미사용이다. 임베딩은 `document_chunks.embedding`에 저장되고 애플리케이션이
+코사인 점수를 직접 계산하므로 추가 인프라 없이 동작한다. 벡터 DB를 연동하면 키워드
+후보에 걸리지 않는 의미 후보를 ANN으로 추가하고, 청크 수가 늘어도 성능이 유지된다.
+
+```json
+{
+  "provider": "pgvector",
+  "dsn": "",
+  "collection": "git_ctx_chunk_vectors",
+  "dimensions": 0,
+  "timeoutSeconds": 10
+}
+```
+
+```json
+{
+  "provider": "milvus",
+  "baseUrl": "http://milvus:19530",
+  "database": "default",
+  "token": "secret://milvus-token",
+  "collection": "git_ctx_chunk_vectors"
+}
+```
+
+- pgvector: DSN을 비우면 플랫폼 PostgreSQL을 그대로 사용한다. 연결 시험에서
+  `CREATE EXTENSION IF NOT EXISTS vector` 와 테이블·HNSW 인덱스를 생성한다.
+- Milvus: RESTful v2 API만 사용하므로 SDK 의존성이 없다. 컬렉션은 COSINE metric으로
+  자동 생성된다.
+- 색인 작업이 끝나면 해당 ref의 벡터가 자동으로 재적재된다. 기존 데이터를 옮기거나
+  pgvector ↔ Milvus 를 전환할 때는 `POST /api/v1/admin/vector/rebuild` 또는 관리자
+  화면의 [벡터 재적재]를 사용한다. 재색인은 필요 없다.
+- 검색은 벡터 DB를 **후보 공급자**로만 사용한다. 장애가 나면 메타 DB 임베딩 경로로
+  자동 fallback 하므로 검색이 중단되지 않는다. `GET /api/v1/admin/vector/status` 는
+  벡터 DB 보유 수와 메타 DB 임베딩 수를 함께 보여 준다.
+
 ## OpenSearch 키워드 검색
 
 `opensearch` 설정은 선택 사항이다. 관리자 화면에서 사용 여부, Base URL, index,

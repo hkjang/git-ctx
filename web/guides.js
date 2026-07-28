@@ -452,6 +452,76 @@
       ],
     },
 
+    vector: {
+      title: "벡터 DB 연동 가이드 (pgvector · Milvus)",
+      audience: "platform-admin, search-admin",
+      summary:
+        "기본값은 '사용 안 함'입니다. 임베딩은 메타 DB의 청크 옆에 저장되고 애플리케이션이 직접 코사인 점수를 계산하므로 별도 인프라 없이 동작합니다. 벡터 DB를 연동하면 키워드가 겹치지 않는 의미 검색 후보까지 찾고, 청크 수가 늘어도 성능이 유지됩니다.",
+      sections: [
+        {
+          title: "1. 연동하지 않아도 되는 이유와 연동하면 좋은 시점",
+          table: {
+            head: ["구분", "미연동 (기본)", "연동 (pgvector·Milvus)"],
+            rows: [
+              ["후보 선별", "키워드 단계가 고른 청크만 벡터 채점", "ref 전체에서 ANN으로 의미 후보 추가"],
+              ["성능", "후보 수에 비례해 애플리케이션에서 계산", "인덱스 기반 근사 검색"],
+              ["운영", "추가 인프라 없음", "PostgreSQL 확장 또는 Milvus 운영 필요"],
+              ["권장", "저장소 수십 개 규모", "청크 수십만 개 이상, 자연어 질의 비중이 높은 환경"],
+            ],
+          },
+          notice:
+            "벡터 DB가 실패해도 검색은 멈추지 않습니다. 후보 제공에만 사용하고 최종 점수는 항상 메타 DB의 임베딩으로 계산하므로, 장애 시 기존 경로로 자동 fallback 합니다.",
+        },
+        {
+          title: "2. pgvector 설정",
+          steps: [
+            "PostgreSQL에 pgvector 확장이 설치되어 있어야 합니다. 연결 계정에 CREATE EXTENSION 권한이 있으면 첫 연결 테스트에서 자동 생성합니다.",
+            "벡터 DB를 pgvector로 선택합니다. DSN을 비우면 플랫폼 PostgreSQL을 그대로 사용하므로 자격증명을 따로 두지 않아도 됩니다.",
+            "컬렉션·테이블 이름은 기본값 git_ctx_chunk_vectors를 사용하거나 영문·숫자·밑줄로 지정합니다.",
+            "[연결 테스트·검증]을 실행하면 확장 설치 여부와 테이블 접근을 확인합니다.",
+          ],
+          notice: "테이블은 코사인 거리(vector_cosine_ops) HNSW 인덱스를 사용합니다. 구버전 pgvector라 HNSW가 없으면 정확 검색으로 동작합니다.",
+        },
+        {
+          title: "3. Milvus 설정",
+          steps: [
+            "벡터 DB를 milvus로 선택하고 Base URL(예: http://milvus:19530)을 입력합니다.",
+            "인증이 있으면 Token 또는 Username·Password를 입력합니다. Username을 쓰면 user:password 형태 토큰으로 전송합니다.",
+            "Database는 기본 default이며, 컬렉션은 첫 적재 시 COSINE metric으로 자동 생성됩니다.",
+            "[연결 테스트·검증]으로 컬렉션 목록 조회를 확인합니다.",
+          ],
+          notice: "Milvus는 RESTful v2 API로 연동합니다. 별도 SDK 의존성이 없어 오프라인 이미지 크기와 감사 범위가 늘지 않습니다.",
+        },
+        {
+          title: "4. 마이그레이션",
+          steps: [
+            "설정을 저장한 뒤 '벡터 DB 상태와 마이그레이션' 카드에서 [벡터 재적재]를 실행합니다.",
+            "메타 DB에 저장된 모든 임베딩을 500개 단위로 벡터 DB에 적재합니다. 재색인은 필요하지 않습니다.",
+            "pgvector ↔ Milvus 전환도 같은 방법입니다. 새 대상으로 설정을 바꾸고 재적재하면 됩니다.",
+            "이후 색인 작업이 끝날 때마다 해당 ref의 벡터가 자동으로 갱신됩니다.",
+          ],
+          notice: "임베딩 모델을 바꾸면 차원과 벡터 값이 모두 달라집니다. 전체 재색인 후 재적재하세요.",
+        },
+      ],
+      troubleshooting: [
+        {
+          symptom: "연결 테스트에서 pgvector 확장 오류",
+          cause: "확장이 설치되지 않았거나 계정에 생성 권한이 없습니다.",
+          fix: "DBA에게 CREATE EXTENSION vector 실행을 요청하거나 권한 있는 DSN을 사용하세요.",
+        },
+        {
+          symptom: "상태 화면의 벡터 수가 메타 DB 임베딩 수보다 적음",
+          cause: "설정 이후 색인된 ref만 자동 반영됩니다.",
+          fix: "[벡터 재적재]를 한 번 실행하면 전체가 동기화됩니다.",
+        },
+        {
+          symptom: "차원 오류로 적재 실패",
+          cause: "컬렉션 차원과 임베딩 모델 차원이 다릅니다.",
+          fix: "모델 변경 후에는 컬렉션을 새 이름으로 지정하거나 기존 컬렉션을 삭제한 뒤 재적재하세요.",
+        },
+      ],
+    },
+
     opensearch: {
       title: "OpenSearch projection 가이드",
       audience: "platform-admin, search-admin",

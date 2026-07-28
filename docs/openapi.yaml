@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.28.0
+  version: 0.29.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -286,6 +286,18 @@ paths:
       {
         summary: Default index file policy used when a repository has no override,
         responses: { "200": { description: Default include extensions exclude prefixes and size limit } },
+      }
+  /api/v1/admin/vector/status:
+    get:
+      {
+        summary: Report vector database connectivity and how many vectors it holds versus the metadata database,
+        responses: { "200": { description: Vector store status, including the not-configured case } },
+      }
+  /api/v1/admin/vector/rebuild:
+    post:
+      {
+        summary: Reproject every stored embedding into the configured vector database,
+        responses: { "200": { description: Projected vector count }, "400": { description: No vector database configured } },
       }
   /api/v1/admin/index-diagnostics:
     get:

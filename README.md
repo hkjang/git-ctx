@@ -54,6 +54,8 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - 인앱 알림과 Webhook·사내 메신저·SMTP 외부 전달 Outbox, 연결 시험·재시도·관리 이력
 - SQLite/PostgreSQL 공통 암호화 예약 백업, 보존 및 트랜잭션 복원 UI/API
 - BM25와 256차원 로컬 벡터 결합 검색, 색인 전 Secret 차단·마스킹
+- 선택적 pgvector·Milvus 연동, 미연동 시 메타 DB 내장 벡터로 동일 동작
+- 관리자 화면의 벡터 DB 연결 시험, 상태 비교와 무중단 재적재(마이그레이션)
 - ACL 필터 이후 사내 `/v1/rerank` 재순위화와 장애 시 하이브리드 점수 fallback
 - 모델 미설정 시 ACL 선검사 후 Bitbucket/GitLab 서버측 Query Search API 모드
 - 색인 전 저장소를 위한 `query-docs`의 소스 Code Search API failover와 병렬 원격 검색

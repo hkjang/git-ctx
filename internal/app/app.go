@@ -52,6 +52,7 @@ import (
 	secretstore "git-ctx/internal/secret"
 	"git-ctx/internal/source"
 	"git-ctx/internal/store"
+	"git-ctx/internal/vectorstore"
 	"git-ctx/internal/version"
 	"git-ctx/internal/webhook"
 	"git-ctx/internal/worker"
@@ -234,6 +235,7 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 	})
 	a.search.SetSourceLoader(a.sourceAdapter)
 	a.search.SetKeywordLoader(a.openSearchCandidates)
+	a.search.SetVectorLoader(a.vectorCandidates)
 	a.quality = quality.New(s, a.search)
 	a.mcp = mcp.New(a.search, s)
 	a.mcp.SetStrictCompatibilityLoader(a.strictMCPCompatibility)
@@ -248,7 +250,7 @@ func (a *App) startBackground() {
 	a.cancel = cancel
 	backgroundWorker := worker.New(a.store, indexer.New(a.store, indexer.DefaultPolicy()), a.sourceAdapter)
 	backgroundWorker.SetEmbeddingFactory(a.embeddingProvider)
-	backgroundWorker.SetProjection(a.projectOpenSearch)
+	backgroundWorker.SetProjection(a.projectSearchStores)
 	backgroundScheduler := scheduler.New(a.store, a.pollingInterval)
 	backgroundScheduler.SetRetentionLoader(a.retentionPolicy)
 	backgroundScheduler.SetNotificationLoader(a.notificationPolicy)
@@ -460,6 +462,8 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/admin/search-diagnostics", a.authorize(http.HandlerFunc(a.searchDiagnostics), "search-admin"))
 	a.mux.Handle("GET /api/v1/admin/settings/{category}/versions", a.settingsAuthorize(http.HandlerFunc(a.settingVersions)))
 	a.mux.Handle("GET /api/v1/admin/health", a.authorize(http.HandlerFunc(a.adminHealth), "readonly-operator"))
+	a.mux.Handle("GET /api/v1/admin/vector/status", a.authorize(http.HandlerFunc(a.vectorStatus), "search-admin", "readonly-operator"))
+	a.mux.Handle("POST /api/v1/admin/vector/rebuild", a.authorize(http.HandlerFunc(a.vectorRebuild), "search-admin"))
 	a.mux.Handle("GET /api/v1/admin/index-diagnostics", a.authorize(http.HandlerFunc(a.indexDiagnostics), "source-admin", "readonly-operator"))
 	a.mux.Handle("GET /api/v1/admin/freshness", a.authorize(http.HandlerFunc(a.adminFreshness), "source-admin", "readonly-operator"))
 	a.mux.Handle("GET /api/v1/admin/database/status", a.authorize(http.HandlerFunc(a.adminDatabaseStatus), "readonly-operator"))
@@ -1040,7 +1044,7 @@ func roleAllowed(p auth.Principal, roles ...string) bool {
 func settingCategoryRoles() map[string][]string {
 	return map[string][]string{
 		"bitbucket": {"source-admin"}, "gitlab": {"source-admin"}, "confluence": {"source-admin"}, "jira": {"source-admin"}, "index": {"source-admin"},
-		"mcp": {"mcp-admin"}, "search": {"search-admin"}, "model": {"search-admin"}, "opensearch": {"search-admin"},
+		"mcp": {"mcp-admin"}, "search": {"search-admin"}, "model": {"search-admin"}, "opensearch": {"search-admin"}, "vector": {"search-admin"},
 		"security": {"security-admin"}, "vault": {"security-admin"},
 	}
 }
@@ -2103,7 +2107,7 @@ func maskedCopy(value map[string]any) map[string]any {
 func (a *App) testIntegrationSetting(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
 	category := r.PathValue("category")
-	allowed := map[string]bool{"keycloak": true, "bitbucket": true, "gitlab": true, "confluence": true, "jira": true, "model": true, "opensearch": true, "vault": true, "observability": true, "backup": true, "notifications": true}
+	allowed := map[string]bool{"keycloak": true, "bitbucket": true, "gitlab": true, "confluence": true, "jira": true, "model": true, "opensearch": true, "vault": true, "vector": true, "observability": true, "backup": true, "notifications": true}
 	if !allowed[category] {
 		problem(w, 400, "setting_test_unsupported", "This setting category has no external or storage connection test")
 		return
@@ -2574,6 +2578,25 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 				return fmt.Errorf("reranker connection test: %w", err)
 			}
 		}
+	case "vector":
+		cfg := vectorstore.FromMap(value)
+		if !cfg.Enabled() {
+			return nil
+		}
+		store, err := vectorstore.Open(cfg, a.postgresDSN(ctx))
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		// The connection test also creates the collection when the dimensions are
+		// known, so the first projection does not fail on a missing table.
+		if _, err = store.Status(ctx); err != nil {
+			return err
+		}
+		if dimensions := cfg.Dimensions; dimensions > 0 {
+			return store.Ensure(ctx, dimensions)
+		}
+		return nil
 	case "opensearch":
 		cfg, err := openSearchConfigFromMap(value)
 		if err != nil {
@@ -3126,6 +3149,150 @@ func (a *App) projectOpenSearch(ctx context.Context, repositoryID, ref string) e
 	return client.SyncRef(ctx, a.store, repositoryID, ref)
 }
 
+// vectorStore opens the configured vector database. The zero configuration case
+// is not an error: git-ctx scores the embeddings stored beside the text instead.
+func (a *App) vectorStore(ctx context.Context) (vectorstore.Store, error) {
+	settings, err := a.loadSettingMap(ctx, "vector")
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, vectorstore.ErrNotConfigured
+		}
+		return nil, err
+	}
+	cfg := vectorstore.FromMap(settings)
+	if !cfg.Enabled() {
+		return nil, vectorstore.ErrNotConfigured
+	}
+	return vectorstore.Open(cfg, a.postgresDSN(ctx))
+}
+
+// postgresDSN returns the platform database DSN when it is PostgreSQL, so a
+// pgvector deployment can reuse it instead of storing a second credential.
+func (a *App) postgresDSN(ctx context.Context) string {
+	if a.store.Driver() != "postgres" {
+		return ""
+	}
+	if dsn, err := configuredDatabaseDSN(ctx, a.store, a.aead); err == nil && dsn != "" {
+		return dsn
+	}
+	return a.cfg.DatabaseDSN
+}
+
+// projectSearchStores keeps every optional search backend in step with a ref
+// that finished indexing. A failure here retries the job, so both projections
+// report their errors.
+func (a *App) projectSearchStores(ctx context.Context, repositoryID, ref string) error {
+	if err := a.projectOpenSearch(ctx, repositoryID, ref); err != nil {
+		return err
+	}
+	return a.projectVectors(ctx, repositoryID, ref)
+}
+
+// projectVectors republishes the embeddings of one ref to the vector database.
+func (a *App) projectVectors(ctx context.Context, repositoryID, ref string) error {
+	store, err := a.vectorStore(ctx)
+	if errors.Is(err, vectorstore.ErrNotConfigured) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("vector database: %w", err)
+	}
+	defer store.Close()
+	if err = store.DeleteRef(ctx, repositoryID, ref); err != nil {
+		return fmt.Errorf("vector database: %w", err)
+	}
+	_, err = a.streamVectors(ctx, store, repositoryID, ref)
+	if err != nil {
+		return fmt.Errorf("vector database: %w", err)
+	}
+	return nil
+}
+
+// streamVectors reads stored embeddings in batches and upserts them, so a full
+// rebuild never loads the whole corpus into memory.
+func (a *App) streamVectors(ctx context.Context, store vectorstore.Store, repositoryID, ref string) (int, error) {
+	statement := `SELECT c.id,c.repository_id,c.ref_name,COALESCE(r.library_id,''),c.file_path,c.embedding
+FROM document_chunks c LEFT JOIN repositories r ON r.id=c.repository_id
+WHERE c.embedding IS NOT NULL`
+	var args []any
+	if repositoryID != "" {
+		statement += ` AND c.repository_id=?`
+		args = append(args, repositoryID)
+	}
+	if ref != "" {
+		statement += ` AND c.ref_name=?`
+		args = append(args, ref)
+	}
+	rows, err := a.store.DB.QueryContext(ctx, a.store.Rebind(statement), args...)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	batch := make([]vectorstore.Chunk, 0, 500)
+	total := 0
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := store.Upsert(ctx, batch); err != nil {
+			return err
+		}
+		total += len(batch)
+		batch = batch[:0]
+		return nil
+	}
+	for rows.Next() {
+		var chunk vectorstore.Chunk
+		var raw []byte
+		if err = rows.Scan(&chunk.ID, &chunk.RepositoryID, &chunk.Ref, &chunk.LibraryID, &chunk.FilePath, &raw); err != nil {
+			return total, err
+		}
+		chunk.Vector = embedding.Decode(raw)
+		if len(chunk.Vector) == 0 {
+			continue
+		}
+		batch = append(batch, chunk)
+		if len(batch) == cap(batch) {
+			if err = flush(); err != nil {
+				return total, err
+			}
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return total, err
+	}
+	return total, flush()
+}
+
+// vectorCandidates is the search side of the integration.
+func (a *App) vectorCandidates(ctx context.Context, repositoryID, ref, query string, limit int) ([]search.VectorCandidate, error) {
+	store, err := a.vectorStore(ctx)
+	if errors.Is(err, vectorstore.ErrNotConfigured) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer store.Close()
+	provider, providerErr := a.embeddingProvider(ctx)
+	if providerErr != nil {
+		return nil, providerErr
+	}
+	vector, embedErr := provider.Embed(ctx, query)
+	if embedErr != nil {
+		return nil, embedErr
+	}
+	matches, searchErr := store.Search(ctx, repositoryID, ref, vector, limit)
+	if searchErr != nil {
+		return nil, searchErr
+	}
+	out := make([]search.VectorCandidate, 0, len(matches))
+	for _, match := range matches {
+		out = append(out, search.VectorCandidate{ID: match.ID, Score: match.Score})
+	}
+	return out, nil
+}
+
 func (a *App) openSearchCandidates(ctx context.Context, repositoryID, ref string, principals []string, query string, limit int) ([]search.KeywordCandidate, error) {
 	client, enabled, err := a.openSearchClient(ctx)
 	if err != nil {
@@ -3206,7 +3373,7 @@ func settingCategories() map[string]bool {
 		"search": true, "model": true, "opensearch": true, "index": true,
 		"security": true, "notifications": true, "logging": true,
 		"operations": true, "ui": true,
-		"observability": true, "backup": true, "retention": true, "vault": true,
+		"observability": true, "backup": true, "retention": true, "vault": true, "vector": true,
 	}
 }
 func maskSecrets(value map[string]any) []string {
@@ -4511,6 +4678,77 @@ func (a *App) settingVersions(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]any{"version": version, "changedBy": changedBy, "changedAt": createdAt})
 	}
 	jsonOut(w, http.StatusOK, out)
+}
+
+// vectorStatus reports whether the configured vector database is reachable and
+// how many vectors it holds compared with the metadata database.
+func (a *App) vectorStatus(w http.ResponseWriter, r *http.Request) {
+	var stored int64
+	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM document_chunks WHERE embedding IS NOT NULL`).Scan(&stored)
+	store, err := a.vectorStore(r.Context())
+	if errors.Is(err, vectorstore.ErrNotConfigured) {
+		jsonOut(w, http.StatusOK, map[string]any{
+			"configured": false, "provider": "none", "storedVectors": stored,
+			"detail": "벡터 DB를 사용하지 않습니다. 임베딩은 메타 DB에 저장되어 애플리케이션에서 직접 채점합니다.",
+		})
+		return
+	}
+	if err != nil {
+		problem(w, http.StatusBadRequest, "vector_unavailable", err.Error())
+		return
+	}
+	defer store.Close()
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	status, statusErr := store.Status(ctx)
+	response := map[string]any{
+		"configured": true, "provider": status.Provider, "target": status.Target, "collection": status.Collection,
+		"dimensions": status.Dimensions, "vectors": status.Vectors, "ready": status.Ready,
+		"detail": status.Detail, "storedVectors": stored,
+	}
+	if statusErr != nil {
+		response["ready"] = false
+		response["error"] = statusErr.Error()
+	}
+	jsonOut(w, http.StatusOK, response)
+}
+
+// vectorRebuild republishes every stored embedding, which is how an operator
+// migrates to a vector database or switches between pgvector and Milvus.
+func (a *App) vectorRebuild(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	store, err := a.vectorStore(r.Context())
+	if errors.Is(err, vectorstore.ErrNotConfigured) {
+		problem(w, http.StatusBadRequest, "vector_not_configured", "Select a vector database provider in the vector setting first")
+		return
+	}
+	if err != nil {
+		problem(w, http.StatusBadRequest, "vector_unavailable", err.Error())
+		return
+	}
+	defer store.Close()
+	// A rebuild walks the whole corpus, so it gets its own generous budget.
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
+	defer cancel()
+	var dimensions int
+	var sample []byte
+	if a.store.DB.QueryRowContext(ctx, `SELECT embedding FROM document_chunks WHERE embedding IS NOT NULL LIMIT 1`).Scan(&sample) == nil {
+		dimensions = len(embedding.Decode(sample))
+	}
+	if dimensions > 0 {
+		if err = store.Ensure(ctx, dimensions); err != nil {
+			problem(w, http.StatusBadRequest, "vector_ensure_failed", err.Error())
+			return
+		}
+	}
+	projected, err := a.streamVectors(ctx, store, "", "")
+	if err != nil {
+		a.audit(r, p, "vector.rebuild", "vector", store.Name(), "failure", map[string]any{"projected": projected, "error": truncateText(err.Error(), 300)})
+		problem(w, http.StatusBadGateway, "vector_rebuild_failed", err.Error())
+		return
+	}
+	a.audit(r, p, "vector.rebuild", "vector", store.Name(), "success", map[string]any{"projected": projected})
+	jsonOut(w, http.StatusOK, map[string]any{"provider": store.Name(), "projected": projected, "dimensions": dimensions})
 }
 
 // indexDiagnostics explains, per repository, whether content is searchable and

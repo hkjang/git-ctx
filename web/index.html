@@ -399,6 +399,19 @@
                     <label>그룹 Claim<input id="claim-groups" placeholder="groups" /></label>
                   </div>
                 </div>
+                <div id="vector-card" class="wide card subtle-card" hidden>
+                  <div class="section-title">
+                    <div>
+                      <h3>벡터 DB 상태와 마이그레이션</h3>
+                      <p>벡터 DB를 사용하지 않아도 검색은 동작합니다. 연동하면 키워드와 무관한 의미 검색 후보까지 찾고, 저장소가 커져도 성능이 유지됩니다.</p>
+                    </div>
+                    <div class="button-row">
+                      <button id="refresh-vector-status" class="secondary" type="button">상태 새로고침</button>
+                      <button id="rebuild-vectors" type="button">벡터 재적재 (마이그레이션)</button>
+                    </div>
+                  </div>
+                  <div id="vector-status" class="result-panel" hidden></div>
+                </div>
                 <div id="source-test-card" class="wide card subtle-card" hidden>
                   <div class="section-title">
                     <div>

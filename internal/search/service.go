@@ -41,6 +41,17 @@ type KeywordCandidate struct {
 	Score float64
 }
 type KeywordLoader func(context.Context, string, string, []string, string, int) ([]KeywordCandidate, error)
+
+// VectorCandidate is one chunk proposed by an external vector database.
+type VectorCandidate struct {
+	ID    string
+	Score float64
+}
+
+// VectorLoader asks the configured vector database for nearest neighbours in one
+// repository ref. It is optional: without it, and whenever it fails, retrieval
+// falls back to the embeddings stored next to the text.
+type VectorLoader func(ctx context.Context, repositoryID, ref string, query string, limit int) ([]VectorCandidate, error)
 type Service struct {
 	store    *store.Store
 	load     ConfigLoader
@@ -48,9 +59,13 @@ type Service struct {
 	reranker RerankerLoader
 	sources  func(context.Context, string) (source.RepositorySource, error)
 	keyword  KeywordLoader
+	vector   VectorLoader
 }
 
 func (s *Service) SetKeywordLoader(loader KeywordLoader) { s.keyword = loader }
+
+// SetVectorLoader installs the external vector database candidate source.
+func (s *Service) SetVectorLoader(loader VectorLoader) { s.vector = loader }
 
 func (s *Service) SetRerankerLoader(loader RerankerLoader) {
 	if loader != nil {
@@ -724,6 +739,9 @@ FROM document_chunks WHERE repository_id=? AND ref_name=? ORDER BY indexed_at DE
 	mode := "application lexical + vector"
 	if s.store.Driver() == "postgres" {
 		mode = "PostgreSQL FTS candidates + vector/rerank"
+	}
+	if s.vector != nil {
+		mode += " + external vector database"
 	}
 	return SearchExplanation{LibraryID: baseID, Ref: ref, RetrievalMode: mode, Hits: hits}, nil
 }
@@ -2554,6 +2572,33 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 			}
 		}
 	}
+	// An external vector database contributes candidates that share no keyword
+	// with the query, which the lexical prefilter can never surface. Its scores
+	// are not used directly: the stored embeddings are still scored below, so
+	// ranking stays identical whether or not a vector database is configured.
+	vectorMode := ""
+	vectorScores := map[string]float64{}
+	if s.vector != nil && cfg.VectorWeight > 0 {
+		if candidates, vectorErr := s.vector(ctx, repoID, ref, query, cfg.RerankLimit*2); vectorErr == nil && len(candidates) > 0 {
+			known := map[string]bool{}
+			for _, id := range keywordIDs {
+				known[id] = true
+			}
+			for _, candidate := range candidates {
+				if candidate.ID == "" {
+					continue
+				}
+				// The store scored these with the same embeddings, and for an
+				// approximate index its score is the authoritative one.
+				vectorScores[candidate.ID] = candidate.Score
+				if !known[candidate.ID] {
+					known[candidate.ID] = true
+					keywordIDs = append(keywordIDs, candidate.ID)
+				}
+			}
+			vectorMode = " + vector database ANN"
+		}
+	}
 	candidateSQL := `SELECT id,content,file_path,line_start,line_end,commit_id,heading,embedding FROM document_chunks WHERE repository_id=? AND ref_name=?`
 	args = []any{repoID, ref}
 	if len(keywordIDs) > 0 {
@@ -2634,7 +2679,11 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 		}
 		vectorScore := 0.0
 		if cfg.VectorWeight > 0 {
-			vectorScore = embedding.Cosine(queryVector, embedding.Decode(hits[n].vector))
+			if external, ok := vectorScores[hits[n].id]; ok {
+				vectorScore = external
+			} else {
+				vectorScore = embedding.Cosine(queryVector, embedding.Decode(hits[n].vector))
+			}
 		}
 		keywordScore := bm25
 		if score, ok := keywordScores[hits[n].id]; ok {
@@ -2676,7 +2725,7 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 		}
 		return fmt.Sprintf("No indexed documentation matched the query in %s at %s, and the %s code search API returned nothing for it. The repository may still be indexing; try `search-code` with the same term, another term, or another version.", name, ref, sourceType), nil
 	}
-	span.SetAttributes(attribute.Int("git_ctx.search.result_count", len(hits)))
+	span.SetAttributes(attribute.Int("git_ctx.search.result_count", len(hits)), attribute.String("git_ctx.search.vector_mode", vectorMode))
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s\n\n", name)
 	for _, h := range hits {

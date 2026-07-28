@@ -81,6 +81,10 @@ for (const id of [
   "index-policy-max-bytes",
   "index-diagnostics",
   "index-queue",
+  "vector-card",
+  "vector-status",
+  "rebuild-vectors",
+  "refresh-vector-status",
   "refresh-index-diagnostics",
 ]) {
   assert.match(html, new RegExp(`id=["']${id}["']`), `missing ${id}`);
@@ -132,6 +136,8 @@ assert.match(script, /api\/v1\/tools\/directory\/test/);
 assert.match(script, /api\/v1\/tools\/file-history\/test/);
 assert.match(script, /api\/v1\/tools\/merge-requests\/test/);
 assert.match(script, /api\/v1\/tools\/dependents\/test/);
+assert.match(script, /api\/v1\/admin\/vector\/status/);
+assert.match(script, /api\/v1\/admin\/vector\/rebuild/);
 // 새로고침해도 화면이 유지되어야 하므로 위치를 주소에 기록하고 복원한다.
 assert.match(script, /function rememberView/);
 assert.match(script, /function parseViewHash/);
@@ -170,6 +176,7 @@ for (const category of [
   "model",
   "opensearch",
   "index",
+  "vector",
   "security",
   "vault",
   "observability",

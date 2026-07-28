@@ -575,6 +575,68 @@ func TestFindFilesFallsBackToRemoteTreeListing(t *testing.T) {
 	}
 }
 
+// A vector database widens the candidate set with semantically close chunks
+// that share no keyword, and a failing one must never break search.
+func TestVectorDatabaseAddsCandidatesAndFailsSoft(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:vector-candidates?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r','core','gpu','GPU','gitlab','1','/core/gpu','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r','alice','read')`)
+	// The wanted chunk shares no term with the query; only a vector store can
+	// propose it.
+	semantic := embedding.Encode(embedding.Embed("accelerator utilisation telemetry"))
+	_, _ = db.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding) VALUES('c-semantic','r','main','abc','docs/telemetry.md',1,4,'Telemetry','document','Accelerator utilisation telemetry pipeline.','h1',?)`, semantic)
+	_, _ = db.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding) VALUES('c-other','r','main','abc','docs/other.md',1,4,'Other','document','Unrelated billing document.','h2',?)`, embedding.Encode(embedding.Embed("billing invoices")))
+
+	service := New(db)
+	service.SetConfigLoader(func(context.Context) Config {
+		return Config{KeywordWeight: 1, VectorWeight: 1, FinalK: 5, CandidateLimit: 100}
+	})
+	// Without the vector loader the lexical prefilter finds nothing for this query.
+	plain, err := service.Query(ctx, []string{"alice"}, "/core/gpu/main", "zzzqqq")
+	if err != nil || strings.Contains(plain, "docs/telemetry.md") {
+		t.Fatalf("baseline should not find the semantic chunk: %s err=%v", plain, err)
+	}
+
+	var asked int
+	service.SetVectorLoader(func(_ context.Context, repositoryID, ref, query string, limit int) ([]VectorCandidate, error) {
+		asked++
+		if repositoryID != "r" || ref != "main" {
+			t.Errorf("scope=%s/%s", repositoryID, ref)
+		}
+		return []VectorCandidate{{ID: "c-semantic", Score: 0.82}}, nil
+	})
+	found, err := service.Query(ctx, []string{"alice"}, "/core/gpu/main", "zzzqqq")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(found, "docs/telemetry.md") {
+		t.Fatalf("the vector candidate was not retrieved: %s", found)
+	}
+	if strings.Contains(found, "docs/other.md") {
+		t.Fatalf("an unrelated chunk leaked in: %s", found)
+	}
+	if asked != 1 {
+		t.Fatalf("vector loader calls=%d", asked)
+	}
+
+	// A broken vector database must degrade to the previous behaviour.
+	service.SetVectorLoader(func(context.Context, string, string, string, int) ([]VectorCandidate, error) {
+		return nil, errors.New("milvus unavailable")
+	})
+	degraded, err := service.Query(ctx, []string{"alice"}, "/core/gpu/main", "accelerator")
+	if err != nil {
+		t.Fatalf("a failing vector database must not fail the search: %v", err)
+	}
+	if degraded == "" {
+		t.Fatal("expected the in-database path to answer")
+	}
+}
+
 // Before changing shared code an agent must see every repository that uses it,
 // not only the one it happens to be reading.
 func TestFindDependentsCrossesRepositoriesAndRespectsACL(t *testing.T) {

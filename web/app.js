@@ -81,6 +81,7 @@ const categories = [
   "search",
   "model",
   "opensearch",
+  "vector",
   "index",
   "security",
   "vault",
@@ -187,6 +188,21 @@ const integrationSettingFields = {
     ["tlsVerify", "TLS 인증서 검증 사용", "boolean", true],
     ["caCertificate", "사내 CA PEM", "textarea", ""],
     ["proxyUrl", "Proxy URL", "url", ""],
+  ],
+  vector: [
+    ["provider", "벡터 DB", "select:none|pgvector|milvus", "none"],
+    ["dsn", "pgvector PostgreSQL DSN (비우면 플랫폼 DB)", "password", ""],
+    ["baseUrl", "Milvus Base URL", "url", ""],
+    ["collection", "컬렉션·테이블 이름", "text", "git_ctx_chunk_vectors"],
+    ["database", "Milvus Database", "text", "default"],
+    ["token", "Milvus Token", "password", ""],
+    ["username", "Milvus Username", "text", ""],
+    ["password", "Milvus Password", "password", ""],
+    ["dimensions", "벡터 차원 (0=색인에서 자동 감지)", "number", 0],
+    ["tlsVerify", "TLS 인증서 검증 사용", "boolean", true],
+    ["caCertificate", "사내 CA PEM", "textarea", ""],
+    ["proxyUrl", "Proxy URL", "url", ""],
+    ["timeoutSeconds", "Timeout(초)", "number", 10],
   ],
   opensearch: [
     ["enabled", "OpenSearch 사용", "boolean", false],
@@ -295,6 +311,7 @@ const settingCategoryMeta = {
   search: ["검색", "키워드·벡터 가중치와 결과 수"],
   model: ["모델", "Embedding과 Reranker"],
   opensearch: ["OpenSearch", "BM25 projection과 인증"],
+  vector: ["벡터 DB", "pgvector·Milvus 연동, 미설정 시 메타 DB 내장 벡터 사용"],
   index: ["색인", "Polling과 기본 색인 정책"],
   security: ["보안", "신뢰 프록시와 키 정책"],
   vault: ["Vault", "KV v2 Secret backend"],
@@ -1408,6 +1425,33 @@ async function loadSettingHistory(category) {
   }
 }
 
+// refreshVectorStatus 는 벡터 DB 연결 상태와 저장된 벡터 수를 비교해 보여 줍니다.
+// 미설정도 정상 상태이므로 오류처럼 표시하지 않습니다.
+async function refreshVectorStatus() {
+  const panel = $("#vector-status");
+  panel.hidden = false;
+  panel.className = "result-panel";
+  panel.textContent = "벡터 DB 상태를 확인하는 중…";
+  try {
+    const status = await api("/api/v1/admin/vector/status");
+    if (!status.configured) {
+      panel.className = "result-panel";
+      panel.innerHTML = `<h4>벡터 DB 미사용</h4><ul class="result-list"><li>${esc(status.detail)}</li><li>메타 DB에 저장된 임베딩 ${status.storedVectors}개</li></ul>`;
+      return;
+    }
+    const ready = status.ready && !status.error;
+    panel.className = `result-panel ${ready ? "ok" : "error"}`;
+    panel.innerHTML =
+      `<h4>${esc(status.provider)} · ${ready ? "연결됨" : "연결 실패"}</h4><ul class="result-list">` +
+      `<li>대상: ${esc(status.target || "-")} · 컬렉션 ${esc(status.collection || "-")}</li>` +
+      `<li>벡터 DB ${status.vectors ?? 0}개 / 메타 DB 임베딩 ${status.storedVectors}개</li>` +
+      `<li>${esc(status.error || status.detail || "")}</li></ul>`;
+  } catch (error) {
+    panel.className = "result-panel error";
+    panel.textContent = error.message;
+  }
+}
+
 function renderSettingResult(ok, title, lines, payload) {
   const panel = $("#setting-test-result");
   panel.hidden = false;
@@ -1583,6 +1627,8 @@ function setupAdmin(roles, capabilities) {
     $("#advanced-setting-json").hidden = category === "keycloak";
     $("#keycloak-mapping-card").hidden = category !== "keycloak";
     $("#source-test-card").hidden = !["bitbucket", "gitlab"].includes(category);
+    $("#vector-card").hidden = category !== "vector";
+    if (category === "vector") refreshVectorStatus();
     $("#setting-test-result").hidden = true;
     $("#setting-guide-button").hidden = !GitCtxGuides.has(category);
     $("#setting-guide-button").dataset.guide = category;
@@ -1711,6 +1757,23 @@ function setupAdmin(roles, capabilities) {
     }
   };
   setupKeycloakMappingEditor();
+  $("#refresh-vector-status").onclick = refreshVectorStatus;
+  $("#rebuild-vectors").onclick = async () => {
+    if (!confirm("메타 DB의 모든 임베딩을 벡터 DB로 다시 적재합니다. 대상이 많으면 시간이 걸릴 수 있습니다. 진행할까요?")) return;
+    const button = $("#rebuild-vectors");
+    button.disabled = true;
+    button.textContent = "적재 중…";
+    try {
+      const result = await api("/api/v1/admin/vector/rebuild", { method: "POST", body: "{}" });
+      showAdmin(`${result.provider}에 벡터 ${result.projected}개를 적재했습니다.`, true);
+      refreshVectorStatus();
+    } catch (error) {
+      reportError(error, "벡터 재적재");
+    } finally {
+      button.disabled = false;
+      button.textContent = "벡터 재적재 (마이그레이션)";
+    }
+  };
   $("#setting-json").oninput = () => {
     try {
       renderSettingFields(
