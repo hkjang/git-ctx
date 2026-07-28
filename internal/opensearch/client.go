@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -137,6 +138,9 @@ func (c *Client) SyncRef(ctx context.Context, s *store.Store, repositoryID, ref 
 	if err != nil {
 		return err
 	}
+	if applied, err := c.syncIncremental(ctx, s, repositoryID, ref, principals); err != nil || applied {
+		return err
+	}
 	deleteBody, _ := json.Marshal(map[string]any{"query": map[string]any{"bool": map[string]any{"filter": []any{
 		map[string]any{"term": map[string]string{"repository_id": repositoryID}}, map[string]any{"term": map[string]string{"ref_name": ref}},
 	}}}})
@@ -175,7 +179,7 @@ func (c *Client) SyncRef(ctx context.Context, s *store.Store, repositoryID, ref 
 	}
 	w.Flush()
 	if count == 0 {
-		return nil
+		return markProjection(ctx, s, repositoryID, ref, principals)
 	}
 	resp, err = c.request(ctx, http.MethodPost, "/_bulk?refresh=wait_for", "application/x-ndjson", &bulk)
 	if err != nil {
@@ -187,14 +191,184 @@ func (c *Client) SyncRef(ctx context.Context, s *store.Store, repositoryID, ref 
 	defer resp.Body.Close()
 	var result struct {
 		Errors bool `json:"errors"`
+		Items  []map[string]struct {
+			Status int             `json:"status"`
+			Error  json.RawMessage `json:"error"`
+		} `json:"items"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return err
 	}
 	if result.Errors {
-		return errors.New("opensearch bulk indexing reported item failures")
+		failed := 0
+		for _, item := range result.Items {
+			for action, status := range item {
+				if action == "delete" && status.Status == http.StatusNotFound {
+					continue
+				}
+				if status.Status < 200 || status.Status >= 300 || len(status.Error) > 0 {
+					failed++
+				}
+			}
+		}
+		if failed > 0 || len(result.Items) == 0 {
+			return fmt.Errorf("opensearch bulk indexing reported %d item failures", failed)
+		}
+	}
+	return markProjection(ctx, s, repositoryID, ref, principals)
+}
+
+func (c *Client) syncIncremental(ctx context.Context, s *store.Store, repositoryID, ref string, principals []string) (bool, error) {
+	var currentCommit, projectedCommit, projectedACL string
+	if err := s.DB.QueryRowContext(ctx, s.Rebind(`SELECT commit_id FROM repository_ref_states WHERE repository_id=? AND ref_name=?`), repositoryID, ref).Scan(&currentCommit); err != nil {
+		return false, nil
+	}
+	if err := s.DB.QueryRowContext(ctx, s.Rebind(`SELECT commit_id,acl_fingerprint FROM search_projection_states WHERE repository_id=? AND ref_name=?`), repositoryID, ref).Scan(&projectedCommit, &projectedACL); err != nil || projectedCommit == "" {
+		return false, nil
+	}
+	currentACL := aclFingerprint(principals)
+	if projectedCommit == currentCommit {
+		if projectedACL == currentACL {
+			return true, nil
+		}
+		return false, nil
+	}
+	rows, err := s.DB.QueryContext(ctx, s.Rebind(`SELECT previous_commit_id,file_path,action,deleted_chunk_ids FROM repository_ref_changes WHERE repository_id=? AND ref_name=? AND commit_id=? ORDER BY action,file_path`), repositoryID, ref, currentCommit)
+	if err != nil {
+		return false, err
+	}
+	type change struct {
+		path, action string
+		deletedIDs   []string
+	}
+	var changes []change
+	upsertPaths := map[string]bool{}
+	for rows.Next() {
+		var previous, path, action, deletedJSON string
+		if err = rows.Scan(&previous, &path, &action, &deletedJSON); err != nil {
+			rows.Close()
+			return false, err
+		}
+		if previous != projectedCommit || action == "full" {
+			rows.Close()
+			return false, nil
+		}
+		item := change{path: path, action: action}
+		_ = json.Unmarshal([]byte(deletedJSON), &item.deletedIDs)
+		changes = append(changes, item)
+		if action == "upsert" && path != "" {
+			upsertPaths[path] = true
+		}
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return false, err
+	}
+	rows.Close()
+	if len(changes) == 0 {
+		return false, nil
+	}
+
+	var bulk bytes.Buffer
+	writer := bufio.NewWriter(&bulk)
+	actionCount := 0
+	for _, item := range changes {
+		if item.action != "delete" {
+			continue
+		}
+		for _, id := range item.deletedIDs {
+			meta, _ := json.Marshal(map[string]any{"delete": map[string]string{"_index": c.cfg.Index, "_id": id}})
+			fmt.Fprintln(writer, string(meta))
+			actionCount++
+		}
+	}
+	if len(upsertPaths) > 0 {
+		placeholders := make([]string, 0, len(upsertPaths))
+		args := []any{repositoryID, ref}
+		for path := range upsertPaths {
+			placeholders = append(placeholders, "?")
+			args = append(args, path)
+		}
+		chunkRows, queryErr := s.DB.QueryContext(ctx, s.Rebind(`SELECT id,commit_id,file_path,line_start,line_end,heading,content_type,content FROM document_chunks WHERE repository_id=? AND ref_name=? AND file_path IN (`+strings.Join(placeholders, ",")+`) ORDER BY id`), args...)
+		if queryErr != nil {
+			return false, queryErr
+		}
+		for chunkRows.Next() {
+			var id, commit, file, heading, contentType, content string
+			var start, end int
+			if err = chunkRows.Scan(&id, &commit, &file, &start, &end, &heading, &contentType, &content); err != nil {
+				chunkRows.Close()
+				return false, err
+			}
+			meta, _ := json.Marshal(map[string]any{"index": map[string]string{"_index": c.cfg.Index, "_id": id}})
+			doc, _ := json.Marshal(map[string]any{"repository_id": repositoryID, "ref_name": ref, "commit_id": commit, "file_path": file, "line_start": start, "line_end": end, "heading": heading, "content_type": contentType, "content": content, "principals": principals})
+			fmt.Fprintln(writer, string(meta))
+			fmt.Fprintln(writer, string(doc))
+			actionCount++
+		}
+		if err = chunkRows.Err(); err != nil {
+			chunkRows.Close()
+			return false, err
+		}
+		chunkRows.Close()
+	}
+	writer.Flush()
+	if actionCount > 0 {
+		if err = c.sendBulk(ctx, &bulk); err != nil {
+			return true, err
+		}
+	}
+	return true, markProjection(ctx, s, repositoryID, ref, principals)
+}
+
+func (c *Client) sendBulk(ctx context.Context, bulk *bytes.Buffer) error {
+	resp, err := c.request(ctx, http.MethodPost, "/_bulk?refresh=wait_for", "application/x-ndjson", bulk)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return statusError(resp)
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Errors bool `json:"errors"`
+		Items  []map[string]struct {
+			Status int             `json:"status"`
+			Error  json.RawMessage `json:"error"`
+		} `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return err
+	}
+	if result.Errors {
+		failed := 0
+		for _, item := range result.Items {
+			for action, status := range item {
+				if action == "delete" && status.Status == http.StatusNotFound {
+					continue
+				}
+				if status.Status < 200 || status.Status >= 300 || len(status.Error) > 0 {
+					failed++
+				}
+			}
+		}
+		if failed > 0 || len(result.Items) == 0 {
+			return fmt.Errorf("opensearch bulk indexing reported %d item failures", failed)
+		}
 	}
 	return nil
+}
+
+func markProjection(ctx context.Context, s *store.Store, repositoryID, ref string, principals []string) error {
+	_, err := s.DB.ExecContext(ctx, s.Rebind(`INSERT INTO search_projection_states(repository_id,ref_name,commit_id,acl_fingerprint,projected_at)
+SELECT repository_id,ref_name,commit_id,?,? FROM repository_ref_states WHERE repository_id=? AND ref_name=?
+ON CONFLICT(repository_id,ref_name) DO UPDATE SET commit_id=excluded.commit_id,acl_fingerprint=excluded.acl_fingerprint,projected_at=excluded.projected_at`), aclFingerprint(principals), time.Now().UTC(), repositoryID, ref)
+	return err
+}
+
+func aclFingerprint(principals []string) string {
+	sum := sha256.Sum256([]byte(strings.Join(principals, "\x00")))
+	return fmt.Sprintf("%x", sum[:])
 }
 
 func loadPrincipals(ctx context.Context, s *store.Store, repositoryID string) ([]string, error) {

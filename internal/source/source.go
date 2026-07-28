@@ -18,6 +18,11 @@ type File struct {
 	Path string
 	Size int64
 }
+type Change struct {
+	Path    string
+	OldPath string
+	Type    string
+}
 type Permission struct{ Principal, Kind, Permission string }
 type QueryResult struct {
 	Path      string
@@ -28,6 +33,9 @@ type QueryResult struct {
 }
 type QuerySearcher interface {
 	SearchQuery(context.Context, RepositoryRef, string, string, int) ([]QueryResult, error)
+}
+type ChangeFeed interface {
+	Changes(context.Context, RepositoryRef, string, string) ([]Change, error)
 }
 
 type RepositorySource interface {

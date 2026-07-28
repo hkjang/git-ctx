@@ -32,6 +32,11 @@ func TestBitbucket69EndpointsAndPagination(t *testing.T) {
 		case "/rest/api/1.0/projects/KCB/repos/demo/raw/docs/guide.md":
 			w.Header().Set("Content-Type", "text/plain")
 			w.Write([]byte("# Guide"))
+		case "/rest/api/1.0/projects/KCB/repos/demo/changes":
+			if r.URL.Query().Get("since") != "old" || r.URL.Query().Get("until") != "new" {
+				t.Errorf("changes query=%s", r.URL.RawQuery)
+			}
+			w.Write([]byte(`{"values":[{"type":"MODIFY","path":{"toString":"docs/guide.md"}},{"type":"MOVE","path":{"toString":"docs/new.md"},"srcPath":{"toString":"docs/old.md"}},{"type":"DELETE","path":{"toString":"docs/gone.md"}}],"isLastPage":true}`))
 		case "/rest/api/1.0/projects/KCB/repos/demo/permissions/users":
 			w.Write([]byte(`{"values":[{"user":{"name":"repo-user","slug":"repo-user"},"permission":"REPO_READ"}],"isLastPage":true}`))
 		case "/rest/api/1.0/projects/KCB/repos/demo/permissions/groups":
@@ -87,6 +92,10 @@ func TestBitbucket69EndpointsAndPagination(t *testing.T) {
 	body, err := c.GetFile(context.Background(), ref, "main", "docs/guide.md")
 	if err != nil || string(body) != "# Guide" {
 		t.Fatalf("body=%q err=%v", body, err)
+	}
+	changes, err := c.Changes(context.Background(), ref, "old", "new")
+	if err != nil || len(changes) != 3 || changes[1].Type != "move" || changes[1].OldPath != "docs/old.md" || changes[2].Type != "delete" {
+		t.Fatalf("changes=%#v err=%v", changes, err)
 	}
 	hits, err := c.SearchQuery(context.Background(), ref, "main", "gpu usage", 5)
 	if err != nil || len(hits) != 1 || hits[0].Path != "docs/gpu.md" || hits[0].LineStart != 7 || hits[0].Snippet != "GPU usage" {

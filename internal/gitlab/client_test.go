@@ -29,6 +29,11 @@ func TestGitLabAdapterPaginationFilesAndPermissions(t *testing.T) {
 			w.Write([]byte(`[{"path":"docs","type":"tree"},{"path":"README.md","type":"blob"}]`))
 		case "/api/v4/projects/core%2Fdemo/repository/files/docs%2Fguide.md/raw":
 			w.Write([]byte("# Guide"))
+		case "/api/v4/projects/core%2Fdemo/repository/compare":
+			if r.URL.Query().Get("from") != "old" || r.URL.Query().Get("to") != "new" || r.URL.Query().Get("straight") != "true" {
+				t.Errorf("compare query=%s", r.URL.RawQuery)
+			}
+			w.Write([]byte(`{"diffs":[{"old_path":"docs/a.md","new_path":"docs/a.md"},{"old_path":"docs/old.md","new_path":"docs/new.md","renamed_file":true},{"old_path":"docs/gone.md","new_path":"docs/gone.md","deleted_file":true}]}`))
 		case "/api/v4/projects/core%2Fdemo/members/all":
 			w.Write([]byte(`[{"id":42,"username":"alice","access_level":30}]`))
 		case "/api/v4/projects/core%2Fdemo":
@@ -59,6 +64,10 @@ func TestGitLabAdapterPaginationFilesAndPermissions(t *testing.T) {
 	body, err := c.GetFile(context.Background(), ref, "main", "docs/guide.md")
 	if err != nil || string(body) != "# Guide" {
 		t.Fatalf("body=%q err=%v", body, err)
+	}
+	changes, err := c.Changes(context.Background(), ref, "old", "new")
+	if err != nil || len(changes) != 3 || changes[1].Type != "renamed" || changes[1].OldPath != "docs/old.md" || changes[2].Type != "deleted" {
+		t.Fatalf("changes=%#v err=%v", changes, err)
 	}
 	perms, err := c.GetPermissions(context.Background(), ref)
 	if err != nil || len(perms) != 2 || perms[0].Principal != "gitlab:42" || perms[0].Permission != "developer" || perms[1].Principal != "gitlab:authenticated" {

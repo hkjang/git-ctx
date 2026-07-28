@@ -12,9 +12,20 @@ import (
 type Provider interface {
 	Embed(context.Context, string) ([]float32, error)
 }
+type Metadata struct {
+	Provider, Model, Revision string
+	Dimensions                int
+}
+type MetadataProvider interface {
+	Provider
+	EmbeddingMetadata() Metadata
+}
 type Local struct{}
 
 func (Local) Embed(_ context.Context, text string) ([]float32, error) { return Embed(text), nil }
+func (Local) EmbeddingMetadata() Metadata {
+	return Metadata{Provider: "local-feature-hash", Model: "fnv-token-projection", Revision: "v1", Dimensions: Dimensions}
+}
 
 const Dimensions = 256
 

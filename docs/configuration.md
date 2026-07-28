@@ -207,7 +207,8 @@ localhost 시험 서버에만 허용된다.
 
 기본 `model.provider`는 외부 호출이 없는 256차원 `local`이다. 사내 vLLM 또는 AI
 Gateway가 OpenAI embeddings API를 제공하면 다음처럼 변경한다. 저장 전에 실제
-embedding 요청으로 연결을 시험하며 모델 차원 변경 후에는 전체 재색인이 필요하다.
+embedding 요청으로 연결을 시험한다. 색인 청크에는 provider, model, dimension,
+revision이 함께 저장되며 모델 identity가 변경되면 동일 commit이라도 전체 재색인한다.
 
 ```json
 {
@@ -398,8 +399,10 @@ Basic 인증 또는 인코딩된 API Key, TLS 검증, 사내 CA, Proxy와 Timeou
 }
 ```
 
-활성화 뒤 저장소를 재색인하면 Worker가 해당 ref의 기존 projection을 삭제하고 Bulk
-API로 현재 청크와 ACL principal을 함께 기록한다. Projection 실패는 색인 작업 실패로
+활성화 뒤 최초 색인은 해당 ref 전체를 Bulk API로 투영한다. 이후에는 source compare
+API의 변경 journal과 projection cursor를 이용해 삭제된 chunk ID와 변경 파일만 반영한다.
+commit 이력이 이어지지 않거나 cursor가 없으면 전체 projection으로 자동 복구한다.
+ACL fingerprint가 변경되면 commit이 같아도 전체 ACL을 갱신한다. Projection 실패는 색인 작업 실패로
 처리되어 지수 Backoff 재시도 대상이 된다. 검색 요청은 repository, ref와 호출자
 principal을 OpenSearch `bool.filter`에 넣는다. OpenSearch에서는 청크 ID와 점수만
 받으며 출력 본문·경로·출처는 PostgreSQL의 승인된 청크에서 다시 읽는다. 장애이거나

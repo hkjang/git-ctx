@@ -188,6 +188,42 @@ func (c *Client) GetFile(ctx context.Context, r source.RepositoryRef, ref, fileP
 	q := url.Values{"at": []string{ref}}
 	return c.bytes(ctx, c.repo(r)+"/raw/"+escapePath(filePath), q)
 }
+func (c *Client) Changes(ctx context.Context, r source.RepositoryRef, from, to string) ([]source.Change, error) {
+	type item struct {
+		Type string
+		Path struct {
+			ToString string `json:"toString"`
+		}
+		SrcPath *struct {
+			ToString string `json:"toString"`
+		} `json:"srcPath"`
+	}
+	var items []item
+	start := 0
+	for {
+		q := url.Values{"since": []string{from}, "until": []string{to}, "limit": []string{"1000"}, "start": []string{fmt.Sprint(start)}}
+		var current page[item]
+		if err := c.json(ctx, http.MethodGet, c.repo(r)+"/changes", q, nil, &current); err != nil {
+			return nil, err
+		}
+		items = append(items, current.Values...)
+		if current.IsLastPage || len(current.Values) == 0 {
+			break
+		}
+		start = current.NextPageStart
+	}
+	out := make([]source.Change, 0, len(items))
+	for _, item := range items {
+		change := source.Change{Path: item.Path.ToString, Type: strings.ToLower(item.Type)}
+		if item.SrcPath != nil {
+			change.OldPath = item.SrcPath.ToString
+		}
+		if change.Path != "" || change.OldPath != "" {
+			out = append(out, change)
+		}
+	}
+	return out, nil
+}
 func (c *Client) SearchQuery(ctx context.Context, r source.RepositoryRef, ref, query string, limit int) ([]source.QueryResult, error) {
 	if limit < 1 || limit > 50 {
 		limit = 8

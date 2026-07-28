@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"git-ctx/internal/embedding"
 	"git-ctx/internal/source"
 	"git-ctx/internal/store"
 )
@@ -14,6 +15,52 @@ type failingEmbedder struct{}
 
 func (failingEmbedder) Embed(context.Context, string) ([]float32, error) {
 	return nil, errors.New("model unavailable")
+}
+
+type countingEmbedder struct {
+	calls    int
+	revision string
+}
+
+func (e *countingEmbedder) Embed(context.Context, string) ([]float32, error) {
+	e.calls++
+	return []float32{1, 0, 0}, nil
+}
+func (e *countingEmbedder) EmbeddingMetadata() embedding.Metadata {
+	revision := e.revision
+	if revision == "" {
+		revision = "v1"
+	}
+	return embedding.Metadata{Provider: "test", Model: "counting", Revision: revision, Dimensions: 3}
+}
+
+type incrementalSource struct {
+	fakeSource
+	files       map[string]string
+	changes     []source.Change
+	changeErr   error
+	listCalls   int
+	getFileCall int
+	getHook     func()
+}
+
+func (s *incrementalSource) ListFiles(context.Context, source.RepositoryRef, string) ([]source.File, error) {
+	s.listCalls++
+	out := make([]source.File, 0, len(s.files))
+	for path := range s.files {
+		out = append(out, source.File{Path: path})
+	}
+	return out, nil
+}
+func (s *incrementalSource) GetFile(_ context.Context, _ source.RepositoryRef, _ string, path string) ([]byte, error) {
+	s.getFileCall++
+	if s.getHook != nil {
+		s.getHook()
+	}
+	return []byte(s.files[path]), nil
+}
+func (s *incrementalSource) Changes(context.Context, source.RepositoryRef, string, string) ([]source.Change, error) {
+	return s.changes, s.changeErr
 }
 
 type fakeSource struct{}
@@ -124,6 +171,8 @@ func TestFailedGenerationPreservesActiveChunksAndCleansStaging(t *testing.T) {
 	}
 	var before int
 	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id='bitbucket:7'`).Scan(&before)
+	_, _ = s.DB.Exec(`UPDATE document_chunks SET embedding=NULL WHERE repository_id='bitbucket:7'`)
+	ref[0].LatestCommit = "abc124"
 	if err = NewWithEmbedder(s, DefaultPolicy(), failingEmbedder{}).SyncRepository(ctx, fakeSource{}, "bitbucket", repo, ref); err == nil {
 		t.Fatal("expected embedding failure")
 	}
@@ -132,5 +181,128 @@ func TestFailedGenerationPreservesActiveChunksAndCleansStaging(t *testing.T) {
 	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks_staging`).Scan(&staged)
 	if after != before || staged != 0 {
 		t.Fatalf("active chunks changed after failed generation: before=%d after=%d staged=%d", before, after, staged)
+	}
+}
+
+func TestIncrementalIndexOnlyFetchesChangesAndReusesEmbeddings(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file::memory:?cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+	src := &incrementalSource{files: map[string]string{
+		"docs/a.md": "# One\nsame\n# Two\nold",
+		"docs/b.md": "# Removed\nobsolete",
+	}}
+	embedder := &countingEmbedder{}
+	idx := NewWithEmbedder(s, DefaultPolicy(), embedder)
+	repo := source.Repository{ID: 9, ProjectKey: "KCB", Slug: "incremental", Name: "Incremental", DefaultBranch: "main"}
+	if err = idx.SyncRepository(ctx, src, "bitbucket", repo, []source.Reference{{Name: "main", LatestCommit: "c1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if src.listCalls != 1 || src.getFileCall != 2 || embedder.calls != 3 {
+		t.Fatalf("initial list=%d files=%d embeddings=%d", src.listCalls, src.getFileCall, embedder.calls)
+	}
+	src.files = map[string]string{"docs/a.md": "# One\nsame\n# Two\nnew"}
+	src.changes = []source.Change{
+		{Path: "docs/a.md", OldPath: "docs/a.md", Type: "modified"},
+		{Path: "docs/b.md", OldPath: "docs/b.md", Type: "deleted"},
+	}
+	if err = idx.SyncRepository(ctx, src, "bitbucket", repo, []source.Reference{{Name: "main", LatestCommit: "c2"}}); err != nil {
+		t.Fatal(err)
+	}
+	if src.listCalls != 1 || src.getFileCall != 3 {
+		t.Fatalf("incremental path performed full scan: list=%d files=%d", src.listCalls, src.getFileCall)
+	}
+	if embedder.calls != 4 {
+		t.Fatalf("unchanged chunk embedding was not reused: calls=%d", embedder.calls)
+	}
+	var paths, commit, state string
+	if err = s.DB.QueryRow(`SELECT GROUP_CONCAT(DISTINCT file_path),MIN(commit_id) FROM document_chunks WHERE repository_id='bitbucket:9'`).Scan(&paths, &commit); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.DB.QueryRow(`SELECT commit_id FROM repository_ref_states WHERE repository_id='bitbucket:9' AND ref_name='main'`).Scan(&state)
+	if paths != "docs/a.md" || commit != "c2" || state != "c2" {
+		t.Fatalf("paths=%q commit=%q state=%q", paths, commit, state)
+	}
+	listCalls, getCalls, embeddingCalls := src.listCalls, src.getFileCall, embedder.calls
+	if err = idx.SyncRepository(ctx, src, "bitbucket", repo, []source.Reference{{Name: "main", LatestCommit: "c2"}}); err != nil {
+		t.Fatal(err)
+	}
+	if src.listCalls != listCalls || src.getFileCall != getCalls || embedder.calls != embeddingCalls {
+		t.Fatalf("same commit performed work: list=%d files=%d embeddings=%d", src.listCalls-listCalls, src.getFileCall-getCalls, embedder.calls-embeddingCalls)
+	}
+
+	src.files = map[string]string{"docs/renamed.md": "# One\nsame\n# Two\nnew"}
+	src.changes = []source.Change{{Path: "docs/renamed.md", OldPath: "docs/a.md", Type: "renamed"}}
+	if err = idx.SyncRepository(ctx, src, "bitbucket", repo, []source.Reference{{Name: "main", LatestCommit: "c3"}}); err != nil {
+		t.Fatal(err)
+	}
+	if embedder.calls != embeddingCalls {
+		t.Fatalf("rename re-embedded unchanged content: calls=%d want=%d", embedder.calls, embeddingCalls)
+	}
+	if err = s.DB.QueryRow(`SELECT GROUP_CONCAT(DISTINCT file_path) FROM document_chunks WHERE repository_id='bitbucket:9'`).Scan(&paths); err != nil || paths != "docs/renamed.md" {
+		t.Fatalf("renamed paths=%q err=%v", paths, err)
+	}
+
+	embedder.revision = "v2"
+	if err = idx.SyncRepository(ctx, src, "bitbucket", repo, []source.Reference{{Name: "main", LatestCommit: "c3"}}); err != nil {
+		t.Fatal(err)
+	}
+	if src.listCalls != listCalls+1 || embedder.calls != embeddingCalls+2 {
+		t.Fatalf("model revision did not force full re-embedding: list=%d embeddings=%d", src.listCalls, embedder.calls)
+	}
+}
+
+func TestChangeFeedFailureFallsBackToFullIndex(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file::memory:?cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+	src := &incrementalSource{files: map[string]string{"README.md": "# First\none"}}
+	repo := source.Repository{ID: 10, ProjectKey: "KCB", Slug: "fallback", Name: "Fallback", DefaultBranch: "main"}
+	idx := New(s, DefaultPolicy())
+	if err = idx.SyncRepository(ctx, src, "bitbucket", repo, []source.Reference{{Name: "main", LatestCommit: "c1"}}); err != nil {
+		t.Fatal(err)
+	}
+	src.files["README.md"] = "# Second\ntwo"
+	src.changeErr = errors.New("compare history unavailable")
+	if err = idx.SyncRepository(ctx, src, "bitbucket", repo, []source.Reference{{Name: "main", LatestCommit: "c2"}}); err != nil {
+		t.Fatal(err)
+	}
+	if src.listCalls != 2 {
+		t.Fatalf("expected safe full fallback, list calls=%d", src.listCalls)
+	}
+}
+
+func TestConcurrentRefActivationCannotOverwriteNewerState(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file::memory:?cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+	src := &incrementalSource{files: map[string]string{"README.md": "# First\none"}}
+	repo := source.Repository{ID: 11, ProjectKey: "KCB", Slug: "concurrent", Name: "Concurrent", DefaultBranch: "main"}
+	idx := New(s, DefaultPolicy())
+	if err = idx.SyncRepository(ctx, src, "bitbucket", repo, []source.Reference{{Name: "main", LatestCommit: "c1"}}); err != nil {
+		t.Fatal(err)
+	}
+	src.files["README.md"] = "# Second\ntwo"
+	src.changes = []source.Change{{Path: "README.md", OldPath: "README.md", Type: "modified"}}
+	src.getHook = func() {
+		src.getHook = nil
+		_, _ = s.DB.Exec(`UPDATE repository_ref_states SET commit_id='c3' WHERE repository_id='bitbucket:11' AND ref_name='main'`)
+	}
+	if err = idx.SyncRepository(ctx, src, "bitbucket", repo, []source.Reference{{Name: "main", LatestCommit: "c2"}}); err == nil || !strings.Contains(err.Error(), "index state changed concurrently") {
+		t.Fatalf("expected optimistic activation conflict, got %v", err)
+	}
+	var content, commit string
+	_ = s.DB.QueryRow(`SELECT content,commit_id FROM document_chunks WHERE repository_id='bitbucket:11'`).Scan(&content, &commit)
+	if !strings.Contains(content, "one") || commit != "c1" {
+		t.Fatalf("concurrent activation changed active chunks: content=%q commit=%q", content, commit)
 	}
 }

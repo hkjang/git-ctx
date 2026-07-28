@@ -156,6 +156,41 @@ func (c *Client) GetFile(ctx context.Context, r source.RepositoryRef, ref, fileP
 	q := url.Values{"ref": []string{ref}}
 	return c.bytes(ctx, c.repo(r)+"/repository/files/"+escape(filePath)+"/raw", q)
 }
+func (c *Client) Changes(ctx context.Context, r source.RepositoryRef, from, to string) ([]source.Change, error) {
+	var result struct {
+		CompareTimeout bool `json:"compare_timeout"`
+		Diffs          []struct {
+			OldPath     string `json:"old_path"`
+			NewPath     string `json:"new_path"`
+			NewFile     bool   `json:"new_file"`
+			DeletedFile bool   `json:"deleted_file"`
+			RenamedFile bool   `json:"renamed_file"`
+		} `json:"diffs"`
+	}
+	q := url.Values{"from": []string{from}, "to": []string{to}, "straight": []string{"true"}}
+	if err := c.json(ctx, http.MethodGet, c.repo(r)+"/repository/compare", q, nil, &result); err != nil {
+		return nil, err
+	}
+	if result.CompareTimeout {
+		return nil, errors.New("gitlab compare timed out")
+	}
+	out := make([]source.Change, 0, len(result.Diffs))
+	for _, item := range result.Diffs {
+		change := source.Change{Path: item.NewPath, OldPath: item.OldPath, Type: "modified"}
+		switch {
+		case item.DeletedFile:
+			change.Type, change.Path = "deleted", item.OldPath
+		case item.NewFile:
+			change.Type, change.OldPath = "added", ""
+		case item.RenamedFile:
+			change.Type = "renamed"
+		}
+		if change.Path != "" || change.OldPath != "" {
+			out = append(out, change)
+		}
+	}
+	return out, nil
+}
 func (c *Client) SearchQuery(ctx context.Context, r source.RepositoryRef, ref, query string, limit int) ([]source.QueryResult, error) {
 	if limit < 1 || limit > 50 {
 		limit = 8

@@ -3,7 +3,9 @@ package indexer
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -131,9 +133,77 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 		}
 		return e
 	}
-	files, err := adapter.ListFiles(ctx, repo, ref.Name)
-	if err != nil {
+	complete := func(processed int) error {
+		if !trackJob {
+			return nil
+		}
+		_, err := i.store.DB.ExecContext(ctx, i.store.Rebind(`UPDATE index_jobs SET status='completed',files_processed=?,completed_at=? WHERE id=?`), processed, time.Now().UTC(), jobID)
+		return err
+	}
+	embeddingMetadata := embedding.Metadata{}
+	metadataKnown := false
+	if provider, ok := i.embedder.(embedding.MetadataProvider); ok {
+		embeddingMetadata = provider.EmbeddingMetadata()
+		metadataKnown = embeddingMetadata.Provider != "" && embeddingMetadata.Model != ""
+	}
+	embeddingRevision := embeddingMetadata.Provider + "\x00" + embeddingMetadata.Model + "\x00" + embeddingMetadata.Revision
+	previousCommit := ""
+	previousEmbeddingRevision := ""
+	err := i.store.DB.QueryRowContext(ctx, i.store.Rebind(`SELECT commit_id,embedding_revision FROM repository_ref_states WHERE repository_id=? AND ref_name=?`), repoID, ref.Name).Scan(&previousCommit, &previousEmbeddingRevision)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = i.store.DB.QueryRowContext(ctx, i.store.Rebind(`SELECT commit_id FROM document_chunks WHERE repository_id=? AND ref_name=? ORDER BY indexed_at DESC LIMIT 1`), repoID, ref.Name).Scan(&previousCommit)
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fail(err)
+	}
+	if previousCommit != "" && previousCommit == ref.LatestCommit && previousEmbeddingRevision == embeddingRevision {
+		_, err = i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,indexed_at,embedding_revision) VALUES(?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET commit_id=excluded.commit_id,indexed_at=excluded.indexed_at,embedding_revision=excluded.embedding_revision`), repoID, ref.Name, ref.LatestCommit, time.Now().UTC(), embeddingRevision)
+		if err != nil {
+			return fail(err)
+		}
+		return complete(0)
+	}
+
+	incremental := false
+	var files []source.File
+	removedPaths := map[string]bool{}
+	upsertPaths := map[string]bool{}
+	forceFull := previousCommit == ref.LatestCommit && previousEmbeddingRevision != embeddingRevision
+	snapshotRef := ref.LatestCommit
+	if snapshotRef == "" {
+		snapshotRef = ref.Name
+	}
+	if previousCommit != "" && !forceFull {
+		if feed, ok := adapter.(source.ChangeFeed); ok {
+			changes, changeErr := feed.Changes(ctx, repo, previousCommit, ref.LatestCommit)
+			if changeErr == nil {
+				incremental = true
+				seen := map[string]bool{}
+				for _, change := range changes {
+					changeType := strings.ToLower(change.Type)
+					if change.OldPath != "" {
+						removedPaths[filepath.ToSlash(change.OldPath)] = true
+					}
+					if change.Path != "" {
+						removedPaths[filepath.ToSlash(change.Path)] = true
+					}
+					if strings.Contains(changeType, "delete") || change.Path == "" {
+						continue
+					}
+					path := filepath.ToSlash(change.Path)
+					if !seen[path] {
+						seen[path] = true
+						files = append(files, source.File{Path: path})
+					}
+				}
+			}
+		}
+	}
+	if !incremental {
+		files, err = adapter.ListFiles(ctx, repo, snapshotRef)
+		if err != nil {
+			return fail(err)
+		}
 	}
 	type securityEvent struct {
 		id, path, finding, action string
@@ -144,7 +214,7 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 		if !i.allowed(file) {
 			continue
 		}
-		raw, e := adapter.GetFile(ctx, repo, ref.Name, file.Path)
+		raw, e := adapter.GetFile(ctx, repo, snapshotRef, file.Path)
 		if e != nil {
 			return fail(fmt.Errorf("%s: %w", file.Path, e))
 		}
@@ -165,29 +235,78 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 		}
 		for _, chunk := range parse(file.Path, safeContent) {
 			id := hash(repoID + "\x00" + ref.Name + "\x00" + file.Path + "\x00" + fmt.Sprint(chunk.Start) + "\x00" + chunk.Content)
-			embedded, embedErr := i.embedder.Embed(ctx, chunk.Heading+"\n"+chunk.Content)
-			if embedErr != nil {
-				return fail(fmt.Errorf("embedding %s: %w", file.Path, embedErr))
+			contentHash := hash(chunk.Content)
+			var vector []byte
+			if metadataKnown {
+				reuseErr := i.store.DB.QueryRowContext(ctx, i.store.Rebind(`SELECT embedding FROM document_chunks WHERE repository_id=? AND heading=? AND content_hash=? AND embedding_provider=? AND embedding_model=? AND embedding_revision=? AND embedding IS NOT NULL LIMIT 1`), repoID, chunk.Heading, contentHash, embeddingMetadata.Provider, embeddingMetadata.Model, embeddingMetadata.Revision).Scan(&vector)
+				if reuseErr != nil && !errors.Is(reuseErr, sql.ErrNoRows) {
+					return fail(reuseErr)
+				}
 			}
-			vector := embedding.Encode(embedded)
-			_, e = i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO document_chunks_staging(generation_id,id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`), generationID, id, repoID, ref.Name, ref.LatestCommit, file.Path, chunk.Start, chunk.End, chunk.Heading, contentType(file.Path), chunk.Content, hash(chunk.Content), vector)
+			if len(vector) == 0 {
+				embedded, embedErr := i.embedder.Embed(ctx, chunk.Heading+"\n"+chunk.Content)
+				if embedErr != nil {
+					return fail(fmt.Errorf("embedding %s: %w", file.Path, embedErr))
+				}
+				vector = embedding.Encode(embedded)
+				embeddingMetadata.Dimensions = len(embedded)
+			}
+			_, e = i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO document_chunks_staging(generation_id,id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding,embedding_provider,embedding_model,embedding_dimensions,embedding_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`), generationID, id, repoID, ref.Name, ref.LatestCommit, file.Path, chunk.Start, chunk.End, chunk.Heading, contentType(file.Path), chunk.Content, contentHash, vector, embeddingMetadata.Provider, embeddingMetadata.Model, embeddingMetadata.Dimensions, embeddingMetadata.Revision)
 			if e != nil {
 				return fail(e)
 			}
 		}
 		processed++
+		upsertPaths[filepath.ToSlash(file.Path)] = true
 	}
 	tx, err := i.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return fail(err)
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM document_chunks WHERE repository_id=? AND ref_name=?`), repoID, ref.Name); err != nil {
+	deletedChunkIDs := map[string][]string{}
+	var activeCommit string
+	stateErr := tx.QueryRowContext(ctx, i.store.Rebind(`SELECT commit_id FROM repository_ref_states WHERE repository_id=? AND ref_name=?`), repoID, ref.Name).Scan(&activeCommit)
+	if stateErr != nil && !errors.Is(stateErr, sql.ErrNoRows) {
 		_ = tx.Rollback()
-		return fail(err)
+		return fail(stateErr)
 	}
-	if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding,indexed_at)
-SELECT id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding,indexed_at
+	if activeCommit != "" && activeCommit != previousCommit {
+		_ = tx.Rollback()
+		return fail(fmt.Errorf("index state changed concurrently from %s to %s", previousCommit, activeCommit))
+	}
+	if incremental {
+		for path := range removedPaths {
+			rows, queryErr := tx.QueryContext(ctx, i.store.Rebind(`SELECT id FROM document_chunks WHERE repository_id=? AND ref_name=? AND file_path=? ORDER BY id`), repoID, ref.Name, path)
+			if queryErr != nil {
+				_ = tx.Rollback()
+				return fail(queryErr)
+			}
+			for rows.Next() {
+				var id string
+				if rows.Scan(&id) == nil {
+					deletedChunkIDs[path] = append(deletedChunkIDs[path], id)
+				}
+			}
+			queryErr = rows.Err()
+			rows.Close()
+			if queryErr != nil {
+				_ = tx.Rollback()
+				return fail(queryErr)
+			}
+			if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM document_chunks WHERE repository_id=? AND ref_name=? AND file_path=?`), repoID, ref.Name, path); err != nil {
+				_ = tx.Rollback()
+				return fail(err)
+			}
+		}
+	} else {
+		if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM document_chunks WHERE repository_id=? AND ref_name=?`), repoID, ref.Name); err != nil {
+			_ = tx.Rollback()
+			return fail(err)
+		}
+	}
+	if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding,indexed_at,embedding_provider,embedding_model,embedding_dimensions,embedding_revision)
+SELECT id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding,indexed_at,embedding_provider,embedding_model,embedding_dimensions,embedding_revision
 FROM document_chunks_staging WHERE generation_id=?`), generationID); err != nil {
 		_ = tx.Rollback()
 		return fail(err)
@@ -202,15 +321,50 @@ FROM document_chunks_staging WHERE generation_id=?`), generationID); err != nil 
 		_ = tx.Rollback()
 		return fail(err)
 	}
+	if _, err = tx.ExecContext(ctx, i.store.Rebind(`UPDATE document_chunks SET commit_id=?,indexed_at=? WHERE repository_id=? AND ref_name=?`), ref.LatestCommit, time.Now().UTC(), repoID, ref.Name); err != nil {
+		_ = tx.Rollback()
+		return fail(err)
+	}
+	if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,indexed_at,embedding_revision) VALUES(?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET commit_id=excluded.commit_id,indexed_at=excluded.indexed_at,embedding_revision=excluded.embedding_revision`), repoID, ref.Name, ref.LatestCommit, time.Now().UTC(), embeddingRevision); err != nil {
+		_ = tx.Rollback()
+		return fail(err)
+	}
+	if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM repository_ref_changes WHERE repository_id=? AND ref_name=? AND commit_id=?`), repoID, ref.Name, ref.LatestCommit); err != nil {
+		_ = tx.Rollback()
+		return fail(err)
+	}
+	if !incremental {
+		if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_ref_changes(repository_id,ref_name,commit_id,previous_commit_id,file_path,action) VALUES(?,?,?,?,?,'full')`), repoID, ref.Name, ref.LatestCommit, previousCommit, ""); err != nil {
+			_ = tx.Rollback()
+			return fail(err)
+		}
+	} else {
+		for path := range removedPaths {
+			ids := deletedChunkIDs[path]
+			rawIDs, _ := json.Marshal(ids)
+			if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_ref_changes(repository_id,ref_name,commit_id,previous_commit_id,file_path,action,deleted_chunk_ids) VALUES(?,?,?,?,?,'delete',?)`), repoID, ref.Name, ref.LatestCommit, previousCommit, path, string(rawIDs)); err != nil {
+				_ = tx.Rollback()
+				return fail(err)
+			}
+		}
+		for path := range upsertPaths {
+			if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_ref_changes(repository_id,ref_name,commit_id,previous_commit_id,file_path,action) VALUES(?,?,?,?,?,'upsert')`), repoID, ref.Name, ref.LatestCommit, previousCommit, path); err != nil {
+				_ = tx.Rollback()
+				return fail(err)
+			}
+		}
+		if len(removedPaths) == 0 && len(upsertPaths) == 0 {
+			if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_ref_changes(repository_id,ref_name,commit_id,previous_commit_id,file_path,action) VALUES(?,?,?,?,?,'noop')`), repoID, ref.Name, ref.LatestCommit, previousCommit, ""); err != nil {
+				_ = tx.Rollback()
+				return fail(err)
+			}
+		}
+	}
 	if err = tx.Commit(); err != nil {
 		_ = tx.Rollback()
 		return fail(err)
 	}
-	if trackJob {
-		_, err = i.store.DB.ExecContext(ctx, i.store.Rebind(`UPDATE index_jobs SET status='completed',files_processed=?,completed_at=? WHERE id=?`), processed, time.Now().UTC(), jobID)
-		return err
-	}
-	return nil
+	return complete(processed)
 }
 func (i *Indexer) allowed(f source.File) bool {
 	p := strings.TrimPrefix(filepath.ToSlash(f.Path), "./")

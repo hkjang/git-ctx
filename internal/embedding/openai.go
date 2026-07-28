@@ -74,3 +74,6 @@ func (o *OpenAI) Embed(ctx context.Context, text string) ([]float32, error) {
 	normalize(out.Data[0].Embedding)
 	return out.Data[0].Embedding, nil
 }
+func (o *OpenAI) EmbeddingMetadata() Metadata {
+	return Metadata{Provider: "openai-compatible", Model: o.model, Revision: o.endpoint}
+}

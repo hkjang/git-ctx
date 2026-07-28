@@ -19,7 +19,7 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - Keycloak Authorization Code+PKCE 사용자 로그인과 HttpOnly 서버 세션
 - SSO 로그인과 최초 관리자 복구 진입 분리, 최고관리자용 사용자 CRUD·상태·역할 관리
 - Bitbucket Server 6.9.1 및 GitLab API v4 소스 어댑터
-- 저장소 ACL 동기화, 파일 정책, Markdown 청킹, 버전별 색인 작업
+- 저장소 ACL 동기화, commit diff 증분 수집, 원자적 staging, content hash 기반 embedding 재사용
 - 서명 검증 Webhook, 이벤트 멱등 처리 및 ref별 작업 큐
 - 우측 상단 프로필 메뉴, Ctrl/Cmd+K 빠른 이동, 개인 MCP 키 관리와 분리된 관리자 웹 화면
 - 키 회전·중지·재활성화와 CIDR·저장소·도구·분/시/일 호출 제한
@@ -32,7 +32,7 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - BM25와 256차원 로컬 벡터 결합 검색, 색인 전 Secret 차단·마스킹
 - ACL 필터 이후 사내 `/v1/rerank` 재순위화와 장애 시 하이브리드 점수 fallback
 - 모델 미설정 시 ACL 선검사 후 Bitbucket/GitLab 서버측 Query Search API 모드
-- 선택적 OpenSearch BM25 projection, 질의 단계 ACL filter와 DB 원문 재검증
+- 선택적 OpenSearch BM25 증분 projection, 질의 단계 ACL filter와 DB 원문 재검증
 - ACL 적용 정답 데이터셋 기반 Recall@K·MRR·nDCG@K 검색 품질 회귀 게이트
 - 버전형 DB migration 및 PostgreSQL 다중 Worker `SKIP LOCKED`
 - Docker 및 PostgreSQL Compose 배포
