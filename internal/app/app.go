@@ -236,6 +236,7 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 	a.search.SetSourceLoader(a.sourceAdapter)
 	a.search.SetKeywordLoader(a.openSearchCandidates)
 	a.search.SetVectorLoader(a.vectorCandidates)
+	a.search.SetGlobalVectorLoader(a.globalVectorCandidates)
 	a.quality = quality.New(s, a.search)
 	a.mcp = mcp.New(a.search, s)
 	a.mcp.SetStrictCompatibilityLoader(a.strictMCPCompatibility)
@@ -405,6 +406,7 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/tools/search-code/test", a.authenticate(http.HandlerFunc(a.testSearchCode)))
 	a.mux.Handle("POST /api/v1/tools/find-file/test", a.authenticate(http.HandlerFunc(a.testFindFile)))
 	a.mux.Handle("POST /api/v1/tools/read-file/test", a.authenticate(http.HandlerFunc(a.testReadFile)))
+	a.mux.Handle("POST /api/v1/tools/semantic/test", a.authenticate(http.HandlerFunc(a.testSemanticSearch)))
 	a.mux.Handle("POST /api/v1/tools/dependents/test", a.authenticate(http.HandlerFunc(a.testDependents)))
 	a.mux.Handle("POST /api/v1/tools/merge-requests/test", a.authenticate(http.HandlerFunc(a.testMergeRequests)))
 	a.mux.Handle("POST /api/v1/tools/file-history/test", a.authenticate(http.HandlerFunc(a.testFileHistory)))
@@ -1502,6 +1504,39 @@ func (a *App) testReadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, http.StatusOK, file)
+}
+
+func (a *App) testSemanticSearch(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	if p.KeyID != "" && !stringContains(p.Scopes, "search-semantic") {
+		problem(w, http.StatusForbidden, "forbidden", "API key is not allowed to call search-semantic")
+		return
+	}
+	var in struct {
+		Query      string `json:"query"`
+		LibraryID  string `json:"libraryId"`
+		SourceType string `json:"sourceType"`
+		Limit      int    `json:"limit"`
+	}
+	if decode(r, &in) != nil || strings.TrimSpace(in.Query) == "" {
+		problem(w, http.StatusBadRequest, "invalid_request", "query is required")
+		return
+	}
+	result, err := a.search.SemanticSearch(r.Context(), searchPrincipals(p), in.Query, in.LibraryID, in.SourceType, in.Limit)
+	if err != nil {
+		problem(w, http.StatusBadRequest, "search_failed", err.Error())
+		return
+	}
+	if p.KeyID != "" && len(p.AllowedRepositories) > 0 {
+		hits := result.Hits[:0]
+		for _, item := range result.Hits {
+			if repositoryAllowed(item.LibraryID, p.AllowedRepositories) {
+				hits = append(hits, item)
+			}
+		}
+		result.Hits = hits
+	}
+	jsonOut(w, http.StatusOK, result)
 }
 
 func (a *App) testDependents(w http.ResponseWriter, r *http.Request) {
@@ -3283,6 +3318,36 @@ func (a *App) vectorCandidates(ctx context.Context, repositoryID, ref, query str
 		return nil, embedErr
 	}
 	matches, searchErr := store.Search(ctx, repositoryID, ref, vector, limit)
+	if searchErr != nil {
+		return nil, searchErr
+	}
+	out := make([]search.VectorCandidate, 0, len(matches))
+	for _, match := range matches {
+		out = append(out, search.VectorCandidate{ID: match.ID, Score: match.Score})
+	}
+	return out, nil
+}
+
+// globalVectorCandidates asks the vector database for nearest neighbours across
+// every repository. The repository ACL is applied by the caller afterwards.
+func (a *App) globalVectorCandidates(ctx context.Context, query string, limit int) ([]search.VectorCandidate, error) {
+	store, err := a.vectorStore(ctx)
+	if errors.Is(err, vectorstore.ErrNotConfigured) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer store.Close()
+	provider, providerErr := a.embeddingProvider(ctx)
+	if providerErr != nil {
+		return nil, providerErr
+	}
+	vector, embedErr := provider.Embed(ctx, query)
+	if embedErr != nil {
+		return nil, embedErr
+	}
+	matches, searchErr := store.SearchGlobal(ctx, vector, limit)
 	if searchErr != nil {
 		return nil, searchErr
 	}

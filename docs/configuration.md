@@ -604,6 +604,11 @@ Bitbucket code search는 기본 브랜치 계약이므로 비기본 branch/tag �
   자동 fallback 하므로 검색이 중단되지 않는다. `GET /api/v1/admin/vector/status` 는
   벡터 DB 보유 수와 메타 DB 임베딩 수를 함께 보여 준다.
 
+`search-semantic`은 Library ID 없이 저장소 전 범위에서 의미로 검색한다. 벡터 DB가
+있으면 ANN 결과를 ACL·범위 조건으로 거른 뒤 반환하고, 없으면 저장된 임베딩을 최대
+20,000개까지 스캔해 채점한 뒤 그 사실을 응답 `Diagnostics`에 남긴다. 어느 경로가
+쓰였는지는 응답의 `Mode` 로 확인할 수 있다.
+
 ## OpenSearch 키워드 검색
 
 `opensearch` 설정은 선택 사항이다. 관리자 화면에서 사용 여부, Base URL, index,

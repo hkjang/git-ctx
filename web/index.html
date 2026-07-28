@@ -120,6 +120,8 @@
                   <dd>GitLab MR·Bitbucket PR 검색으로 변경의 배경과 결정 근거 확인</dd>
                   <dt>find-dependents</dt>
                   <dd>공유 코드·모듈·테이블을 사용하는 저장소를 전 범위에서 역추적</dd>
+                  <dt>search-semantic</dt>
+                  <dd>표현이 달라도 의미로 찾는 저장소 전 범위 검색</dd>
                   <dt>get-repository-map</dt>
                   <dd>저장소 언어·구조·진입점과 주요 설정 파일 조회</dd>
                   <dt>find-symbol / get-symbol-context</dt>
@@ -162,6 +164,7 @@
                   <label><input type="checkbox" name="scope" value="list-directory" checked /> list-directory</label>
                   <label><input type="checkbox" name="scope" value="search-merge-requests" checked /> search-merge-requests</label>
                   <label><input type="checkbox" name="scope" value="find-dependents" checked /> find-dependents</label>
+                  <label><input type="checkbox" name="scope" value="search-semantic" checked /> search-semantic</label>
                   <label><input type="checkbox" name="scope" value="get-repository-map" checked /> get-repository-map</label>
                   <label><input type="checkbox" name="scope" value="find-symbol" checked /> find-symbol</label>
                   <label><input type="checkbox" name="scope" value="get-symbol-context" checked /> get-symbol-context</label>
@@ -210,6 +213,15 @@
                   <label>저장소 (선택)<input name="repository" /></label>
                   <label>Ref (선택)<input name="ref" placeholder="main" /></label>
                   <div class="wide button-row"><button type="submit">원격 소스 검색</button></div>
+                </form>
+              </article>
+              <article class="card">
+                <h3>Semantic Search</h3>
+                <form id="semantic-form" class="form-row">
+                  <label class="wide">설명형 질의<input name="query" required placeholder="실패한 웹훅을 재시도하는 부분" /></label>
+                  <label>Library ID (선택)<input name="libraryId" placeholder="/kcb/clustara" /></label>
+                  <label>소스<select name="sourceType"><option value="">전체</option><option value="bitbucket">Bitbucket</option><option value="gitlab">GitLab</option></select></label>
+                  <div class="wide button-row"><button type="submit">의미 검색</button></div>
                 </form>
               </article>
               <article class="card">

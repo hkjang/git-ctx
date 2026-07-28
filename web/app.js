@@ -698,6 +698,27 @@ function setupKnowledgeSearch() {
       reportError(error, "코드 검색");
     }
   };
+  $("#semantic-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.currentTarget));
+    output.textContent = "의미 기반으로 검색하는 중…";
+    try {
+      const result = await api("/api/v1/tools/semantic/test", { method: "POST", body: JSON.stringify({ ...data, limit: 10 }) });
+      const hits = rows(result.Hits);
+      const lines = [`질의: ${result.Query} · ${hits.length}건 · 검색 방식: ${result.Mode}`, ""];
+      for (const hit of hits) {
+        lines.push(`[${hit.Score.toFixed(2)}] ${hit.LibraryID} · ${hit.FilePath}#L${hit.LineStart}-L${hit.LineEnd}`);
+        lines.push(String(hit.Content || "").split("\n").slice(0, 6).join("\n"));
+        lines.push("");
+      }
+      if (!hits.length) lines.push("의미가 충분히 가까운 결과가 없습니다. 표현을 바꾸거나 search-code로 정확한 용어를 찾아보세요.");
+      for (const diagnostic of rows(result.Diagnostics)) lines.push(`· ${diagnostic}`);
+      output.textContent = lines.join("\n");
+    } catch (error) {
+      output.textContent = error.message;
+      reportError(error, "의미 검색");
+    }
+  };
   $("#find-file-form").onsubmit = async (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.currentTarget));
@@ -893,7 +914,7 @@ let currentRoleSet = new Set();
 let activeScopeEditor = null;
 const userMCPScopes = [
   "resolve-library-id", "query-docs", "search-repositories", "search-source",
-  "search-code", "find-file", "read-file", "get-file-history", "list-directory", "search-merge-requests", "find-dependents", "get-repository-map", "find-symbol", "get-symbol-context",
+  "search-code", "find-file", "read-file", "get-file-history", "list-directory", "search-merge-requests", "find-dependents", "search-semantic", "get-repository-map", "find-symbol", "get-symbol-context",
   "trace-dependencies", "compare-refs", "get-change-impact", "get-context-pack",
   "find-runbook", "export-context", "explain-search-result",
 ];

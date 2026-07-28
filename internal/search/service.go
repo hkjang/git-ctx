@@ -53,13 +53,14 @@ type VectorCandidate struct {
 // falls back to the embeddings stored next to the text.
 type VectorLoader func(ctx context.Context, repositoryID, ref string, query string, limit int) ([]VectorCandidate, error)
 type Service struct {
-	store    *store.Store
-	load     ConfigLoader
-	embedder EmbeddingLoader
-	reranker RerankerLoader
-	sources  func(context.Context, string) (source.RepositorySource, error)
-	keyword  KeywordLoader
-	vector   VectorLoader
+	store        *store.Store
+	load         ConfigLoader
+	embedder     EmbeddingLoader
+	reranker     RerankerLoader
+	sources      func(context.Context, string) (source.RepositorySource, error)
+	keyword      KeywordLoader
+	vector       VectorLoader
+	globalVector GlobalVectorLoader
 }
 
 func (s *Service) SetKeywordLoader(loader KeywordLoader) { s.keyword = loader }
@@ -1479,6 +1480,160 @@ func (s *Service) fileBody(ctx context.Context, repositoryID, sourceType, projec
 		return "", "remote", []string{"remote: " + readErr.Error()}
 	}
 	return string(raw), "remote", []string{"remote: read live from the source server because this file has no indexed content."}
+}
+
+// SemanticHit is one chunk found by meaning rather than by wording.
+type SemanticHit struct {
+	LibraryID, SourceType, Ref, CommitID, FilePath, Heading, Content string
+	LineStart, LineEnd                                               int
+	Score                                                            float64
+}
+
+type SemanticSearch struct {
+	Query       string
+	Hits        []SemanticHit
+	Mode        string
+	Diagnostics []string
+}
+
+// GlobalVectorLoader asks the vector database for nearest neighbours across
+// every repository. The caller applies the repository ACL afterwards.
+type GlobalVectorLoader func(ctx context.Context, query string, limit int) ([]VectorCandidate, error)
+
+// SetGlobalVectorLoader installs the cross-repository ANN source.
+func (s *Service) SetGlobalVectorLoader(loader GlobalVectorLoader) { s.globalVector = loader }
+
+// semanticScanLimit bounds the in-database fallback. Without a vector database
+// a cross-repository semantic search has to score chunks one by one, so the
+// scan is capped and the truncation is reported instead of hidden.
+const semanticScanLimit = 20000
+
+// SemanticSearch finds code and documentation by meaning across every
+// accessible repository, without needing a library ID or a shared keyword.
+//
+// With a vector database it is an ANN query followed by an ACL check. Without
+// one it is a bounded scan of the stored embeddings, which still answers
+// correctly on a normal on-premises corpus and says when it had to stop early.
+func (s *Service) SemanticSearch(ctx context.Context, principals []string, query, libraryID, sourceType string, limit int) (SemanticSearch, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return SemanticSearch{}, errors.New("query is required")
+	}
+	if limit < 1 || limit > 50 {
+		limit = 10
+	}
+	result := SemanticSearch{Query: query, Hits: []SemanticHit{}, Mode: "in-database scan"}
+	if len(principals) == 0 {
+		result.Diagnostics = append(result.Diagnostics, "acl: no source principal is mapped to this account, so no repository can be authorized.")
+		return result, nil
+	}
+	join, predicate, aclArgs := repositoryACL(principals)
+	scoped := ""
+	scopeArgs := make([]any, 0, 2)
+	if libraryID != "" {
+		base, _, ok := splitLibraryID(libraryID)
+		if !ok {
+			return SemanticSearch{}, errors.New("libraryId must use /organization/project[/version]")
+		}
+		scoped += ` AND r.library_id=?`
+		scopeArgs = append(scopeArgs, base)
+	}
+	if sourceType != "" {
+		scoped += ` AND r.source_type=?`
+		scopeArgs = append(scopeArgs, sourceType)
+	}
+	selectClause := `SELECT c.id,r.library_id,r.source_type,c.ref_name,c.commit_id,c.file_path,c.heading,c.content,c.line_start,c.line_end,c.embedding
+FROM document_chunks c JOIN repositories r ON r.id=c.repository_id ` + join + `
+WHERE r.enabled=1 AND c.embedding IS NOT NULL AND ` + predicate
+
+	// The query vector comes from the configured provider so it lives in the same
+	// space as the stored chunks.
+	queryVector, embedErr := s.embedder(ctx).Embed(ctx, query)
+	if embedErr != nil || len(queryVector) == 0 {
+		queryVector = embedding.Embed(query)
+		result.Diagnostics = append(result.Diagnostics, "embedding: the configured model was unavailable, so the built-in embedding was used for this query.")
+	}
+
+	var statement string
+	args := make([]any, 0, len(aclArgs)+len(scopeArgs)+limit*4)
+	if s.globalVector != nil {
+		// Over-fetch: the ACL and the scope filters run after the ANN stage.
+		candidates, vectorErr := s.globalVector(ctx, query, limit*10)
+		if vectorErr != nil {
+			result.Diagnostics = append(result.Diagnostics, "vector database: "+vectorErr.Error()+"; falling back to the in-database scan.")
+		} else if len(candidates) > 0 {
+			scores := make(map[string]float64, len(candidates))
+			ids := make([]any, 0, len(candidates))
+			for _, candidate := range candidates {
+				if candidate.ID == "" {
+					continue
+				}
+				scores[candidate.ID] = candidate.Score
+				ids = append(ids, candidate.ID)
+			}
+			statement = selectClause + ` AND c.id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",") + `)` + scoped
+			args = append(args, aclArgs...)
+			args = append(args, ids...)
+			args = append(args, scopeArgs...)
+			result.Mode = "vector database ANN"
+			hits, err := s.collectSemanticHits(ctx, statement, args, queryVector, scores, limit)
+			if err != nil {
+				return SemanticSearch{}, err
+			}
+			result.Hits = hits
+			result.Diagnostics = append(result.Diagnostics,
+				fmt.Sprintf("vector database: %d nearest neighbours, %d visible after the repository ACL and scope filters.", len(ids), len(hits)))
+			return result, nil
+		}
+	}
+	statement = selectClause + scoped + fmt.Sprintf(" LIMIT %d", semanticScanLimit)
+	args = append(args, aclArgs...)
+	args = append(args, scopeArgs...)
+	hits, err := s.collectSemanticHits(ctx, statement, args, queryVector, nil, limit)
+	if err != nil {
+		return SemanticSearch{}, err
+	}
+	result.Hits = hits
+	result.Diagnostics = append(result.Diagnostics,
+		fmt.Sprintf("in-database scan: scored up to %d stored embeddings. Configure a vector database for exhaustive coverage on a large corpus.", semanticScanLimit))
+	return result, nil
+}
+
+// collectSemanticHits scores candidate rows and keeps the best ones. External
+// scores win when present because they come from the same vectors.
+func (s *Service) collectSemanticHits(ctx context.Context, statement string, args []any, queryVector []float32, external map[string]float64, limit int) ([]SemanticHit, error) {
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var hits []SemanticHit
+	for rows.Next() {
+		var id string
+		var raw []byte
+		var hit SemanticHit
+		if err = rows.Scan(&id, &hit.LibraryID, &hit.SourceType, &hit.Ref, &hit.CommitID, &hit.FilePath, &hit.Heading, &hit.Content, &hit.LineStart, &hit.LineEnd, &raw); err != nil {
+			return nil, err
+		}
+		if score, ok := external[id]; ok {
+			hit.Score = score
+		} else {
+			hit.Score = embedding.Cosine(queryVector, embedding.Decode(raw))
+		}
+		// Below this the match is noise rather than a weak answer.
+		if hit.Score < 0.2 {
+			continue
+		}
+		hits = append(hits, hit)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(hits, func(i, j int) bool { return hits[i].Score > hits[j].Score })
+	if len(hits) > limit {
+		hits = hits[:limit]
+	}
+	return hits, nil
 }
 
 // DependentResult is one place, in any accessible repository, that uses a

@@ -907,6 +907,7 @@
               ["get-file-history", "왜 이렇게 됐는지·언제 바뀌었는지 물을 때", "커밋 해시·작성자·시각·메시지"],
               ["search-merge-requests", "결정 배경·트레이드오프를 물을 때", "GitLab MR·Bitbucket PR 제목·설명·상태·링크"],
               ["find-dependents", "공유 코드를 바꾸기 전 영향 범위를 볼 때", "저장소 전 범위의 import·호출 위치"],
+              ["search-semantic", "표현이 달라 search-code가 못 찾을 때", "의미가 가까운 청크와 유사도, 사용된 검색 경로"],
               ["search-repositories", "저장소 이름만 찾을 때", "저장소 목록 (파일 내용 없음)"],
               ["query-docs", "특정 Library ID의 문서를 물을 때", "색인 결과, 없으면 소스 API failover"],
               ["find-symbol", "정확한 식별자를 알 때", "심볼 정의 위치"],

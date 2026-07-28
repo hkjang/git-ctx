@@ -199,6 +199,7 @@ const serverInstructions = `git-ctx searches internal Bitbucket and GitLab repos
 
 Choosing a tool:
 - Any question about source code, configuration or "where is X": start with search-code. It returns matching repositories AND file contents in one call.
+- When search-code finds nothing because the wording differs from the code: search-semantic matches by meaning across repositories.
 - Looking for a file by name or extension: find-file (Dockerfile, *.tf, **/migrations/*.sql).
 - Need the file itself: read-file, optionally with startLine and endLine.
 - Orienting in an unknown repository: list-directory, then get-repository-map.
@@ -331,6 +332,12 @@ func Catalog() []map[string]any {
 				"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"},
 				"startLine":  map[string]any{"type": "integer", "minimum": 1, "description": "Optional first line, 1-based"},
 				"endLine":    map[string]any{"type": "integer", "minimum": 1, "description": "Optional last line, inclusive"}}}},
+		{"name": "search-semantic", "description": "Finds code and documentation by meaning across every accessible repository, without needing a library ID or a shared keyword. Use it for a described behaviour (\"where do we retry failed webhooks\") when search-code returns nothing because the wording differs.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
+				"query":      map[string]string{"type": "string", "description": "Describe the behaviour or concept in natural language"},
+				"libraryId":  map[string]string{"type": "string", "description": "Optional library scope"},
+				"sourceType": map[string]any{"type": "string", "enum": []string{"bitbucket", "gitlab", "confluence", "jira"}},
+				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 50}}}},
 		{"name": "find-dependents", "description": "Finds every accessible repository that imports, calls or otherwise depends on a symbol, module, table or service. Use it before changing shared code to see who breaks; trace-dependencies only covers one repository.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"target"}, "properties": map[string]any{
 				"target":     map[string]string{"type": "string", "description": "Imported module, called symbol, table or service name"},
@@ -563,6 +570,23 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 		}
 		if err == nil {
 			text = formatFileContent(file)
+		}
+	case "search-semantic":
+		var semantic search.SemanticSearch
+		semantic, err = s.search.SemanticSearch(r.Context(), principalACLs(p), stringArg(params.Arguments, "query"),
+			stringArg(params.Arguments, "libraryId"), stringArg(params.Arguments, "sourceType"), intArg(params.Arguments, "limit", 10))
+		if err == nil {
+			if len(p.AllowedRepositories) > 0 {
+				allowed := semantic.Hits[:0]
+				for _, item := range semantic.Hits {
+					if libraryAllowed(item.LibraryID, p.AllowedRepositories) {
+						allowed = append(allowed, item)
+					}
+				}
+				semantic.Hits = allowed
+			}
+			empty = len(semantic.Hits) == 0
+			text = formatSemanticSearch(semantic)
 		}
 	case "find-dependents":
 		var dependents search.DependentSearch
@@ -1169,6 +1193,26 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func formatSemanticSearch(result search.SemanticSearch) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Semantic Search\n\nQuery: `%s`\nMatches: %d · retrieval: %s\n", result.Query, len(result.Hits), result.Mode)
+	for _, hit := range result.Hits {
+		fmt.Fprintf(&b, "\n### %s · %s (similarity %.2f)\n\n%s\n\nSource: `%s://%s@%s/%s#L%d-L%d`\n",
+			hit.LibraryID, hit.FilePath, hit.Score, strings.TrimSpace(hit.Content),
+			hit.SourceType, strings.TrimPrefix(hit.LibraryID, "/"), firstNonEmpty(hit.CommitID, hit.Ref), hit.FilePath, hit.LineStart, hit.LineEnd)
+	}
+	if len(result.Hits) == 0 {
+		b.WriteString("\nNothing was close enough in meaning. Try describing the behaviour differently, or use search-code for an exact term.\n")
+	}
+	if len(result.Diagnostics) > 0 {
+		b.WriteString("\n### Notes\n")
+		for _, diagnostic := range result.Diagnostics {
+			fmt.Fprintf(&b, "- %s\n", diagnostic)
+		}
+	}
+	return b.String()
 }
 
 func formatDependents(result search.DependentSearch) string {

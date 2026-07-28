@@ -204,6 +204,31 @@ func (m *milvusStore) Search(ctx context.Context, repositoryID, ref string, vect
 	return out, nil
 }
 
+func (m *milvusStore) SearchGlobal(ctx context.Context, vector []float32, limit int) ([]Match, error) {
+	if len(vector) == 0 {
+		return nil, errors.New("query vector is empty")
+	}
+	if limit < 1 {
+		limit = 50
+	}
+	var results []struct {
+		ID       string  `json:"id"`
+		Distance float64 `json:"distance"`
+	}
+	err := m.call(ctx, "/v2/vectordb/entities/search", map[string]any{
+		"collectionName": m.collection, "data": [][]float32{vector}, "annsField": "vector",
+		"limit": limit, "outputFields": []string{"id"},
+	}, &results)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Match, 0, len(results))
+	for _, item := range results {
+		out = append(out, Match{ID: item.ID, Score: item.Distance})
+	}
+	return out, nil
+}
+
 func (m *milvusStore) Status(ctx context.Context) (Status, error) {
 	status := Status{Provider: "milvus", Target: m.base.String(), Collection: m.collection, Dimensions: m.dimensions}
 	var collections []string

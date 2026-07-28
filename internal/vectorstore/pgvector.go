@@ -142,6 +142,30 @@ WHERE repository_id=$2 AND ref_name=$3 ORDER BY embedding <=> $1::vector LIMIT %
 	return out, rows.Err()
 }
 
+func (p *postgresStore) SearchGlobal(ctx context.Context, vector []float32, limit int) ([]Match, error) {
+	if len(vector) == 0 {
+		return nil, errors.New("query vector is empty")
+	}
+	if limit < 1 {
+		limit = 50
+	}
+	statement := fmt.Sprintf(`SELECT id, 1 - (embedding <=> $1::vector) AS score FROM %s ORDER BY embedding <=> $1::vector LIMIT %d`, p.table, limit)
+	rows, err := p.db.QueryContext(ctx, statement, literal(vector))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Match
+	for rows.Next() {
+		var match Match
+		if err = rows.Scan(&match.ID, &match.Score); err != nil {
+			return nil, err
+		}
+		out = append(out, match)
+	}
+	return out, rows.Err()
+}
+
 func (p *postgresStore) Status(ctx context.Context) (Status, error) {
 	status := Status{Provider: "pgvector", Collection: p.table, Dimensions: p.dimensions}
 	var version string

@@ -637,6 +637,78 @@ func TestVectorDatabaseAddsCandidatesAndFailsSoft(t *testing.T) {
 	}
 }
 
+// Semantic search must work with and without a vector database, and must never
+// return a repository the caller cannot read.
+func TestSemanticSearchUsesVectorDatabaseAndFallsBackToScan(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:semantic-search?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	insert := func(repository, principal, chunkID, path, text string) {
+		t.Helper()
+		_, _ = db.DB.Exec(`INSERT OR IGNORE INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES(?,'core',?,?,'gitlab',?,?,'main')`,
+			repository, repository, repository, repository, "/core/"+repository)
+		_, _ = db.DB.Exec(`INSERT OR IGNORE INTO repository_permissions(repository_id,principal,permission) VALUES(?,?,'read')`, repository, principal)
+		if _, err := db.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding) VALUES(?,?,'main','abc',?,1,4,?,'document',?,?,?)`,
+			chunkID, repository, path, path, text, chunkID, embedding.Encode(embedding.Embed(text))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert("api", "alice", "c-retry", "internal/webhook/retry.go", "retry failed webhook deliveries with exponential backoff")
+	insert("api", "alice", "c-billing", "docs/billing.md", "monthly invoice reconciliation report")
+	insert("secret", "bob", "c-hidden", "internal/webhook/retry.go", "retry failed webhook deliveries with exponential backoff")
+
+	service := New(db)
+	// Without a vector database the scan still answers.
+	scanned, err := service.SemanticSearch(ctx, []string{"alice"}, "retry failed webhook deliveries", "", "", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scanned.Hits) == 0 || scanned.Hits[0].FilePath != "internal/webhook/retry.go" {
+		t.Fatalf("scan hits=%#v", scanned.Hits)
+	}
+	if scanned.Mode != "in-database scan" {
+		t.Fatalf("mode=%s", scanned.Mode)
+	}
+	for _, hit := range scanned.Hits {
+		if hit.LibraryID == "/core/secret" {
+			t.Fatalf("ACL leak: %#v", hit)
+		}
+	}
+
+	// With a vector database the ANN result is used and still ACL filtered.
+	service.SetGlobalVectorLoader(func(_ context.Context, query string, limit int) ([]VectorCandidate, error) {
+		return []VectorCandidate{{ID: "c-hidden", Score: 0.99}, {ID: "c-retry", Score: 0.95}}, nil
+	})
+	vectored, err := service.SemanticSearch(ctx, []string{"alice"}, "retry failed webhook deliveries", "", "", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vectored.Mode != "vector database ANN" {
+		t.Fatalf("mode=%s", vectored.Mode)
+	}
+	if len(vectored.Hits) != 1 || vectored.Hits[0].LibraryID != "/core/api" {
+		t.Fatalf("the ANN result must be ACL filtered: %#v", vectored.Hits)
+	}
+	if vectored.Hits[0].Score < 0.9 {
+		t.Fatalf("the store score must be preserved: %#v", vectored.Hits[0])
+	}
+
+	// A failing vector database degrades to the scan instead of erroring.
+	service.SetGlobalVectorLoader(func(context.Context, string, int) ([]VectorCandidate, error) {
+		return nil, errors.New("pgvector unavailable")
+	})
+	degraded, err := service.SemanticSearch(ctx, []string{"alice"}, "retry failed webhook deliveries", "", "", 5)
+	if err != nil || len(degraded.Hits) == 0 || degraded.Mode != "in-database scan" {
+		t.Fatalf("degraded=%#v err=%v", degraded, err)
+	}
+	if !strings.Contains(strings.Join(degraded.Diagnostics, " "), "falling back") {
+		t.Fatalf("the fallback must be stated: %v", degraded.Diagnostics)
+	}
+}
+
 // Before changing shared code an agent must see every repository that uses it,
 // not only the one it happens to be reading.
 func TestFindDependentsCrossesRepositoriesAndRespectsACL(t *testing.T) {
