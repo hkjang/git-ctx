@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.15.0
+  version: 0.16.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -161,6 +161,24 @@ paths:
       {
         summary: Analyze ref changes and potentially affected dependents,
         responses: { "200": { description: Change impact analysis } },
+      }
+  /api/v1/tools/context-pack/test:
+    post:
+      {
+        summary: Search a curated multi-repository Context Pack with per-item ACL checks,
+        responses: { "200": { description: Context Pack result } },
+      }
+  /api/v1/tools/runbooks/test:
+    post:
+      {
+        summary: Search operational runbooks and playbooks,
+        responses: { "200": { description: Runbook results } },
+      }
+  /api/v1/tools/export/test:
+    post:
+      {
+        summary: Export bounded ACL-filtered Markdown context labeled as untrusted data,
+        responses: { "200": { description: Safe Markdown context bundle } },
       }
   /api/v1/admin/settings:
     get:
@@ -334,6 +352,30 @@ paths:
         summary: Pre-provision a Keycloak user by subject,
         responses: { "201": { description: User created }, "409": { description: Duplicate subject } },
       }
+  /api/v1/admin/context-packs:
+    get:
+      {
+        summary: List Context Packs and repository members,
+        responses: { "200": { description: Context Packs } },
+      }
+    post:
+      {
+        summary: Create a Context Pack,
+        responses: { "201": { description: Context Pack created } },
+      }
+  /api/v1/admin/context-packs/{id}:
+    put:
+      {
+        summary: Replace a Context Pack and its ordered members,
+        parameters: [{ $ref: "#/components/parameters/Id" }],
+        responses: { "204": { description: Context Pack updated } },
+      }
+    delete:
+      {
+        summary: Delete a Context Pack,
+        parameters: [{ $ref: "#/components/parameters/Id" }],
+        responses: { "204": { description: Context Pack deleted } },
+      }
   /api/v1/admin/users/{id}:
     put:
       {
@@ -506,6 +548,9 @@ components:
                 - trace-dependencies
                 - compare-refs
                 - get-change-impact
+                - get-context-pack
+                - find-runbook
+                - export-context
                 - get-platform-status
                 - list-index-jobs
                 - reindex-repository

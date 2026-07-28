@@ -363,6 +363,9 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/tools/dependencies/test", a.authenticate(http.HandlerFunc(a.testDependencies)))
 	a.mux.Handle("POST /api/v1/tools/compare-refs/test", a.authenticate(http.HandlerFunc(a.testCompareRefs)))
 	a.mux.Handle("POST /api/v1/tools/change-impact/test", a.authenticate(http.HandlerFunc(a.testChangeImpact)))
+	a.mux.Handle("POST /api/v1/tools/context-pack/test", a.authenticate(http.HandlerFunc(a.testContextPack)))
+	a.mux.Handle("POST /api/v1/tools/runbooks/test", a.authenticate(http.HandlerFunc(a.testRunbooks)))
+	a.mux.Handle("POST /api/v1/tools/export/test", a.authenticate(http.HandlerFunc(a.testContextExport)))
 	a.mux.Handle("GET /api/v1/admin/settings", a.admin(http.HandlerFunc(a.listSettings)))
 	a.mux.Handle("GET /api/v1/admin/settings/{category}", a.settingsAuthorize(http.HandlerFunc(a.getSetting)))
 	a.mux.Handle("DELETE /api/v1/admin/settings/{category}", a.settingsAuthorize(http.HandlerFunc(a.deleteSetting)))
@@ -375,6 +378,10 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/admin/users", a.authorize(http.HandlerFunc(a.createAdminUser), "platform-admin"))
 	a.mux.Handle("PUT /api/v1/admin/users/{id}", a.authorize(http.HandlerFunc(a.updateAdminUser), "platform-admin"))
 	a.mux.Handle("DELETE /api/v1/admin/users/{id}", a.authorize(http.HandlerFunc(a.deleteAdminUser), "platform-admin"))
+	a.mux.Handle("GET /api/v1/admin/context-packs", a.authorize(http.HandlerFunc(a.contextPacks), "platform-admin", "search-admin"))
+	a.mux.Handle("POST /api/v1/admin/context-packs", a.authorize(http.HandlerFunc(a.createContextPack), "platform-admin", "search-admin"))
+	a.mux.Handle("PUT /api/v1/admin/context-packs/{id}", a.authorize(http.HandlerFunc(a.updateContextPack), "platform-admin", "search-admin"))
+	a.mux.Handle("DELETE /api/v1/admin/context-packs/{id}", a.authorize(http.HandlerFunc(a.deleteContextPack), "platform-admin", "search-admin"))
 	a.mux.Handle("GET /api/v1/admin/api-keys", a.authorize(http.HandlerFunc(a.adminAPIKeys), "security-admin"))
 	a.mux.Handle("POST /api/v1/admin/api-keys/{id}/revoke", a.authorize(http.HandlerFunc(a.adminRevokeKey), "security-admin"))
 	a.mux.Handle("GET /api/v1/admin/secrets", a.authorize(http.HandlerFunc(a.listManagedSecrets), "security-admin"))
@@ -1320,6 +1327,82 @@ func (a *App) refAnalysis(w http.ResponseWriter, r *http.Request, impact bool) {
 		return
 	}
 	jsonOut(w, 200, item)
+}
+func (a *App) testContextPack(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	if p.KeyID != "" && !stringContains(p.Scopes, "get-context-pack") {
+		problem(w, 403, "forbidden", "API key is not allowed to call get-context-pack")
+		return
+	}
+	var in struct {
+		Pack  string `json:"pack"`
+		Query string `json:"query"`
+	}
+	if decode(r, &in) != nil {
+		problem(w, 400, "invalid_request", "pack and query are required")
+		return
+	}
+	item, err := a.search.ContextPack(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.Pack, in.Query)
+	if err != nil {
+		problem(w, 400, "search_failed", err.Error())
+		return
+	}
+	jsonOut(w, 200, item)
+}
+func (a *App) testRunbooks(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	if p.KeyID != "" && !stringContains(p.Scopes, "find-runbook") {
+		problem(w, 403, "forbidden", "API key is not allowed to call find-runbook")
+		return
+	}
+	var in struct {
+		LibraryID string `json:"libraryId"`
+		Query     string `json:"query"`
+		Limit     int    `json:"limit"`
+	}
+	if decode(r, &in) != nil {
+		problem(w, 400, "invalid_request", "query is required")
+		return
+	}
+	if p.KeyID != "" && in.LibraryID != "" && !repositoryAllowed(baseLibraryID(in.LibraryID), p.AllowedRepositories) {
+		problem(w, 403, "forbidden", "Library is unavailable or access is denied")
+		return
+	}
+	items, err := a.search.FindRunbooks(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.LibraryID, in.Query, in.Limit)
+	if err != nil {
+		problem(w, 400, "search_failed", err.Error())
+		return
+	}
+	jsonOut(w, 200, map[string]any{"runbooks": items})
+}
+func (a *App) testContextExport(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	if p.KeyID != "" && !stringContains(p.Scopes, "export-context") {
+		problem(w, 403, "forbidden", "API key is not allowed to call export-context")
+		return
+	}
+	var in struct {
+		LibraryIDs []string `json:"libraryIds"`
+		Query      string   `json:"query"`
+	}
+	if decode(r, &in) != nil {
+		problem(w, 400, "invalid_request", "libraryIds and query are required")
+		return
+	}
+	if p.KeyID != "" {
+		for _, id := range in.LibraryIDs {
+			if !repositoryAllowed(baseLibraryID(id), p.AllowedRepositories) {
+				problem(w, 403, "forbidden", "Context is unavailable or access is denied")
+				return
+			}
+		}
+	}
+	content, err := a.search.ExportContext(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.LibraryIDs, in.Query)
+	if err != nil {
+		problem(w, 400, "search_failed", err.Error())
+		return
+	}
+	jsonOut(w, 200, map[string]string{"content": content})
 }
 func baseLibraryID(id string) string {
 	parts := strings.Split(strings.TrimPrefix(strings.ToLower(id), "/"), "/")
@@ -2595,6 +2678,146 @@ type adminUserInput struct {
 	Email    string   `json:"email"`
 	Status   string   `json:"status"`
 	Roles    []string `json:"roles"`
+}
+
+type contextPackInput struct {
+	Slug        string `json:"slug"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Enabled     *bool  `json:"enabled"`
+	Items       []struct {
+		LibraryID string `json:"libraryId"`
+		Ref       string `json:"ref"`
+		QueryHint string `json:"queryHint"`
+	} `json:"items"`
+}
+
+func (a *App) contextPacks(w http.ResponseWriter, r *http.Request) {
+	rows, err := a.store.DB.QueryContext(r.Context(), `SELECT id,slug,name,description,enabled,created_by,created_at,updated_at FROM context_packs ORDER BY name`)
+	if err != nil {
+		problem(w, 500, "internal_error", err.Error())
+		return
+	}
+	var packs []map[string]any
+	for rows.Next() {
+		var id, slug, name, description, createdBy string
+		var enabled int
+		var createdAt, updatedAt time.Time
+		if rows.Scan(&id, &slug, &name, &description, &enabled, &createdBy, &createdAt, &updatedAt) != nil {
+			continue
+		}
+		packs = append(packs, map[string]any{"id": id, "slug": slug, "name": name, "description": description, "enabled": enabled != 0, "createdBy": createdBy, "createdAt": createdAt, "updatedAt": updatedAt})
+	}
+	rows.Close()
+	for _, pack := range packs {
+		itemRows, queryErr := a.store.DB.QueryContext(r.Context(), a.store.Rebind(`SELECT library_id,ref_name,query_hint FROM context_pack_items WHERE pack_id=? ORDER BY position,library_id`), pack["id"])
+		if queryErr != nil {
+			continue
+		}
+		var items []map[string]string
+		for itemRows.Next() {
+			var libraryID, ref, hint string
+			if itemRows.Scan(&libraryID, &ref, &hint) == nil {
+				items = append(items, map[string]string{"libraryId": libraryID, "ref": ref, "queryHint": hint})
+			}
+		}
+		itemRows.Close()
+		pack["items"] = items
+	}
+	jsonOut(w, 200, packs)
+}
+
+func (a *App) createContextPack(w http.ResponseWriter, r *http.Request) {
+	var input contextPackInput
+	if decode(r, &input) != nil || strings.TrimSpace(input.Slug) == "" || strings.TrimSpace(input.Name) == "" {
+		problem(w, 400, "invalid_request", "slug and name are required")
+		return
+	}
+	id, err := randomToken(18)
+	if err != nil {
+		problem(w, 500, "internal_error", err.Error())
+		return
+	}
+	p, _ := auth.FromContext(r.Context())
+	if err = a.saveContextPack(r.Context(), id, input, p.UserID, true); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			problem(w, 409, "duplicate", "Context pack slug already exists")
+		} else {
+			problem(w, 400, "invalid_request", err.Error())
+		}
+		return
+	}
+	jsonOut(w, 201, map[string]string{"id": id})
+}
+
+func (a *App) updateContextPack(w http.ResponseWriter, r *http.Request) {
+	var input contextPackInput
+	if decode(r, &input) != nil || strings.TrimSpace(input.Slug) == "" || strings.TrimSpace(input.Name) == "" {
+		problem(w, 400, "invalid_request", "slug and name are required")
+		return
+	}
+	p, _ := auth.FromContext(r.Context())
+	if err := a.saveContextPack(r.Context(), r.PathValue("id"), input, p.UserID, false); err != nil {
+		problem(w, 400, "invalid_request", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) saveContextPack(ctx context.Context, id string, input contextPackInput, userID string, create bool) error {
+	if len(input.Items) == 0 || len(input.Items) > 50 {
+		return errors.New("one to fifty context pack items are required")
+	}
+	for _, item := range input.Items {
+		if baseLibraryID(item.LibraryID) == "" {
+			return errors.New("each item requires a valid libraryId")
+		}
+	}
+	enabled := true
+	if input.Enabled != nil {
+		enabled = *input.Enabled
+	}
+	tx, err := a.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if create {
+		_, err = tx.ExecContext(ctx, a.store.Rebind(`INSERT INTO context_packs(id,slug,name,description,enabled,created_by) VALUES(?,?,?,?,?,?)`), id, strings.ToLower(strings.TrimSpace(input.Slug)), strings.TrimSpace(input.Name), strings.TrimSpace(input.Description), enabled, userID)
+	} else {
+		var result sql.Result
+		result, err = tx.ExecContext(ctx, a.store.Rebind(`UPDATE context_packs SET slug=?,name=?,description=?,enabled=?,updated_at=? WHERE id=?`), strings.ToLower(strings.TrimSpace(input.Slug)), strings.TrimSpace(input.Name), strings.TrimSpace(input.Description), enabled, time.Now().UTC(), id)
+		if err == nil {
+			if count, _ := result.RowsAffected(); count == 0 {
+				return errors.New("context pack not found")
+			}
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, a.store.Rebind(`DELETE FROM context_pack_items WHERE pack_id=?`), id); err != nil {
+		return err
+	}
+	for position, item := range input.Items {
+		if _, err = tx.ExecContext(ctx, a.store.Rebind(`INSERT INTO context_pack_items(pack_id,library_id,ref_name,query_hint,position) VALUES(?,?,?,?,?)`), id, baseLibraryID(item.LibraryID), strings.TrimSpace(item.Ref), strings.TrimSpace(item.QueryHint), position); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (a *App) deleteContextPack(w http.ResponseWriter, r *http.Request) {
+	result, err := a.store.DB.ExecContext(r.Context(), a.store.Rebind(`DELETE FROM context_packs WHERE id=?`), r.PathValue("id"))
+	if err != nil {
+		problem(w, 500, "internal_error", err.Error())
+		return
+	}
+	if count, _ := result.RowsAffected(); count == 0 {
+		problem(w, 404, "not_found", "Context pack not found")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *App) adminUsers(w http.ResponseWriter, r *http.Request) {

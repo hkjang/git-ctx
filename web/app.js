@@ -420,6 +420,34 @@ function setupKnowledgeSearch() {
       output.textContent = error.message;
     }
   };
+  $("#context-pack-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.currentTarget));
+    try {
+      output.textContent = JSON.stringify(await api("/api/v1/tools/context-pack/test", { method: "POST", body: JSON.stringify(data) }), null, 2);
+    } catch (error) {
+      output.textContent = error.message;
+    }
+  };
+  $("#runbook-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.currentTarget));
+    try {
+      output.textContent = JSON.stringify(await api("/api/v1/tools/runbooks/test", { method: "POST", body: JSON.stringify({ ...data, limit: 20 }) }), null, 2);
+    } catch (error) {
+      output.textContent = error.message;
+    }
+  };
+  $("#context-export-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.currentTarget));
+    data.libraryIds = data.libraryIds.split(",").map((value) => value.trim()).filter(Boolean);
+    try {
+      output.textContent = (await api("/api/v1/tools/export/test", { method: "POST", body: JSON.stringify(data) })).content;
+    } catch (error) {
+      output.textContent = error.message;
+    }
+  };
 }
 function configureMCPKeyScopes(roles) {
   const platform = roles.has("platform-admin");
@@ -1071,11 +1099,15 @@ function setupOps(capabilities) {
   refreshBackups(capabilities);
   if (capabilities.quality) {
     $("#refresh-quality").onclick = () => refreshQuality(capabilities);
+    $("#refresh-context-packs").onclick = () => refreshContextPacks(capabilities);
     refreshQuality(capabilities);
+    refreshContextPacks(capabilities);
   }
   if (capabilities.qualityWrite) {
     $("#create-quality-case").onclick = () => createQualityCase(capabilities);
     $("#run-quality").onclick = () => runQuality(capabilities);
+    $("#context-pack-admin-form").onsubmit = (event) => saveContextPack(event, capabilities);
+    $("#reset-context-pack").onclick = resetContextPack;
   }
   setupAdminNavigation(capabilities);
 }
@@ -1207,6 +1239,71 @@ const qualityCSV = (selector) =>
     .value.split(",")
     .map((value) => value.trim())
     .filter(Boolean);
+const contextPackItems = () =>
+  $("#context-pack-items").value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [libraryId, ref = "", queryHint = ""] = line.split("|").map((value) => value.trim());
+      return { libraryId, ref, queryHint };
+    });
+function resetContextPack() {
+  $("#context-pack-admin-form").reset();
+  $("#context-pack-id").value = "";
+  $("#context-pack-enabled").checked = true;
+}
+async function saveContextPack(event, capabilities) {
+  event.preventDefault();
+  if (!capabilities.qualityWrite) return;
+  const id = $("#context-pack-id").value;
+  const body = {
+    slug: $("#context-pack-slug").value,
+    name: $("#context-pack-name").value,
+    description: $("#context-pack-description").value,
+    enabled: $("#context-pack-enabled").checked,
+    items: contextPackItems(),
+  };
+  try {
+    await api(id ? `/api/v1/admin/context-packs/${encodeURIComponent(id)}` : "/api/v1/admin/context-packs", {
+      method: id ? "PUT" : "POST",
+      body: JSON.stringify(body),
+    });
+    resetContextPack();
+    showAdmin("Context Pack을 저장했습니다.", true);
+    refreshContextPacks(capabilities);
+  } catch (error) {
+    showAdmin(error.message, false);
+  }
+}
+async function refreshContextPacks(capabilities) {
+  if (!capabilities.quality) return;
+  try {
+    const packs = await api("/api/v1/admin/context-packs");
+    $("#context-pack-list").innerHTML =
+      `<table><thead><tr><th>이름/Slug</th><th>Library</th><th>상태</th><th></th></tr></thead><tbody>${packs.map((pack) => `<tr><td>${esc(pack.name)}<br><code>${esc(pack.slug)}</code><br>${esc(pack.description || "")}</td><td>${(pack.items || []).map((item) => `<code>${esc(item.libraryId)}${item.ref ? `/${esc(item.ref)}` : ""}</code>${item.queryHint ? ` · ${esc(item.queryHint)}` : ""}`).join("<br>")}</td><td>${pack.enabled ? "활성" : "중지"}</td><td>${capabilities.qualityWrite ? `<button data-edit-pack="${esc(pack.id)}">수정</button> <button class="danger" data-delete-pack="${esc(pack.id)}">삭제</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+    document.querySelectorAll("[data-edit-pack]").forEach((button) => {
+      button.onclick = () => {
+        const pack = packs.find((item) => item.id === button.dataset.editPack);
+        $("#context-pack-id").value = pack.id;
+        $("#context-pack-slug").value = pack.slug;
+        $("#context-pack-name").value = pack.name;
+        $("#context-pack-description").value = pack.description || "";
+        $("#context-pack-enabled").checked = pack.enabled;
+        $("#context-pack-items").value = (pack.items || []).map((item) => [item.libraryId, item.ref || "", item.queryHint || ""].join("|")).join("\n");
+      };
+    });
+    document.querySelectorAll("[data-delete-pack]").forEach((button) => {
+      button.onclick = async () => {
+        if (!confirm("Context Pack을 삭제하시겠습니까?")) return;
+        await api(`/api/v1/admin/context-packs/${encodeURIComponent(button.dataset.deletePack)}`, { method: "DELETE" });
+        refreshContextPacks(capabilities);
+      };
+    });
+  } catch (error) {
+    $("#context-pack-list").textContent = error.message;
+  }
+}
 async function createQualityCase(capabilities) {
   try {
     await api("/api/v1/admin/quality/cases", {

@@ -315,6 +315,19 @@ func Catalog() []map[string]any {
 				"baseRef":   map[string]string{"type": "string"},
 				"headRef":   map[string]string{"type": "string"},
 				"limit":     map[string]any{"type": "integer", "minimum": 1, "maximum": 200}}}},
+		{"name": "get-context-pack", "description": "Searches a curated multi-repository context pack while enforcing ACL per repository.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"pack", "query"}, "properties": map[string]any{
+				"pack":  map[string]string{"type": "string", "description": "Context pack slug"},
+				"query": map[string]string{"type": "string"}}}},
+		{"name": "find-runbook", "description": "Finds operational runbooks and playbooks in accessible indexed repositories.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
+				"query":     map[string]string{"type": "string"},
+				"libraryId": map[string]string{"type": "string"},
+				"limit":     map[string]any{"type": "integer", "minimum": 1, "maximum": 50}}}},
+		{"name": "export-context", "description": "Exports ACL-filtered repository context as a bounded Markdown bundle with an untrusted-data safety label.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryIds", "query"}, "properties": map[string]any{
+				"libraryIds": map[string]any{"type": "array", "minItems": 1, "maxItems": 20, "items": map[string]string{"type": "string"}},
+				"query":      map[string]string{"type": "string"}}}},
 		{"name": "get-platform-status", "description": "Returns administrative MCP, source, index, and database status. Requires an administrator MCP API key.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}}},
 		{"name": "list-index-jobs", "description": "Lists recent indexing jobs for source administrators and operators using an MCP API key.",
@@ -483,6 +496,36 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 			if err == nil {
 				text = formatChangeImpact(item)
 			}
+		}
+	case "get-context-pack":
+		var item search.ContextPackResult
+		item, err = s.search.ContextPack(r.Context(), principalACLs(p), stringArg(params.Arguments, "pack"), stringArg(params.Arguments, "query"))
+		if err == nil {
+			text = fmt.Sprintf("# Context Pack: %s\n\n%s\n\n%s", item.Name, item.Description, item.Content)
+		}
+	case "find-runbook":
+		libraryID = stringArg(params.Arguments, "libraryId")
+		if p.KeyID != "" && libraryID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+			err = errors.New("library is unavailable or access is denied")
+		} else {
+			var items []search.RunbookResult
+			items, err = s.search.FindRunbooks(r.Context(), principalACLs(p), libraryID, stringArg(params.Arguments, "query"), intArg(params.Arguments, "limit", 10))
+			if err == nil {
+				text = formatRunbooks(items)
+			}
+		}
+	case "export-context":
+		libraries := stringSliceArg(params.Arguments, "libraryIds")
+		if p.KeyID != "" {
+			for _, id := range libraries {
+				if !libraryAllowed(id, p.AllowedRepositories) {
+					err = errors.New("context is unavailable or access is denied")
+					break
+				}
+			}
+		}
+		if err == nil {
+			text, err = s.search.ExportContext(r.Context(), principalACLs(p), libraries, stringArg(params.Arguments, "query"))
 		}
 	case "get-platform-status":
 		text, err = s.platformStatus(r.Context())
@@ -862,7 +905,32 @@ func formatChangeImpact(item search.ChangeImpact) string {
 	return b.String()
 }
 
+func formatRunbooks(items []search.RunbookResult) string {
+	if len(items) == 0 {
+		return "No accessible runbooks matched the query."
+	}
+	var b strings.Builder
+	b.WriteString("## Runbooks\n")
+	for _, item := range items {
+		fmt.Fprintf(&b, "\n### %s\n\n%s\n\nSource: bitcontext://%s@%s/%s#L%d-L%d\n", item.Heading, item.Content, item.LibraryID, item.CommitID, item.FilePath, item.LineStart, item.LineEnd)
+	}
+	return b.String()
+}
+
 func stringArg(m map[string]any, k string) string { v, _ := m[k].(string); return v }
+func stringSliceArg(m map[string]any, k string) []string {
+	values, ok := m[k].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+			out = append(out, text)
+		}
+	}
+	return out
+}
 func intArg(m map[string]any, k string, fallback int) int {
 	value, ok := m[k].(float64)
 	if !ok || value != float64(int(value)) {

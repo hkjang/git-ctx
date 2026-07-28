@@ -100,6 +100,8 @@
             <dd>함수·메서드·클래스·인터페이스 검색과 정의 문맥 조회</dd>
             <dt>trace-dependencies / compare-refs / get-change-impact</dt>
             <dd>의존 관계 추적, branch·tag 비교와 변경 영향 분석</dd>
+            <dt>get-context-pack / find-runbook / export-context</dt>
+            <dd>업무 단위 복합 검색, 운영 절차 검색과 안전한 Markdown 내보내기</dd>
           </dl>
         </article>
       </section>
@@ -156,6 +158,15 @@
             ><label
               ><input type="checkbox" name="scope" value="get-change-impact" checked />
               get-change-impact</label
+            ><label
+              ><input type="checkbox" name="scope" value="get-context-pack" checked />
+              get-context-pack</label
+            ><label
+              ><input type="checkbox" name="scope" value="find-runbook" checked />
+              find-runbook</label
+            ><label
+              ><input type="checkbox" name="scope" value="export-context" checked />
+              export-context</label
             >
           </fieldset>
           <fieldset id="admin-key-scopes" hidden>
@@ -232,6 +243,30 @@
               <label>기준 Ref<input name="baseRef" required placeholder="main" /></label>
               <label>비교 Ref<input name="headRef" required placeholder="release/v1" /></label>
               <button type="submit">변경 영향 분석</button>
+            </form>
+          </article>
+          <article>
+            <h3>Context Pack</h3>
+            <form id="context-pack-form" class="form-row">
+              <label>Pack Slug<input name="pack" required placeholder="gpu-platform" /></label>
+              <label>질의<input name="query" required placeholder="GPU 장애 대응과 관련 API" /></label>
+              <button type="submit">Pack 검색</button>
+            </form>
+          </article>
+          <article>
+            <h3>Runbook Search</h3>
+            <form id="runbook-form" class="form-row">
+              <label>Library ID<input name="libraryId" placeholder="/kcb/clustara" /></label>
+              <label>증상 또는 작업<input name="query" required placeholder="GPU 메트릭 누락" /></label>
+              <button type="submit">Runbook 검색</button>
+            </form>
+          </article>
+          <article>
+            <h3>Safe Context Export</h3>
+            <form id="context-export-form" class="form-row">
+              <label>Library IDs<input name="libraryIds" required placeholder="/kcb/api, /kcb/agent" /></label>
+              <label>질의<input name="query" required placeholder="인증 API 구현" /></label>
+              <button type="submit">Markdown Export</button>
             </form>
           </article>
         </div>
@@ -365,6 +400,24 @@
           <div id="backups" class="table-wrap"></div>
         </div>
         <div id="quality-admin-section" class="admin-panel" hidden>
+          <hr />
+          <div class="section-title">
+            <div>
+              <h2>Context Pack 관리</h2>
+              <p>업무 시스템 단위로 여러 Library와 ref를 묶어 MCP 검색 범위를 구성합니다.</p>
+            </div>
+            <button id="refresh-context-packs">새로고침</button>
+          </div>
+          <form id="context-pack-admin-form" class="form-row">
+            <input id="context-pack-id" type="hidden" />
+            <label>Slug<input id="context-pack-slug" required placeholder="gpu-platform" /></label>
+            <label>이름<input id="context-pack-name" required placeholder="GPU Platform" /></label>
+            <label class="wide">설명<input id="context-pack-description" placeholder="GPU 서비스, 에이전트와 운영 문서" /></label>
+            <label class="wide">Library 항목<textarea id="context-pack-items" required placeholder="/kcb/api|main|API&#10;/kcb/agent|release/v1|agent"></textarea></label>
+            <label><input id="context-pack-enabled" type="checkbox" checked /> 활성화</label>
+            <div class="button-row"><button type="submit">저장</button><button id="reset-context-pack" type="button">새 항목</button></div>
+          </form>
+          <div id="context-pack-list" class="table-wrap"></div>
           <hr />
           <div class="section-title">
             <div>

@@ -67,6 +67,7 @@ func (s *Service) CreateWithRestrictions(ctx context.Context, userID, name strin
 		"search-repositories": true, "search-source": true,
 		"get-repository-map": true, "find-symbol": true, "get-symbol-context": true,
 		"trace-dependencies": true, "compare-refs": true, "get-change-impact": true,
+		"get-context-pack": true, "find-runbook": true, "export-context": true,
 		"get-platform-status": true, "list-index-jobs": true, "reindex-repository": true,
 	}
 	for _, scope := range scopes {
