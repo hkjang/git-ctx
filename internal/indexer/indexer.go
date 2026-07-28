@@ -28,8 +28,41 @@ type Policy struct {
 	MaxFileBytes      int64    `json:"maxFileBytes"`
 }
 
+// embeddingBatchSize is how many chunks are vectorized per request, and
+// indexProgressInterval is how often a running job publishes its file counter so
+// operators can see progress instead of a job that looks stuck.
+const (
+	embeddingBatchSize    = 32
+	indexProgressInterval = 25
+)
+
+// DefaultPolicy covers the languages and configuration formats found in a normal
+// enterprise repository. The list used to stop at a handful of extensions, so a
+// JavaScript, Kotlin, C# or Ruby repository indexed zero files and looked broken
+// even though the job completed.
 func DefaultPolicy() Policy {
-	return Policy{IncludeExtensions: []string{".md", ".mdx", ".rst", ".txt", ".adoc", ".asciidoc", ".yaml", ".yml", ".json", ".xml", ".mod", ".gradle", ".tf", ".go", ".java", ".ts", ".tsx", ".py", ".sql", ".ddl"}, ExcludePrefixes: []string{"node_modules/", "vendor/", "dist/", ".git/", "secrets/"}, MaxFileBytes: 1 << 20}
+	return Policy{
+		IncludeExtensions: []string{
+			".md", ".mdx", ".rst", ".txt", ".adoc", ".asciidoc",
+			".yaml", ".yml", ".json", ".jsonc", ".xml", ".toml", ".ini", ".conf", ".cfg", ".properties",
+			".mod", ".gradle", ".sbt", ".bzl", ".cmake", ".tf", ".tfvars", ".proto", ".graphql", ".gql",
+			".go", ".java", ".kt", ".kts", ".scala", ".groovy",
+			".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte",
+			".py", ".rb", ".php", ".cs", ".fs", ".rs", ".swift", ".dart", ".lua", ".pl", ".r",
+			".c", ".h", ".cc", ".cpp", ".hpp", ".hh", ".m", ".mm",
+			".sh", ".bash", ".zsh", ".ps1", ".bat",
+			".sql", ".ddl", ".pks", ".pkb",
+		},
+		ExcludePrefixes: []string{"node_modules/", "vendor/", "dist/", "build/", "target/", ".git/", ".idea/", "secrets/"},
+		MaxFileBytes:    1 << 20,
+	}
+}
+
+// indexableByName lists build and operations files that carry no extension but
+// describe how a service is built and run.
+var indexableByName = map[string]bool{
+	"dockerfile": true, "containerfile": true, "makefile": true, "jenkinsfile": true,
+	"readme": true, "changelog": true, "codeowners": true, "procfile": true,
 }
 
 type Indexer struct {
@@ -60,15 +93,17 @@ func LibraryIDForSource(sourceType, projectKey, slug string) string {
 }
 
 func (i *Indexer) SyncRepository(ctx context.Context, adapter source.RepositorySource, sourceType string, repo source.Repository, refs []source.Reference) error {
-	return i.syncRepository(ctx, adapter, sourceType, repo, refs, true)
+	return i.syncRepository(ctx, adapter, sourceType, repo, refs, true, "")
 }
 
-// ApplyPendingJob indexes content for a job that is already tracked by the worker.
-func (i *Indexer) ApplyPendingJob(ctx context.Context, adapter source.RepositorySource, sourceType string, repo source.Repository, refs []source.Reference) error {
-	return i.syncRepository(ctx, adapter, sourceType, repo, refs, false)
+// ApplyPendingJob indexes content for a job the worker already owns. The job id
+// is required so progress, the processed file count and skip warnings land on
+// the row the operations screen is showing; the worker still owns the status.
+func (i *Indexer) ApplyPendingJob(ctx context.Context, adapter source.RepositorySource, sourceType string, repo source.Repository, refs []source.Reference, jobID string) error {
+	return i.syncRepository(ctx, adapter, sourceType, repo, refs, false, jobID)
 }
 
-func (i *Indexer) syncRepository(ctx context.Context, adapter source.RepositorySource, sourceType string, repo source.Repository, refs []source.Reference, trackJobs bool) error {
+func (i *Indexer) syncRepository(ctx context.Context, adapter source.RepositorySource, sourceType string, repo source.Repository, refs []source.Reference, trackJobs bool, workerJobID string) error {
 	if sourceType != "bitbucket" && sourceType != "gitlab" && sourceType != "confluence" && sourceType != "jira" {
 		return errors.New("unsupported source type")
 	}
@@ -107,16 +142,22 @@ func (i *Indexer) syncRepository(ctx context.Context, adapter source.RepositoryS
 		return err
 	}
 	for _, r := range refs {
-		if err := i.syncRef(ctx, adapter, repoID, ref, r, trackJobs); err != nil {
+		if err := i.syncRef(ctx, adapter, repoID, ref, r, trackJobs, workerJobID); err != nil {
 			return err
 		}
 	}
 	_, _ = i.store.DB.ExecContext(ctx, i.store.Rebind(`UPDATE repositories SET indexed_at=? WHERE id=?`), time.Now().UTC(), repoID)
 	return nil
 }
-func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, repoID string, repo source.RepositoryRef, ref source.Reference, trackJob bool) error {
+func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, repoID string, repo source.RepositoryRef, ref source.Reference, trackJob bool, workerJobID string) error {
 	jobID := fmt.Sprintf("%d", time.Now().UnixNano())
 	generationID := repoID + ":" + ref.Name + ":" + jobID
+	// reportJobID is the row that receives progress and result details. The
+	// indexer creates it for direct syncs and reuses the worker row otherwise.
+	reportJobID := workerJobID
+	if trackJob {
+		reportJobID = jobID
+	}
 	if trackJob {
 		_, err := i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO index_jobs(id,repository_id,ref_name,kind,status,started_at,attempts) VALUES(?,?,?,'sync','running',?,1)`), jobID, repoID, ref.Name, time.Now().UTC())
 		if err != nil {
@@ -134,11 +175,19 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 		}
 		return e
 	}
-	complete := func(processed int) error {
-		if !trackJob {
+	// complete records the finished job. A non-empty warning marks files that
+	// were skipped so the operations screen shows partial results instead of a
+	// silent gap.
+	complete := func(processed int, warning string) error {
+		if reportJobID == "" {
 			return nil
 		}
-		_, err := i.store.DB.ExecContext(ctx, i.store.Rebind(`UPDATE index_jobs SET status='completed',files_processed=?,completed_at=? WHERE id=?`), processed, time.Now().UTC(), jobID)
+		if !trackJob {
+			// The worker owns the status transition; only the details are ours.
+			_, err := i.store.DB.ExecContext(ctx, i.store.Rebind(`UPDATE index_jobs SET files_processed=?,error_message=? WHERE id=?`), processed, truncate(warning, 1000), reportJobID)
+			return err
+		}
+		_, err := i.store.DB.ExecContext(ctx, i.store.Rebind(`UPDATE index_jobs SET status='completed',files_processed=?,error_message=?,completed_at=? WHERE id=?`), processed, truncate(warning, 1000), time.Now().UTC(), reportJobID)
 		return err
 	}
 	embeddingMetadata := embedding.Metadata{}
@@ -165,7 +214,7 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 		if err = i.refreshRepositoryMap(ctx, repoID, ref.Name, ref.LatestCommit); err != nil {
 			return fail(err)
 		}
-		return complete(0)
+		return complete(0, "")
 	}
 
 	incremental := false
@@ -214,13 +263,64 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 	}
 	var securityEvents []securityEvent
 	processed := 0
+	// Chunks are embedded in batches instead of one request per chunk, and each
+	// staged row waits for its vector. pending holds the rows of the current
+	// batch together with the text that still needs a vector.
+	type pendingChunk struct {
+		id, filePath, heading, contentType, content, contentHash string
+		start, end                                               int
+		vector                                                   []byte
+		embedText                                                string
+	}
+	var pending []pendingChunk
+	flush := func() error {
+		if len(pending) == 0 {
+			return nil
+		}
+		var texts []string
+		var positions []int
+		for index := range pending {
+			if len(pending[index].vector) == 0 {
+				texts = append(texts, pending[index].embedText)
+				positions = append(positions, index)
+			}
+		}
+		if len(texts) > 0 {
+			vectors, embedErr := embedding.EmbedAll(ctx, i.embedder, texts)
+			if embedErr != nil {
+				return fmt.Errorf("embedding %d chunks near %s: %w", len(texts), pending[positions[0]].filePath, embedErr)
+			}
+			for position, vector := range vectors {
+				pending[positions[position]].vector = embedding.Encode(vector)
+				embeddingMetadata.Dimensions = len(vector)
+			}
+		}
+		for _, chunk := range pending {
+			if _, err := i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO document_chunks_staging(generation_id,id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding,embedding_provider,embedding_model,embedding_dimensions,embedding_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+				generationID, chunk.id, repoID, ref.Name, ref.LatestCommit, chunk.filePath, chunk.start, chunk.end, chunk.heading, chunk.contentType, chunk.content, chunk.contentHash, chunk.vector, embeddingMetadata.Provider, embeddingMetadata.Model, embeddingMetadata.Dimensions, embeddingMetadata.Revision); err != nil {
+				return err
+			}
+		}
+		pending = pending[:0]
+		return nil
+	}
+	// A single unreadable file must not discard a whole repository index. Skipped
+	// files are counted and reported on the job so operators can see what was
+	// left out instead of watching the job retry forever.
+	var skipped []string
+	candidates := 0
 	for _, file := range files {
 		if !i.allowed(file) {
 			continue
 		}
+		candidates++
+		if reportJobID != "" && processed > 0 && processed%indexProgressInterval == 0 {
+			_, _ = i.store.DB.ExecContext(ctx, i.store.Rebind(`UPDATE index_jobs SET files_processed=? WHERE id=?`), processed, reportJobID)
+		}
 		raw, e := adapter.GetFile(ctx, repo, snapshotRef, file.Path)
 		if e != nil {
-			return fail(fmt.Errorf("%s: %w", file.Path, e))
+			skipped = append(skipped, fmt.Sprintf("%s (%s)", file.Path, truncate(e.Error(), 120)))
+			continue
 		}
 		if int64(len(raw)) > i.policy.MaxFileBytes {
 			continue
@@ -263,21 +363,25 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 					return fail(reuseErr)
 				}
 			}
-			if len(vector) == 0 {
-				embedded, embedErr := i.embedder.Embed(ctx, chunk.Heading+"\n"+chunk.Content)
-				if embedErr != nil {
-					return fail(fmt.Errorf("embedding %s: %w", file.Path, embedErr))
+			pending = append(pending, pendingChunk{
+				id: id, filePath: file.Path, heading: chunk.Heading, contentType: contentType(file.Path),
+				content: chunk.Content, contentHash: contentHash, start: chunk.Start, end: chunk.End,
+				vector: vector, embedText: chunk.Heading + "\n" + chunk.Content,
+			})
+			if len(pending) >= embeddingBatchSize {
+				if flushErr := flush(); flushErr != nil {
+					return fail(flushErr)
 				}
-				vector = embedding.Encode(embedded)
-				embeddingMetadata.Dimensions = len(embedded)
-			}
-			_, e = i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO document_chunks_staging(generation_id,id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding,embedding_provider,embedding_model,embedding_dimensions,embedding_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`), generationID, id, repoID, ref.Name, ref.LatestCommit, file.Path, chunk.Start, chunk.End, chunk.Heading, contentType(file.Path), chunk.Content, contentHash, vector, embeddingMetadata.Provider, embeddingMetadata.Model, embeddingMetadata.Dimensions, embeddingMetadata.Revision)
-			if e != nil {
-				return fail(e)
 			}
 		}
 		processed++
 		upsertPaths[filepath.ToSlash(file.Path)] = true
+	}
+	if flushErr := flush(); flushErr != nil {
+		return fail(flushErr)
+	}
+	if len(skipped) > 0 && processed == 0 && candidates > 0 {
+		return fail(fmt.Errorf("every indexable file failed to download, first error: %s", skipped[0]))
 	}
 	tx, err := i.store.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -431,7 +535,16 @@ FROM code_dependencies_staging WHERE generation_id=?`), generationID); err != ni
 	if err = i.refreshRepositoryMap(ctx, repoID, ref.Name, ref.LatestCommit); err != nil {
 		return fail(err)
 	}
-	return complete(processed)
+	warning := ""
+	if len(skipped) > 0 {
+		warning = fmt.Sprintf("%d file(s) skipped: %s", len(skipped), strings.Join(skipped[:min(len(skipped), 5)], "; "))
+	}
+	// A completed job with nothing indexed is the most confusing outcome of all,
+	// so name the reason instead of leaving a silent zero.
+	if candidates == 0 && len(files) > 0 {
+		warning = fmt.Sprintf("%d file(s) listed but none matched the index policy; adjust the repository extension policy", len(files))
+	}
+	return complete(processed, warning)
 }
 
 func (i *Indexer) refreshRepositoryMap(ctx context.Context, repoID, ref, commit string) error {
@@ -512,11 +625,15 @@ func (i *Indexer) allowed(f source.File) bool {
 			return false
 		}
 	}
+	withinSize := f.Size == 0 || f.Size <= i.policy.MaxFileBytes
 	ext := strings.ToLower(filepath.Ext(p))
 	for _, x := range i.policy.IncludeExtensions {
-		if ext == x {
-			return f.Size == 0 || f.Size <= i.policy.MaxFileBytes
+		if ext == strings.ToLower(strings.TrimSpace(x)) {
+			return withinSize
 		}
+	}
+	if ext == "" && indexableByName[strings.ToLower(filepath.Base(p))] {
+		return withinSize
 	}
 	return false
 }

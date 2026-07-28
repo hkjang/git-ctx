@@ -245,6 +245,12 @@ paths:
         parameters: [{ $ref: "#/components/parameters/Category" }],
         responses: { "200": { description: Version author and timestamp list } },
       }
+  /api/v1/admin/index-policy-defaults:
+    get:
+      {
+        summary: Default index file policy used when a repository has no override,
+        responses: { "200": { description: Default include extensions exclude prefixes and size limit } },
+      }
   /api/v1/admin/setup-status:
     get:
       {

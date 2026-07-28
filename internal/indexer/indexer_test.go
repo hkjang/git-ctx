@@ -173,6 +173,89 @@ func TestSyncRepositoryAppliesPolicyACLAndChunks(t *testing.T) {
 	}
 }
 
+// batchEmbedder records how the indexer calls the model so the test can prove
+// chunks are vectorized in batches rather than one request each.
+type batchEmbedder struct {
+	countingEmbedder
+	batches    int
+	batchSizes []int
+}
+
+func (e *batchEmbedder) EmbedBatch(_ context.Context, texts []string) ([][]float32, error) {
+	e.batches++
+	e.batchSizes = append(e.batchSizes, len(texts))
+	e.calls += len(texts)
+	vectors := make([][]float32, len(texts))
+	for index := range texts {
+		vectors[index] = []float32{1, 0, 0}
+	}
+	return vectors, nil
+}
+
+// unreliableSource fails one file download the way a remote server does for LFS
+// pointers, permission edges or files removed between listing and fetching.
+type unreliableSource struct {
+	fakeSource
+	files  []string
+	broken string
+}
+
+func (s *unreliableSource) ListFiles(context.Context, source.RepositoryRef, string) ([]source.File, error) {
+	out := make([]source.File, 0, len(s.files))
+	for _, path := range s.files {
+		out = append(out, source.File{Path: path})
+	}
+	return out, nil
+}
+func (s *unreliableSource) GetFile(_ context.Context, _ source.RepositoryRef, _ string, path string) ([]byte, error) {
+	if path == s.broken {
+		return nil, errors.New("404 file not found")
+	}
+	return []byte("# Title\nbody text\n\n## Second\nmore text"), nil
+}
+
+func TestIndexBatchesEmbeddingsAndSurvivesOneUnreadableFile(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file:index-resilience?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+	remote := &unreliableSource{files: []string{"a.md", "b.md", "broken.md", "c.md"}, broken: "broken.md"}
+	model := &batchEmbedder{}
+	repo := source.Repository{ID: 9, ProjectKey: "kcb", Slug: "docs", Name: "Docs", DefaultBranch: "main"}
+	if err = NewWithEmbedder(s, DefaultPolicy(), model).SyncRepository(ctx, remote, "gitlab", repo, []source.Reference{{Name: "main", LatestCommit: "c1"}}); err != nil {
+		t.Fatalf("one unreadable file must not fail the repository index: %v", err)
+	}
+	var status, warning string
+	var files int
+	if err = s.DB.QueryRow(`SELECT status,files_processed,error_message FROM index_jobs LIMIT 1`).Scan(&status, &files, &warning); err != nil {
+		t.Fatal(err)
+	}
+	if status != "completed" || files != 3 {
+		t.Fatalf("job status=%s files=%d", status, files)
+	}
+	if !strings.Contains(warning, "broken.md") || !strings.Contains(warning, "1 file(s) skipped") {
+		t.Fatalf("skipped file was not reported: %q", warning)
+	}
+	var chunks int
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id='gitlab:9'`).Scan(&chunks)
+	if chunks != 6 {
+		t.Fatalf("chunks=%d, want two per readable file", chunks)
+	}
+	// Six chunks must not cost six requests.
+	if model.batches != 1 || model.batchSizes[0] != 6 {
+		t.Fatalf("embeddings were not batched: batches=%d sizes=%v", model.batches, model.batchSizes)
+	}
+
+	// Every file failing is a real failure, not a silently empty index.
+	broken := &unreliableSource{files: []string{"only.md"}, broken: "only.md"}
+	err = NewWithEmbedder(s, DefaultPolicy(), model).SyncRepository(ctx, broken, "gitlab", source.Repository{ID: 10, ProjectKey: "kcb", Slug: "empty", DefaultBranch: "main"}, []source.Reference{{Name: "main", LatestCommit: "c1"}})
+	if err == nil || !strings.Contains(err.Error(), "every indexable file failed") {
+		t.Fatalf("expected a hard failure when nothing could be downloaded, got %v", err)
+	}
+}
+
 func TestFailedGenerationPreservesActiveChunksAndCleansStaging(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(ctx, "sqlite", "file::memory:?cache=shared&_foreign_keys=on")

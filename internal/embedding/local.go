@@ -12,6 +12,35 @@ import (
 type Provider interface {
 	Embed(context.Context, string) ([]float32, error)
 }
+
+// BatchEmbedder is implemented by providers that can vectorize several inputs in
+// one call. Indexers should prefer it: per-chunk requests dominate index time
+// for any remote model.
+type BatchEmbedder interface {
+	Provider
+	EmbedBatch(context.Context, []string) ([][]float32, error)
+}
+
+// EmbedAll vectorizes texts with the provider's batch API when available and
+// falls back to sequential calls otherwise.
+func EmbedAll(ctx context.Context, provider Provider, texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+	if batch, ok := provider.(BatchEmbedder); ok {
+		return batch.EmbedBatch(ctx, texts)
+	}
+	vectors := make([][]float32, len(texts))
+	for index, text := range texts {
+		vector, err := provider.Embed(ctx, text)
+		if err != nil {
+			return nil, err
+		}
+		vectors[index] = vector
+	}
+	return vectors, nil
+}
+
 type Metadata struct {
 	Provider, Model, Revision string
 	Dimensions                int
@@ -23,6 +52,13 @@ type MetadataProvider interface {
 type Local struct{}
 
 func (Local) Embed(_ context.Context, text string) ([]float32, error) { return Embed(text), nil }
+func (Local) EmbedBatch(_ context.Context, texts []string) ([][]float32, error) {
+	vectors := make([][]float32, len(texts))
+	for index, text := range texts {
+		vectors[index] = Embed(text)
+	}
+	return vectors, nil
+}
 func (Local) EmbeddingMetadata() Metadata {
 	return Metadata{Provider: "local-feature-hash", Model: "fnv-token-projection", Revision: "v1", Dimensions: Dimensions}
 }

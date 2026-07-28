@@ -74,6 +74,11 @@ for (const id of [
   "discovery-actions",
   "select-all-discovered",
   "register-selected",
+  "index-policy-dialog",
+  "index-policy-form",
+  "index-policy-extensions",
+  "index-policy-excludes",
+  "index-policy-max-bytes",
 ]) {
   assert.match(html, new RegExp(`id=["']${id}["']`), `missing ${id}`);
 }
@@ -116,6 +121,14 @@ assert.match(script, /api\/v1\/admin\/search-diagnostics/);
 assert.match(script, /settings\/\$\{category\}\/versions/);
 assert.match(script, /function markEmptyTables/);
 assert.match(script, /registerSelected/);
+// 새로고침해도 화면이 유지되어야 하므로 위치를 주소에 기록하고 복원한다.
+assert.match(script, /function rememberView/);
+assert.match(script, /function parseViewHash/);
+assert.match(script, /const initialViewHash = location\.hash/);
+assert.match(script, /openSettingCategory/);
+assert.match(script, /openAdminPanel/);
+assert.match(script, /repositories\/\$\{encodeURIComponent\(repositoryId\)\}\/policy/);
+assert.match(script, /autoRegisterWebhook/);
 assert.match(html, /search-repositories/);
 assert.match(html, /search-code/);
 assert.match(script, /api\/v1\/tools\/search-code\/test/);

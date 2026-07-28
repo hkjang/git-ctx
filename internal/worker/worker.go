@@ -67,7 +67,8 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	}
 	err = w.execute(ctx, j)
 	if err == nil {
-		_, err = w.store.DB.ExecContext(ctx, w.store.Rebind(`UPDATE index_jobs SET status='completed',error_message='',completed_at=? WHERE id=?`), time.Now().UTC(), j.ID)
+		// error_message keeps the indexer's skip warning; only the status changes.
+		_, err = w.store.DB.ExecContext(ctx, w.store.Rebind(`UPDATE index_jobs SET status='completed',completed_at=? WHERE id=?`), time.Now().UTC(), j.ID)
 		return true, err
 	}
 	delay := time.Duration(1<<min(j.Attempts, 8)) * time.Second
@@ -176,7 +177,7 @@ func (w *Worker) execute(ctx context.Context, j job) (err error) {
 		}
 		activeIndexer = indexer.NewWithEmbedder(w.store, policy, provider)
 	}
-	if err := activeIndexer.ApplyPendingJob(ctx, adapter, r.SourceType, r.Repository, []source.Reference{*selected}); err != nil {
+	if err := activeIndexer.ApplyPendingJob(ctx, adapter, r.SourceType, r.Repository, []source.Reference{*selected}, j.ID); err != nil {
 		return err
 	}
 	if w.projection != nil {

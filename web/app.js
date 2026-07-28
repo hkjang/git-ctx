@@ -107,6 +107,7 @@ const integrationSettingFields = {
     ["username", "Username (PAT 미사용 시)", "text", ""],
     ["password", "Password", "password", ""],
     ["searchTestQuery", "Code Search 검증 질의", "text", "README"],
+    ["autoRegisterWebhook", "저장소 등록 시 Webhook 자동 등록", "boolean", true],
     ["webhookSecret", "Webhook Secret", "password", ""],
     ["tlsVerify", "TLS 인증서 검증 사용", "boolean", true],
     ["caCertificate", "사내 CA PEM", "textarea", ""],
@@ -117,6 +118,7 @@ const integrationSettingFields = {
     ["baseUrl", "GitLab Base URL", "url", ""],
     ["token", "Access Token", "password", ""],
     ["searchTestQuery", "Code Search 검증 질의", "text", "README"],
+    ["autoRegisterWebhook", "저장소 등록 시 Webhook 자동 등록", "boolean", true],
     ["webhookSecret", "Webhook Secret", "password", ""],
     ["tlsVerify", "TLS 인증서 검증 사용", "boolean", true],
     ["caCertificate", "사내 CA PEM", "textarea", ""],
@@ -811,6 +813,41 @@ function configureMCPKeyScopes(roles) {
 }
 let openWorkspaceView = () => {};
 let openPersonalView = () => {};
+let openAdminPanel = () => {};
+let openSettingCategory = () => {};
+
+/* ---------------------------------------------------------------------------
+ * 화면 위치 유지
+ * 현재 작업 영역·패널·설정 탭을 주소의 fragment에 기록해, 새로고침하거나 링크를
+ * 공유해도 같은 화면이 그대로 열리게 합니다.
+ * ------------------------------------------------------------------------- */
+const viewState = { workspace: "personal", personal: "account", panel: "", category: "" };
+let restoringView = false;
+
+function rememberView(patch) {
+  Object.assign(viewState, patch);
+  if (restoringView) return;
+  const hash =
+    viewState.workspace === "admin"
+      ? `#/admin/${viewState.panel || "settings-admin"}${viewState.panel === "settings-admin" && viewState.category ? `/${viewState.category}` : ""}`
+      : `#/personal/${viewState.personal || "account"}`;
+  if (location.hash !== hash) history.replaceState(null, "", location.pathname + location.search + hash);
+}
+
+// 초기 화면을 그리는 동안 rememberView가 주소를 덮어쓰므로, 진입 시점의 값을
+// 한 번만 캡처해 두고 복원에 사용합니다.
+const initialViewHash = location.hash;
+
+function parseViewHash() {
+  const parts = initialViewHash.replace(/^#\/?/, "").split("/").filter(Boolean);
+  // 이전 버전이 사용하던 #admin/keycloak 형식도 계속 인식합니다.
+  if (parts[0] === "admin" && parts[1] === "keycloak" && parts.length === 2) {
+    return { workspace: "admin", panel: "settings-admin", category: "keycloak" };
+  }
+  if (parts[0] === "admin") return { workspace: "admin", panel: parts[1] || "", category: parts[2] || "" };
+  if (parts[0] === "personal") return { workspace: "personal", personal: parts[1] || "" };
+  return null;
+}
 function setupWorkspaceNavigation(hasAdmin) {
   $("#app-sidebar").hidden = false;
   $("#sidebar-toggle").hidden = false;
@@ -835,6 +872,7 @@ function setupWorkspaceNavigation(hasAdmin) {
       button.classList.toggle("active", active);
       button.setAttribute("aria-current", active ? "page" : "false");
     });
+    rememberView({ workspace: admin ? "admin" : "personal" });
   };
   document.querySelectorAll("[data-workspace]").forEach(
     (button) => (button.onclick = () => openWorkspaceView(button.dataset.workspace)),
@@ -842,14 +880,31 @@ function setupWorkspaceNavigation(hasAdmin) {
   openWorkspaceView("personal");
 }
 function applyInitialNavigation(hasAdmin) {
-  if ((location.pathname.startsWith("/admin") || location.hash === "#admin/keycloak") && hasAdmin) {
-    openWorkspaceView("admin");
-    document.querySelector('[data-admin-target="settings-admin"]')?.click();
-    document.querySelector('[data-setting-tab="keycloak"]')?.click();
-    if (location.hash) history.replaceState(null, "", location.pathname + location.search);
-  } else if (location.pathname.startsWith("/admin") && !hasAdmin) {
+  if (location.pathname.startsWith("/admin") && !hasAdmin) {
     $("#status").textContent = "관리자 권한이 없어 관리자 화면에 접근할 수 없습니다.";
     $("#status").classList.remove("ok");
+    return;
+  }
+  // 새로고침이나 공유 링크로 들어온 경우 기록된 화면을 그대로 복원합니다.
+  const saved = parseViewHash();
+  if (saved) {
+    restoringView = true;
+    if (saved.workspace === "admin" && hasAdmin) {
+      openWorkspaceView("admin");
+      if (saved.panel) openAdminPanel(saved.panel);
+      if (saved.category) openSettingCategory(saved.category);
+    } else {
+      openWorkspaceView("personal");
+      if (saved.personal) openPersonalView(saved.personal);
+    }
+    restoringView = false;
+    rememberView({});
+    return;
+  }
+  if (location.pathname.startsWith("/admin") && hasAdmin) {
+    openWorkspaceView("admin");
+    openAdminPanel("settings-admin");
+    openSettingCategory("keycloak");
   }
 }
 function setupPersonalNavigation() {
@@ -862,6 +917,7 @@ function setupPersonalNavigation() {
       button.classList.toggle("active", active);
       button.setAttribute("aria-current", active ? "page" : "false");
     });
+    rememberView({ personal: target });
   };
   document.querySelectorAll("[data-personal-target]").forEach(
     (button) => (button.onclick = () => openPersonalView(button.dataset.personalTarget)),
@@ -1389,7 +1445,11 @@ function setupAdmin(roles, capabilities) {
     $("#setting-test-result").hidden = true;
     $("#setting-guide-button").hidden = !GitCtxGuides.has(category);
     $("#setting-guide-button").dataset.guide = category;
+    rememberView({ category });
     await loadCurrentSetting(category);
+  };
+  openSettingCategory = (category) => {
+    if (document.querySelector(`[data-setting-tab="${category}"]`)) selectCategory(category);
   };
   document.querySelectorAll("[data-setting-tab]").forEach(
     (tab) => (tab.onclick = () => selectCategory(tab.dataset.settingTab)),
@@ -1752,6 +1812,7 @@ function setupOps(capabilities) {
   refreshOps(capabilities);
   refreshSecurity(capabilities);
   refreshBackups(capabilities);
+  setupIndexPolicyDialog();
   $("#refresh-setup-status").onclick = refreshSetupStatus;
   refreshSetupStatus();
   if (capabilities.qualityWrite) {
@@ -1796,6 +1857,10 @@ function setupAdminNavigation(capabilities) {
     document.querySelectorAll("[data-admin-target]").forEach((button) => button.classList.toggle("active", button.dataset.adminTarget === target));
     if (target === "database-admin-section") refreshDatabase();
     if (target === "users-admin-section") refreshAdminUsers();
+    rememberView({ panel: target });
+  };
+  openAdminPanel = (target) => {
+    if (document.querySelector(`[data-admin-target="${target}"]`)) open(target);
   };
   document.querySelectorAll("[data-admin-target]").forEach(
     (button) => (button.onclick = () => open(button.dataset.adminTarget)),
@@ -2220,7 +2285,12 @@ async function refreshOps(capabilities = activeCapabilities) {
         }),
     );
     $("#repositories").innerHTML =
-      `<table><thead><tr><th>소스</th><th>Library ID</th><th>기본 브랜치</th><th>마지막 색인</th><th></th></tr></thead><tbody>${repos.map((r) => `<tr><td>${esc(r.sourceType)}</td><td>${esc(r.libraryId)}</td><td>${esc(r.defaultBranch)}</td><td>${date(r.indexedAt)}</td><td><button data-index="${esc(r.id)}">재색인</button></td></tr>`).join("")}</tbody></table>`;
+      `<table><thead><tr><th>소스</th><th>Library ID</th><th>기본 브랜치</th><th>마지막 색인</th><th></th></tr></thead><tbody>${repos.map((r) => `<tr><td>${esc(r.sourceType)}</td><td>${esc(r.libraryId)}</td><td>${esc(r.defaultBranch)}</td><td>${date(r.indexedAt)}</td><td><button class="secondary" data-policy="${esc(r.id)}" data-policy-label="${esc(r.libraryId)}">색인 정책</button> <button data-index="${esc(r.id)}">재색인</button></td></tr>`).join("")}</tbody></table>`;
+    $$("[data-policy]").forEach(
+      (button) =>
+        (button.hidden = !capabilities.sourceWrite) ||
+        (button.onclick = () => openIndexPolicy(button.dataset.policy, button.dataset.policyLabel)),
+    );
     $("#freshness").innerHTML =
       `<div class="notice ${freshness.staleCount ? "error" : "ok"}">SLO ${freshness.sloMinutes}분 · 지연/미색인 ${freshness.staleCount}/${freshness.repositoryCount}</div><table><thead><tr><th>소스/Library</th><th>Ref/Commit</th><th>마지막 색인</th><th>지연</th><th>상태</th></tr></thead><tbody>${(freshness.repositories || []).map((item) => `<tr><td>${esc(item.sourceType)}<br><code>${esc(item.libraryId)}</code></td><td>${esc(item.ref)}<br><small>${esc(item.commitId || "-")}</small></td><td>${date(item.indexedAt?.Time || item.indexedAt)}</td><td>${item.ageMinutes < 0 ? "-" : `${item.ageMinutes}분`}</td><td><span class="state ${esc(item.status)}">${esc(item.status)}</span></td></tr>`).join("")}</tbody></table>`;
     document.querySelectorAll("[data-index]").forEach(
@@ -2254,9 +2324,76 @@ async function refreshOps(capabilities = activeCapabilities) {
         }),
     );
     markEmptyTables();
+    scheduleOpsRefresh(jobs, capabilities);
   } catch (e) {
     showAdmin(e.message, false);
   }
+}
+
+// 색인 작업이 대기·실행 중일 때만 화면을 주기적으로 갱신합니다. 작업이 끝나면
+// 타이머를 멈춰 유휴 상태에서 불필요한 요청을 만들지 않습니다.
+let opsRefreshTimer = null;
+function scheduleOpsRefresh(jobs, capabilities) {
+  clearTimeout(opsRefreshTimer);
+  const running = jobs.some((job) => job.status === "pending" || job.status === "running");
+  if (!running || $("#source-admin-section").hidden) return;
+  opsRefreshTimer = setTimeout(() => refreshOps(capabilities), 5000);
+}
+
+// openIndexPolicy는 저장소별 색인 대상 확장자와 제외 경로를 편집합니다. 기본
+// 정책에 없는 언어를 쓰는 저장소가 "완료됐는데 0건"이 되는 상황을 이 화면에서
+// 바로 해결할 수 있습니다.
+let activeIndexPolicy = null;
+async function openIndexPolicy(repositoryId, label) {
+  const dialog = $("#index-policy-dialog");
+  activeIndexPolicy = repositoryId;
+  $("#index-policy-description").textContent = `${label} · 저장 후 즉시 재색인 작업을 생성합니다.`;
+  try {
+    const policy = await api(`/api/v1/admin/repositories/${encodeURIComponent(repositoryId)}/policy`);
+    $("#index-policy-extensions").value = (policy.includeExtensions || []).join(",");
+    $("#index-policy-excludes").value = (policy.excludePrefixes || []).join(",");
+    $("#index-policy-max-bytes").value = policy.maxFileBytes || 1048576;
+    dialog.showModal();
+  } catch (error) {
+    reportError(error, "색인 정책");
+  }
+}
+
+function setupIndexPolicyDialog() {
+  const dialog = $("#index-policy-dialog");
+  $("#index-policy-close").onclick = () => dialog.close();
+  $("#index-policy-cancel").onclick = () => dialog.close();
+  $("#index-policy-defaults").onclick = async () => {
+    // 서버 기본 정책은 등록되지 않은 저장소를 조회하면 그대로 반환됩니다.
+    try {
+      const defaults = await api("/api/v1/admin/index-policy-defaults");
+      $("#index-policy-extensions").value = (defaults.includeExtensions || []).join(",");
+      $("#index-policy-excludes").value = (defaults.excludePrefixes || []).join(",");
+      $("#index-policy-max-bytes").value = defaults.maxFileBytes || 1048576;
+    } catch (error) {
+      reportError(error, "기본 정책");
+    }
+  };
+  dialog.querySelector("form").onsubmit = async (event) => {
+    event.preventDefault();
+    const list = (value) => value.split(",").map((item) => item.trim()).filter(Boolean);
+    try {
+      await api(`/api/v1/admin/repositories/${encodeURIComponent(activeIndexPolicy)}/policy`, {
+        method: "PUT",
+        body: JSON.stringify({
+          includeExtensions: list($("#index-policy-extensions").value),
+          excludePrefixes: list($("#index-policy-excludes").value),
+          maxFileBytes: Number($("#index-policy-max-bytes").value),
+        }),
+      });
+      await api(`/api/v1/admin/repositories/${encodeURIComponent(activeIndexPolicy)}/index`, { method: "POST", body: "{}" });
+      dialog.close();
+      showAdmin("색인 정책을 저장하고 재색인 작업을 생성했습니다.", true);
+      refreshOps(activeCapabilities);
+    } catch (error) {
+      reportError(error, "색인 정책 저장");
+    }
+  };
 }
 async function refreshSecurity(capabilities = activeCapabilities) {
   try {

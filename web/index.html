@@ -583,6 +583,25 @@
         <button id="guide-dismiss" type="button">닫기</button>
       </div>
     </dialog>
+    <dialog id="index-policy-dialog" class="app-dialog">
+      <form id="index-policy-form">
+        <div class="dialog-head">
+          <strong>색인 정책</strong>
+          <button id="index-policy-close" type="button" aria-label="닫기">×</button>
+        </div>
+        <p id="index-policy-description" class="field-help"></p>
+        <div class="form-row">
+          <label class="wide">색인할 확장자 (쉼표 구분)<textarea id="index-policy-extensions" rows="4" placeholder=".md,.go,.ts"></textarea></label>
+          <label class="wide">제외할 경로 Prefix (쉼표 구분)<input id="index-policy-excludes" placeholder="node_modules/,vendor/" /></label>
+          <label>파일 최대 크기(Byte)<input id="index-policy-max-bytes" type="number" min="1024" max="10485760" /></label>
+          <div class="button-row"><button id="index-policy-defaults" type="button" class="secondary">기본값 복원</button></div>
+        </div>
+        <div class="dialog-foot">
+          <button type="submit">저장 후 재색인</button>
+          <button id="index-policy-cancel" type="button" class="secondary">취소</button>
+        </div>
+      </form>
+    </dialog>
     <dialog id="key-scope-dialog" class="app-dialog">
       <form id="key-scope-form">
         <div class="dialog-head">

@@ -109,6 +109,52 @@ func TestRunOnceClaimsAndCompletesPendingJob(t *testing.T) {
 	if !projected {
 		t.Fatal("completed job did not update the search projection")
 	}
+	// The operations screen reads this row: a worker job that indexed files must
+	// not report zero, otherwise a healthy index looks like it never ran.
+	var files int
+	if err = db.DB.QueryRow(`SELECT files_processed FROM index_jobs WHERE id='j1'`).Scan(&files); err != nil || files != 1 {
+		t.Fatalf("files_processed=%d err=%v", files, err)
+	}
+}
+
+// unreadableSource serves one file and fails another, like a repository with an
+// LFS pointer or a file removed between listing and download.
+type unreadableSource struct{ fakeSource }
+
+func (unreadableSource) ListFiles(context.Context, source.RepositoryRef, string) ([]source.File, error) {
+	return []source.File{{Path: "README.md"}, {Path: "gone.md"}}, nil
+}
+func (unreadableSource) GetFile(_ context.Context, _ source.RepositoryRef, _ string, path string) ([]byte, error) {
+	if path == "gone.md" {
+		return nil, errors.New("404 file not found")
+	}
+	return []byte("# Title\ncontent"), nil
+}
+
+func TestWorkerJobReportsSkippedFilesInsteadOfFailing(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:worker-skips?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('gitlab:3','core','docs','Docs','gitlab','3','/gitlab~core/docs','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO index_jobs(id,repository_id,ref_name,kind,status) VALUES('j2','gitlab:3','main','initial','pending')`)
+	w := New(db, indexer.New(db, indexer.DefaultPolicy()), func(context.Context, string) (source.RepositorySource, error) { return unreadableSource{}, nil })
+	if ok, runErr := w.RunOnce(ctx); !ok || runErr != nil {
+		t.Fatalf("ok=%v err=%v", ok, runErr)
+	}
+	var status, message string
+	var files int
+	if err = db.DB.QueryRow(`SELECT status,files_processed,error_message FROM index_jobs WHERE id='j2'`).Scan(&status, &files, &message); err != nil {
+		t.Fatal(err)
+	}
+	if status != "completed" || files != 1 {
+		t.Fatalf("status=%s files=%d", status, files)
+	}
+	if !strings.Contains(message, "gone.md") {
+		t.Fatalf("the skipped file must stay visible on the job: %q", message)
+	}
 }
 
 func TestProjectionFailureRetriesIndexJob(t *testing.T) {

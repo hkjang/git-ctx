@@ -403,6 +403,9 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/admin/repositories", a.authorize(http.HandlerFunc(a.registerRepository), "source-admin"))
 	a.mux.Handle("POST /api/v1/admin/repositories/{id}/index", a.authorize(http.HandlerFunc(a.enqueueIndex), "source-admin"))
 	a.mux.Handle("GET /api/v1/admin/repositories/{id}/refs", a.authorize(http.HandlerFunc(a.repositoryRefs), "source-admin", "readonly-operator"))
+	a.mux.Handle("GET /api/v1/admin/index-policy-defaults", a.authorize(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		jsonOut(w, http.StatusOK, indexer.DefaultPolicy())
+	}), "source-admin", "readonly-operator"))
 	a.mux.Handle("GET /api/v1/admin/repositories/{id}/policy", a.authorize(http.HandlerFunc(a.getRepositoryPolicy), "source-admin", "readonly-operator"))
 	a.mux.Handle("PUT /api/v1/admin/repositories/{id}/policy", a.authorize(http.HandlerFunc(a.putRepositoryPolicy), "source-admin"))
 	a.mux.Handle("GET /api/v1/admin/index-jobs", a.authorize(http.HandlerFunc(a.indexJobs), "source-admin", "readonly-operator"))
@@ -3617,7 +3620,9 @@ func (a *App) registerRepository(w http.ResponseWriter, r *http.Request) {
 	if autoWebhook && alreadyRegistered == 0 {
 		secret, _ := settings["webhookSecret"].(string)
 		if secret == "" {
-			problem(w, 400, "webhook_secret_required", "webhookSecret is required when autoRegisterWebhook is enabled")
+			problem(w, http.StatusBadRequest, "webhook_secret_required", fmt.Sprintf(
+				"Registering a %s repository automatically installs a push webhook, which needs a shared secret. Set 'Webhook Secret' in the %s setting, or turn off 'Webhook 자동 등록' to register without one.",
+				in.SourceType, in.SourceType))
 			return
 		}
 		adapter, adapterErr := sourceAdapterFromMap(in.SourceType, settings)

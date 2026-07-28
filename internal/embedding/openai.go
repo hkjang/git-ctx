@@ -42,7 +42,66 @@ func NewOpenAI(cfg OpenAIConfig) (Provider, error) {
 	return &OpenAI{endpoint: strings.TrimSuffix(base.String(), "/") + "/v1/embeddings", model: cfg.Model, key: cfg.APIKey, client: client}, nil
 }
 func (o *OpenAI) Embed(ctx context.Context, text string) ([]float32, error) {
-	raw, _ := json.Marshal(map[string]any{"model": o.model, "input": text})
+	vectors, err := o.EmbedBatch(ctx, []string{text})
+	if err != nil {
+		return nil, err
+	}
+	return vectors[0], nil
+}
+
+// EmbedBatch sends several inputs in one request. Indexing a repository creates
+// thousands of chunks, and one HTTP round trip per chunk turns a normal sized
+// repository into an hours-long job that fails on the first hiccup.
+func (o *OpenAI) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+	var lastErr error
+	// Embedding endpoints commonly rate limit or briefly fail under load. A few
+	// bounded retries keep one transient response from failing a whole index job.
+	for attempt := 0; attempt < embeddingAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(1<<attempt) * embeddingRetryBase):
+			}
+		}
+		vectors, err := o.embedOnce(ctx, texts)
+		if err == nil {
+			return vectors, nil
+		}
+		lastErr = err
+		if !retryableEmbeddingError(err) {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+const (
+	embeddingAttempts  = 3
+	embeddingRetryBase = 500 * time.Millisecond
+)
+
+func retryableEmbeddingError(err error) bool {
+	var status *statusError
+	if errors.As(err, &status) {
+		return status.code == http.StatusTooManyRequests || status.code >= 500
+	}
+	// Transport failures (timeout, reset connection) are always worth retrying.
+	return true
+}
+
+type statusError struct {
+	code int
+	body string
+}
+
+func (e *statusError) Error() string { return fmt.Sprintf("embedding API %d: %s", e.code, e.body) }
+
+func (o *OpenAI) embedOnce(ctx context.Context, texts []string) ([][]float32, error) {
+	raw, _ := json.Marshal(map[string]any{"model": o.model, "input": texts})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.endpoint, bytes.NewReader(raw))
 	if err != nil {
 		return nil, err
@@ -58,21 +117,39 @@ func (o *OpenAI) Embed(ctx context.Context, text string) ([]float32, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("embedding API %s: %s", resp.Status, string(body))
+		return nil, &statusError{code: resp.StatusCode, body: string(body)}
 	}
 	var out struct {
 		Data []struct {
+			Index     int       `json:"index"`
 			Embedding []float32 `json:"embedding"`
 		} `json:"data"`
 	}
-	if err = json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&out); err != nil {
+	if err = json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(&out); err != nil {
 		return nil, err
 	}
-	if len(out.Data) == 0 || len(out.Data[0].Embedding) == 0 {
-		return nil, errors.New("embedding API returned no vector")
+	if len(out.Data) != len(texts) {
+		return nil, fmt.Errorf("embedding API returned %d vectors for %d inputs", len(out.Data), len(texts))
 	}
-	normalize(out.Data[0].Embedding)
-	return out.Data[0].Embedding, nil
+	vectors := make([][]float32, len(texts))
+	for position, item := range out.Data {
+		// The index field is authoritative when the server reorders results.
+		target := item.Index
+		if target < 0 || target >= len(texts) {
+			target = position
+		}
+		if len(item.Embedding) == 0 {
+			return nil, errors.New("embedding API returned an empty vector")
+		}
+		normalize(item.Embedding)
+		vectors[target] = item.Embedding
+	}
+	for _, vector := range vectors {
+		if len(vector) == 0 {
+			return nil, errors.New("embedding API returned no vector for one input")
+		}
+	}
+	return vectors, nil
 }
 func (o *OpenAI) EmbeddingMetadata() Metadata {
 	return Metadata{Provider: "openai-compatible", Model: o.model, Revision: o.endpoint}
