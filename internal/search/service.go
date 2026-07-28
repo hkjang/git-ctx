@@ -1423,6 +1423,129 @@ func (s *Service) fileBody(ctx context.Context, repositoryID, sourceType, projec
 	return string(raw), "remote", []string{"remote: read live from the source server because this file has no indexed content."}
 }
 
+// ChangeRequestResult is one merge or pull request with the repository it
+// belongs to.
+type ChangeRequestResult struct {
+	LibraryID, SourceType                 string
+	ID, Title, Description, State, Author string
+	SourceRef, TargetRef, URL             string
+	CreatedAt, UpdatedAt                  time.Time
+}
+
+type ChangeRequestSearch struct {
+	Query       string
+	Requests    []ChangeRequestResult
+	Diagnostics []string
+}
+
+// maxChangeRequestRepositories bounds how many repositories are queried when no
+// scope is given, because each one is a remote round trip.
+const maxChangeRequestRepositories = 8
+
+// SearchChangeRequests finds GitLab merge requests and Bitbucket pull requests.
+// Commits say what changed; the request that carried them says why, which is
+// what an agent needs when it asks about a design decision or a rollout.
+func (s *Service) SearchChangeRequests(ctx context.Context, principals []string, query, libraryID, repository, state string, limit int) (ChangeRequestSearch, error) {
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	result := ChangeRequestSearch{Query: strings.TrimSpace(query), Requests: []ChangeRequestResult{}}
+	if len(principals) == 0 {
+		result.Diagnostics = append(result.Diagnostics, "acl: no source principal is mapped to this account, so no repository can be authorized.")
+		return result, nil
+	}
+	if s.sources == nil {
+		return result, errors.New("no source connector is configured")
+	}
+	join, predicate, args := repositoryACL(principals)
+	statement := `SELECT DISTINCT r.library_id,r.source_type,r.project_key,r.slug
+FROM repositories r ` + join + `
+WHERE r.enabled=1 AND ` + predicate
+	if libraryID != "" {
+		base, _, ok := splitLibraryID(libraryID)
+		if !ok {
+			return ChangeRequestSearch{}, errors.New("libraryId must use /organization/project[/version]")
+		}
+		statement += ` AND r.library_id=?`
+		args = append(args, base)
+	}
+	if repository != "" {
+		statement += ` AND (LOWER(r.slug)=LOWER(?) OR LOWER(r.library_id)=LOWER(?))`
+		args = append(args, repository, repository)
+	}
+	statement += ` ORDER BY r.library_id LIMIT ` + fmt.Sprint(maxChangeRequestRepositories)
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
+	if err != nil {
+		return ChangeRequestSearch{}, err
+	}
+	type target struct{ libraryID, sourceType, project, slug string }
+	var targets []target
+	for rows.Next() {
+		var item target
+		if rows.Scan(&item.libraryID, &item.sourceType, &item.project, &item.slug) == nil {
+			targets = append(targets, item)
+		}
+	}
+	rows.Close()
+	if len(targets) == 0 {
+		result.Diagnostics = append(result.Diagnostics, "acl: no accessible repository matched the requested scope.")
+		return result, nil
+	}
+	found := make([][]source.ChangeRequest, len(targets))
+	errs := make([]error, len(targets))
+	slots := make(chan struct{}, sourceQueryConcurrency)
+	var wait sync.WaitGroup
+	for index, item := range targets {
+		wait.Add(1)
+		slots <- struct{}{}
+		go func(index int, item target) {
+			defer wait.Done()
+			defer func() { <-slots }()
+			adapter, adapterErr := s.sources(ctx, item.sourceType)
+			if adapterErr != nil {
+				errs[index] = adapterErr
+				return
+			}
+			searcher, ok := adapter.(source.ChangeRequestSearcher)
+			if !ok {
+				errs[index] = fmt.Errorf("%s does not expose merge requests", item.sourceType)
+				return
+			}
+			found[index], errs[index] = searcher.SearchChangeRequests(ctx, source.RepositoryRef{ProjectKey: item.project, Slug: item.slug}, query, state, limit)
+		}(index, item)
+	}
+	wait.Wait()
+	failures := 0
+	for index, item := range targets {
+		if errs[index] != nil {
+			failures++
+			continue
+		}
+		for _, request := range found[index] {
+			if len(result.Requests) >= limit {
+				break
+			}
+			// Descriptions are user-written and can paste a token by accident.
+			description, finding := contentsecurity.Sanitize(request.Description)
+			if finding == "private_key" {
+				description = ""
+			}
+			if len(description) > 4000 {
+				description = description[:4000]
+			}
+			result.Requests = append(result.Requests, ChangeRequestResult{
+				LibraryID: item.libraryID, SourceType: item.sourceType, ID: request.ID, Title: request.Title,
+				Description: description, State: request.State, Author: request.Author,
+				SourceRef: request.SourceRef, TargetRef: request.TargetRef, URL: request.URL,
+				CreatedAt: request.CreatedAt, UpdatedAt: request.UpdatedAt,
+			})
+		}
+	}
+	sort.SliceStable(result.Requests, func(i, j int) bool { return result.Requests[i].UpdatedAt.After(result.Requests[j].UpdatedAt) })
+	result.Diagnostics = append(result.Diagnostics, fmt.Sprintf("searched %d repository(ies); %d could not be queried.", len(targets), failures))
+	return result, nil
+}
+
 // CommitEntry is one commit that touched a path.
 type CommitEntry struct {
 	ID, DisplayID, Message, Author, AuthorEmail, URL string

@@ -13,6 +13,8 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - 파일명·경로 글롭으로 위치를 찾는 `find-file`, 색인 전 저장소는 원격 tree 조회로 보완
 - 파일 본문·줄 범위를 반환하는 `read-file`, 미색인 파일은 소스 서버 즉시 조회와 Secret 마스킹
 - 디렉터리 탐색 `list-directory`와 커밋 이력 `get-file-history` (GitLab·Bitbucket 공통)
+- 변경 배경을 설명하는 `search-merge-requests` (GitLab MR·Bitbucket PR)
+- 색인 최종 실패 시 운영 역할 사용자에게 인앱 알림
 - MCP `initialize` 응답의 도구 선택 지침으로 클라이언트 모델의 첫 호출 정확도 개선
 - 언어·디렉터리·주요 파일·진입점을 요약하는 ACL 기반 `get-repository-map`
 - import·호출·데이터 관계를 색인하는 `trace-dependencies`

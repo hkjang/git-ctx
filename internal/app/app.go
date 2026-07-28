@@ -403,6 +403,7 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/tools/search-code/test", a.authenticate(http.HandlerFunc(a.testSearchCode)))
 	a.mux.Handle("POST /api/v1/tools/find-file/test", a.authenticate(http.HandlerFunc(a.testFindFile)))
 	a.mux.Handle("POST /api/v1/tools/read-file/test", a.authenticate(http.HandlerFunc(a.testReadFile)))
+	a.mux.Handle("POST /api/v1/tools/merge-requests/test", a.authenticate(http.HandlerFunc(a.testMergeRequests)))
 	a.mux.Handle("POST /api/v1/tools/file-history/test", a.authenticate(http.HandlerFunc(a.testFileHistory)))
 	a.mux.Handle("POST /api/v1/tools/directory/test", a.authenticate(http.HandlerFunc(a.testDirectory)))
 	a.mux.Handle("POST /api/v1/tools/repository-map/test", a.authenticate(http.HandlerFunc(a.testRepositoryMap)))
@@ -1496,6 +1497,40 @@ func (a *App) testReadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, http.StatusOK, file)
+}
+
+func (a *App) testMergeRequests(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	if p.KeyID != "" && !stringContains(p.Scopes, "search-merge-requests") {
+		problem(w, http.StatusForbidden, "forbidden", "API key is not allowed to call search-merge-requests")
+		return
+	}
+	var in struct {
+		Query      string `json:"query"`
+		LibraryID  string `json:"libraryId"`
+		Repository string `json:"repository"`
+		State      string `json:"state"`
+		Limit      int    `json:"limit"`
+	}
+	if decode(r, &in) != nil {
+		problem(w, http.StatusBadRequest, "invalid_request", "Invalid JSON")
+		return
+	}
+	result, err := a.search.SearchChangeRequests(r.Context(), searchPrincipals(p), in.Query, in.LibraryID, in.Repository, in.State, in.Limit)
+	if err != nil {
+		problem(w, http.StatusBadRequest, "search_failed", err.Error())
+		return
+	}
+	if p.KeyID != "" && len(p.AllowedRepositories) > 0 {
+		requests := result.Requests[:0]
+		for _, item := range result.Requests {
+			if repositoryAllowed(item.LibraryID, p.AllowedRepositories) {
+				requests = append(requests, item)
+			}
+		}
+		result.Requests = requests
+	}
+	jsonOut(w, http.StatusOK, result)
 }
 
 func (a *App) testFileHistory(w http.ResponseWriter, r *http.Request) {

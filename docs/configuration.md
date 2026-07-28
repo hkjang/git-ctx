@@ -216,6 +216,18 @@ MCP `initialize` 응답에는 `instructions` 가 포함된다. 어떤 질문에 
 써야 하는지, 응답의 `Notes` 를 어떻게 읽어야 하는지를 클라이언트 모델에 한 번만
 알려 주어 도구 선택 오류를 줄인다.
 
+## 변경 요청 검색
+
+`search-merge-requests`는 GitLab 병합 요청(`/merge_requests?search=`)과 Bitbucket
+풀 리퀘스트(`/pull-requests`)를 함께 검색한다(migration 033). Bitbucket 6.x는 PR
+텍스트 검색 API가 없으므로 제목·설명을 서버에서 받아 로컬로 필터링한다. 범위를 지정
+하지 않으면 접근 가능한 저장소 중 최대 8곳을 병렬 조회하며, 설명은 Secret 마스킹 후
+4,000자로 제한한다.
+
+색인 작업이 재시도 한도를 모두 소진해 최종 실패하면 `platform-admin`·`source-admin`
+사용자에게 인앱 알림을 생성한다. 같은 저장소·ref는 하나의 알림으로 갱신되므로 재시도
+루프가 알림을 반복 생성하지 않는다.
+
 ## MCP 코드 검색 동작
 
 `search-code`는 저장소 이름 검색과 파일 내용 검색을 한 번에 수행하는 기본 진입점이다.

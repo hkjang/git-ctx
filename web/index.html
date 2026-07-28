@@ -116,6 +116,8 @@
                   <dd>파일명·경로 패턴 검색과 파일 본문(줄 범위) 조회</dd>
                   <dt>list-directory / get-file-history</dt>
                   <dd>디렉터리 탐색과 파일 커밋 이력 조회</dd>
+                  <dt>search-merge-requests</dt>
+                  <dd>GitLab MR·Bitbucket PR 검색으로 변경의 배경과 결정 근거 확인</dd>
                   <dt>get-repository-map</dt>
                   <dd>저장소 언어·구조·진입점과 주요 설정 파일 조회</dd>
                   <dt>find-symbol / get-symbol-context</dt>
@@ -156,6 +158,7 @@
                   <label><input type="checkbox" name="scope" value="read-file" checked /> read-file</label>
                   <label><input type="checkbox" name="scope" value="get-file-history" checked /> get-file-history</label>
                   <label><input type="checkbox" name="scope" value="list-directory" checked /> list-directory</label>
+                  <label><input type="checkbox" name="scope" value="search-merge-requests" checked /> search-merge-requests</label>
                   <label><input type="checkbox" name="scope" value="get-repository-map" checked /> get-repository-map</label>
                   <label><input type="checkbox" name="scope" value="find-symbol" checked /> find-symbol</label>
                   <label><input type="checkbox" name="scope" value="get-symbol-context" checked /> get-symbol-context</label>
@@ -242,6 +245,15 @@
                   <label>Library ID (선택)<input name="libraryId" placeholder="/kcb/clustara" /></label>
                   <label>Ref (선택)<input name="ref" placeholder="main" /></label>
                   <div class="wide button-row"><button type="submit">이력 보기</button></div>
+                </form>
+              </article>
+              <article class="card">
+                <h3>Merge / Pull Requests</h3>
+                <form id="merge-request-form" class="form-row">
+                  <label class="wide">검색어 (선택)<input name="query" placeholder="인증 리팩터링" /></label>
+                  <label>Library ID (선택)<input name="libraryId" placeholder="/kcb/clustara" /></label>
+                  <label>상태<select name="state"><option value="all">전체</option><option value="open">열림</option><option value="merged">병합됨</option><option value="closed">닫힘</option></select></label>
+                  <div class="wide button-row"><button type="submit">MR·PR 검색</button></div>
                 </form>
               </article>
               <article class="card">

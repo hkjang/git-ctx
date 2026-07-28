@@ -202,7 +202,7 @@ Choosing a tool:
 - Looking for a file by name or extension: find-file (Dockerfile, *.tf, **/migrations/*.sql).
 - Need the file itself: read-file, optionally with startLine and endLine.
 - Orienting in an unknown repository: list-directory, then get-repository-map.
-- "Why is this like this", "when did this change": get-file-history.
+- "Why is this like this", "when did this change": get-file-history for commits, search-merge-requests for the reasoning behind them.
 - Exact identifier: find-symbol, then get-symbol-context.
 - Documentation for a known library id: query-docs.
 - search-repositories returns repository names only, never file contents.
@@ -330,6 +330,13 @@ func Catalog() []map[string]any {
 				"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"},
 				"startLine":  map[string]any{"type": "integer", "minimum": 1, "description": "Optional first line, 1-based"},
 				"endLine":    map[string]any{"type": "integer", "minimum": 1, "description": "Optional last line, inclusive"}}}},
+		{"name": "search-merge-requests", "description": "Searches GitLab merge requests and Bitbucket pull requests. Use it for why-questions: the reasoning, trade-offs and rollout notes live in the request description, not in the code or the commit subject.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
+				"query":      map[string]string{"type": "string", "description": "Text matched against title and description"},
+				"libraryId":  map[string]string{"type": "string", "description": "Optional library scope"},
+				"repository": map[string]string{"type": "string", "description": "Optional repository slug or library ID"},
+				"state":      map[string]any{"type": "string", "enum": []string{"all", "open", "merged", "closed"}},
+				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}}},
 		{"name": "get-file-history", "description": "Lists the commits that changed a file, newest first, with author, date and message. Use it to explain why code looks the way it does, when a behaviour changed, or who to ask.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"path"}, "properties": map[string]any{
 				"path":       map[string]string{"type": "string", "description": "Repository-relative file path"},
@@ -550,6 +557,24 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 		}
 		if err == nil {
 			text = formatFileContent(file)
+		}
+	case "search-merge-requests":
+		var requests search.ChangeRequestSearch
+		requests, err = s.search.SearchChangeRequests(r.Context(), principalACLs(p), stringArg(params.Arguments, "query"),
+			stringArg(params.Arguments, "libraryId"), stringArg(params.Arguments, "repository"), stringArg(params.Arguments, "state"),
+			intArg(params.Arguments, "limit", 20))
+		if err == nil {
+			if len(p.AllowedRepositories) > 0 {
+				allowed := requests.Requests[:0]
+				for _, item := range requests.Requests {
+					if libraryAllowed(item.LibraryID, p.AllowedRepositories) {
+						allowed = append(allowed, item)
+					}
+				}
+				requests.Requests = allowed
+			}
+			empty = len(requests.Requests) == 0
+			text = formatChangeRequests(requests)
 		}
 	case "get-file-history":
 		var history search.FileHistory
@@ -1121,6 +1146,35 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func formatChangeRequests(result search.ChangeRequestSearch) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Merge and Pull Requests\n\nQuery: `%s`\nMatches: %d\n", result.Query, len(result.Requests))
+	for _, item := range result.Requests {
+		fmt.Fprintf(&b, "\n### %s %s — %s\n\n%s · %s · `%s` → `%s`",
+			item.ID, item.Title, item.State, item.LibraryID, item.Author, item.SourceRef, item.TargetRef)
+		if !item.UpdatedAt.IsZero() {
+			fmt.Fprintf(&b, " · updated %s", item.UpdatedAt.UTC().Format("2006-01-02"))
+		}
+		b.WriteString("\n")
+		if description := strings.TrimSpace(item.Description); description != "" {
+			fmt.Fprintf(&b, "\n%s\n", description)
+		}
+		if item.URL != "" {
+			fmt.Fprintf(&b, "\n%s\n", item.URL)
+		}
+	}
+	if len(result.Requests) == 0 {
+		b.WriteString("\nNo merge or pull request matched. Try a broader term, state \"all\", or get-file-history for the commits themselves.\n")
+	}
+	if len(result.Diagnostics) > 0 {
+		b.WriteString("\n### Notes\n")
+		for _, diagnostic := range result.Diagnostics {
+			fmt.Fprintf(&b, "- %s\n", diagnostic)
+		}
+	}
+	return b.String()
 }
 
 func formatFileHistory(history search.FileHistory) string {

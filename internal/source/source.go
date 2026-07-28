@@ -58,6 +58,22 @@ type Commit struct {
 	URL                            string
 }
 
+// ChangeRequest is a GitLab merge request or a Bitbucket pull request. The
+// description and review trail carry the rationale that commits omit.
+type ChangeRequest struct {
+	ID                           string
+	Number                       int64
+	Title, Description, State    string
+	Author, SourceRef, TargetRef string
+	URL                          string
+	CreatedAt, UpdatedAt         time.Time
+}
+
+// ChangeRequestSearcher searches merge or pull requests of one repository.
+type ChangeRequestSearcher interface {
+	SearchChangeRequests(ctx context.Context, repo RepositoryRef, query, state string, limit int) ([]ChangeRequest, error)
+}
+
 // HistoryProvider returns the commits that touched a path. "Why is this code
 // like this" is a normal debugging question and needs history, not content.
 type HistoryProvider interface {

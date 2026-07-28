@@ -123,8 +123,31 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	if updateErr != nil {
 		return true, updateErr
 	}
+	if status == "failed" {
+		w.notifyFailure(ctx, j, err)
+	}
 	return true, err
 }
+
+// notifyFailure tells the administrators that a repository stopped indexing.
+// The operations screen shows it too, but nobody watches a screen all day and a
+// silently failed repository is exactly what makes searches look broken.
+func (w *Worker) notifyFailure(ctx context.Context, j job, cause error) {
+	var libraryID string
+	if err := w.store.DB.QueryRowContext(ctx, w.store.Rebind(`SELECT library_id FROM repositories WHERE id=?`), j.RepositoryID).Scan(&libraryID); err != nil {
+		libraryID = j.RepositoryID
+	}
+	title := "Repository indexing failed"
+	message := fmt.Sprintf("%s (%s) stopped after %d attempts: %s", libraryID, j.RefName, j.Attempts, truncate(cause.Error(), 400))
+	// One notification per repository and ref; a later success or a manual retry
+	// creates a new job id, so operators are not spammed by the retry loop.
+	_, _ = w.store.DB.ExecContext(ctx, w.store.Rebind(`INSERT INTO notifications(id,user_id,notification_type,resource_id,title,message)
+SELECT ? || '-' || u.id,u.id,'index_job_failed',?,?,? FROM users u JOIN user_roles r ON r.user_id=u.id
+WHERE u.status='active' AND r.role_code IN ('platform-admin','source-admin')
+ON CONFLICT(user_id,notification_type,resource_id) DO UPDATE SET title=excluded.title,message=excluded.message,read_at=NULL,created_at=CURRENT_TIMESTAMP`),
+		fmt.Sprintf("%d", time.Now().UnixNano()), j.RepositoryID+":"+j.RefName, title, message)
+}
+
 func (w *Worker) claim(ctx context.Context) (job, bool, error) {
 	var j job
 	if w.store.Driver() == "postgres" {

@@ -762,6 +762,28 @@ function setupKnowledgeSearch() {
       reportError(error, "파일 이력");
     }
   };
+  $("#merge-request-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.currentTarget));
+    output.textContent = "MR·PR을 검색하는 중…";
+    try {
+      const result = await api("/api/v1/tools/merge-requests/test", { method: "POST", body: JSON.stringify({ ...data, limit: 20 }) });
+      const lines = [`검색어: ${result.Query || "(전체)"} · ${rows(result.Requests).length}건`, ""];
+      for (const item of rows(result.Requests)) {
+        lines.push(`${item.ID} [${item.State}] ${item.Title}`);
+        lines.push(`  ${item.LibraryID} · ${item.Author} · ${item.SourceRef} → ${item.TargetRef} · ${date(item.UpdatedAt)}`);
+        const summary = String(item.Description || "").split("\n").slice(0, 3).join(" ").trim();
+        if (summary) lines.push(`  ${summary}`);
+        if (item.URL) lines.push(`  ${item.URL}`);
+        lines.push("");
+      }
+      for (const diagnostic of rows(result.Diagnostics)) lines.push(`· ${diagnostic}`);
+      output.textContent = lines.join("\n");
+    } catch (error) {
+      output.textContent = error.message;
+      reportError(error, "MR·PR 검색");
+    }
+  };
   $("#repository-map-form").onsubmit = async (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.currentTarget));
@@ -831,7 +853,7 @@ let currentRoleSet = new Set();
 let activeScopeEditor = null;
 const userMCPScopes = [
   "resolve-library-id", "query-docs", "search-repositories", "search-source",
-  "search-code", "find-file", "read-file", "get-file-history", "list-directory", "get-repository-map", "find-symbol", "get-symbol-context",
+  "search-code", "find-file", "read-file", "get-file-history", "list-directory", "search-merge-requests", "get-repository-map", "find-symbol", "get-symbol-context",
   "trace-dependencies", "compare-refs", "get-change-impact", "get-context-pack",
   "find-runbook", "export-context", "explain-search-result",
 ];

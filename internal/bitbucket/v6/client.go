@@ -157,6 +157,81 @@ func (c *Client) GetCommit(ctx context.Context, r source.RepositoryRef, id strin
 	return source.Commit{ID: x.ID, DisplayID: x.DisplayID, Message: x.Message, Author: x.Author.Name}, e
 }
 
+// SearchChangeRequests lists pull requests and filters them locally. Bitbucket
+// Server 6.x has no text search on pull requests, so the title and description
+// are matched here instead of pretending the feature does not exist.
+func (c *Client) SearchChangeRequests(ctx context.Context, r source.RepositoryRef, query, state string, limit int) ([]source.ChangeRequest, error) {
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	remoteState := "ALL"
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "open", "opened":
+		remoteState = "OPEN"
+	case "merged":
+		remoteState = "MERGED"
+	case "closed", "declined":
+		remoteState = "DECLINED"
+	}
+	type item struct {
+		ID          int64  `json:"id"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		State       string `json:"state"`
+		CreatedDate int64  `json:"createdDate"`
+		UpdatedDate int64  `json:"updatedDate"`
+		FromRef     struct {
+			DisplayID string `json:"displayId"`
+		} `json:"fromRef"`
+		ToRef struct {
+			DisplayID string `json:"displayId"`
+		} `json:"toRef"`
+		Author struct {
+			User struct {
+				DisplayName string `json:"displayName"`
+			} `json:"user"`
+		} `json:"author"`
+		Links struct {
+			Self []struct {
+				Href string `json:"href"`
+			} `json:"self"`
+		} `json:"links"`
+	}
+	var page struct {
+		Values []item `json:"values"`
+	}
+	q := url.Values{"state": []string{remoteState}, "limit": []string{fmt.Sprint(max(limit, 25))}, "order": []string{"NEWEST"}}
+	if err := c.json(ctx, http.MethodGet, c.repo(r)+"/pull-requests", q, nil, &page); err != nil {
+		return nil, err
+	}
+	needle := strings.ToLower(strings.TrimSpace(query))
+	out := make([]source.ChangeRequest, 0, len(page.Values))
+	for _, value := range page.Values {
+		if needle != "" && !strings.Contains(strings.ToLower(value.Title+" "+value.Description), needle) {
+			continue
+		}
+		request := source.ChangeRequest{
+			ID: fmt.Sprintf("#%d", value.ID), Number: value.ID, Title: value.Title, Description: value.Description,
+			State: strings.ToLower(value.State), Author: value.Author.User.DisplayName,
+			SourceRef: value.FromRef.DisplayID, TargetRef: value.ToRef.DisplayID,
+		}
+		if len(value.Links.Self) > 0 {
+			request.URL = value.Links.Self[0].Href
+		}
+		if value.CreatedDate > 0 {
+			request.CreatedAt = time.UnixMilli(value.CreatedDate).UTC()
+		}
+		if value.UpdatedDate > 0 {
+			request.UpdatedAt = time.UnixMilli(value.UpdatedDate).UTC()
+		}
+		out = append(out, request)
+		if len(out) == limit {
+			break
+		}
+	}
+	return out, nil
+}
+
 // ListCommits returns the commits that touched a path, newest first.
 func (c *Client) ListCommits(ctx context.Context, r source.RepositoryRef, refName, filePath string, limit int) ([]source.Commit, error) {
 	if limit < 1 || limit > 100 {

@@ -161,6 +161,48 @@ func TestWorkerJobReportsSkippedFilesInsteadOfFailing(t *testing.T) {
 	}
 }
 
+// A repository that gives up after the retry budget must reach the people who
+// can fix it, not only the operations screen.
+func TestFinalFailureNotifiesAdministrators(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:failure-notification?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO users(id,subject,username,email,status) VALUES('admin','admin','admin','','active')`)
+	_, _ = db.DB.Exec(`INSERT INTO user_roles(user_id,role_code) VALUES('admin','source-admin')`)
+	_, _ = db.DB.Exec(`INSERT INTO users(id,subject,username,email,status) VALUES('dev','dev','dev','','active')`)
+	_, _ = db.DB.Exec(`INSERT INTO user_roles(user_id,role_code) VALUES('dev','developer')`)
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('gitlab:4','core','broken','Broken','gitlab','4','/gitlab~core/broken','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO index_jobs(id,repository_id,ref_name,kind,status,attempts) VALUES('final','gitlab:4','main','initial','pending',4)`)
+	w := New(db, indexer.New(db, indexer.DefaultPolicy()), func(context.Context, string) (source.RepositorySource, error) {
+		return nil, errors.New("gitlab token expired")
+	})
+	if ok, runErr := w.RunOnce(ctx); !ok || runErr == nil {
+		t.Fatalf("ok=%v err=%v", ok, runErr)
+	}
+	var status string
+	_ = db.DB.QueryRow(`SELECT status FROM index_jobs WHERE id='final'`).Scan(&status)
+	if status != "failed" {
+		t.Fatalf("status=%s", status)
+	}
+	var recipients int
+	var message string
+	if err = db.DB.QueryRow(`SELECT COUNT(*) FROM notifications WHERE notification_type='index_job_failed'`).Scan(&recipients); err != nil || recipients != 1 {
+		t.Fatalf("recipients=%d err=%v", recipients, err)
+	}
+	_ = db.DB.QueryRow(`SELECT message FROM notifications WHERE notification_type='index_job_failed'`).Scan(&message)
+	if !strings.Contains(message, "/gitlab~core/broken") || !strings.Contains(message, "token expired") {
+		t.Fatalf("notification must name the repository and the cause: %q", message)
+	}
+	var developerNotified int
+	_ = db.DB.QueryRow(`SELECT COUNT(*) FROM notifications WHERE user_id='dev'`).Scan(&developerNotified)
+	if developerNotified != 0 {
+		t.Fatal("only operators of the catalog should receive index failures")
+	}
+}
+
 // A job left in `running` by a restart or a hung remote call must return to the
 // queue by itself. Without this the repository stays unindexed forever and no
 // screen ever shows a failure.

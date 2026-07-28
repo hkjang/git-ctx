@@ -288,6 +288,56 @@ func (c *Client) GetCommit(ctx context.Context, r source.RepositoryRef, id strin
 	return source.Commit{ID: x.ID, DisplayID: x.ShortID, Message: x.Message, Author: x.AuthorName}, nil
 }
 
+// SearchChangeRequests searches merge requests of one project. GitLab filters
+// server side, which keeps the response small on busy repositories.
+func (c *Client) SearchChangeRequests(ctx context.Context, r source.RepositoryRef, query, state string, limit int) ([]source.ChangeRequest, error) {
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	params := url.Values{"per_page": []string{strconv.Itoa(limit)}, "order_by": []string{"updated_at"}, "sort": []string{"desc"}}
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "", "all":
+		params.Set("state", "all")
+	case "open", "opened":
+		params.Set("state", "opened")
+	case "merged":
+		params.Set("state", "merged")
+	case "closed":
+		params.Set("state", "closed")
+	default:
+		params.Set("state", "all")
+	}
+	if query = strings.TrimSpace(query); query != "" {
+		params.Set("search", query)
+	}
+	var items []struct {
+		IID          int64     `json:"iid"`
+		Title        string    `json:"title"`
+		Description  string    `json:"description"`
+		State        string    `json:"state"`
+		WebURL       string    `json:"web_url"`
+		SourceBranch string    `json:"source_branch"`
+		TargetBranch string    `json:"target_branch"`
+		CreatedAt    time.Time `json:"created_at"`
+		UpdatedAt    time.Time `json:"updated_at"`
+		Author       struct {
+			Name string `json:"name"`
+		} `json:"author"`
+	}
+	if err := c.json(ctx, http.MethodGet, c.repo(r)+"/merge_requests", params, nil, &items); err != nil {
+		return nil, err
+	}
+	out := make([]source.ChangeRequest, 0, len(items))
+	for _, item := range items {
+		out = append(out, source.ChangeRequest{
+			ID: fmt.Sprintf("!%d", item.IID), Number: item.IID, Title: item.Title, Description: item.Description,
+			State: item.State, Author: item.Author.Name, SourceRef: item.SourceBranch, TargetRef: item.TargetBranch,
+			URL: item.WebURL, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
+		})
+	}
+	return out, nil
+}
+
 // ListCommits returns the commits that touched a path, newest first.
 func (c *Client) ListCommits(ctx context.Context, r source.RepositoryRef, refName, filePath string, limit int) ([]source.Commit, error) {
 	if limit < 1 || limit > 100 {
