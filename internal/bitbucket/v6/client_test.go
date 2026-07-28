@@ -118,3 +118,25 @@ func TestBitbucket69EndpointsAndPagination(t *testing.T) {
 		t.Fatalf("LICENSED_USER must not imply repository access: %#v", permissions)
 	}
 }
+
+func TestConfigurableSearchAPIPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/custom/code-search" {
+			t.Errorf("path=%s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte(`{"code":{"values":[]}}`))
+	}))
+	defer server.Close()
+	client, err := New(Config{BaseURL: server.URL, Token: "pat", SearchAPIPath: "/custom/code-search"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.SearchQuery(context.Background(), source.RepositoryRef{ProjectKey: "P", Slug: "r"}, "main", "term", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = New(Config{BaseURL: server.URL, Token: "pat", SearchAPIPath: "https://evil.example/search"}); err == nil {
+		t.Fatal("absolute search URL was accepted")
+	}
+}

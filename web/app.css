@@ -272,6 +272,20 @@ pre {
   padding: 8px 16px 14px;
   color: #667085;
 }
+.scope-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.5rem 1rem;
+  max-height: 45vh;
+  overflow: auto;
+  padding: 0.5rem 0;
+}
+.scope-grid label {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+  min-width: 0;
+}
 .workspace-menu button {
   flex: 1;
   background: transparent;

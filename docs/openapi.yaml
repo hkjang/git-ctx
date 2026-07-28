@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.18.0
+  version: 0.19.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -408,6 +408,13 @@ paths:
         summary: Security administrator key revocation,
         parameters: [{ $ref: "#/components/parameters/Id" }],
         responses: { "204": { description: Revoked } },
+      }
+  /api/v1/admin/api-keys/{id}/scopes:
+    put:
+      {
+        summary: Replace an existing MCP key's tool scopes,
+        parameters: [{ $ref: "#/components/parameters/Id" }],
+        responses: { "204": { description: Scopes updated and audited } },
       }
   /api/v1/admin/secrets:
     get:

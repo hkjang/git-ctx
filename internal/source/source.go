@@ -1,6 +1,10 @@
 package source
 
-import "context"
+import (
+	"context"
+	"strings"
+	"unicode"
+)
 
 type Capability string
 
@@ -66,6 +70,34 @@ type QueryResult struct {
 type QuerySearcher interface {
 	SearchQuery(context.Context, RepositoryRef, string, string, int) ([]QueryResult, error)
 }
+
+// LibraryID returns the canonical source-aware library ID used by the catalog.
+// Bitbucket keeps /project/repository while other sources receive a namespace
+// so repositories with the same name cannot collide.
+func LibraryID(sourceType, projectKey, slug string) string {
+	project := normalizeIDPart(projectKey)
+	if sourceType != "" && sourceType != "bitbucket" {
+		project = normalizeIDPart(sourceType) + "~" + project
+	}
+	return "/" + project + "/" + normalizeIDPart(slug)
+}
+
+func normalizeIDPart(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var result strings.Builder
+	dash := false
+	for _, char := range value {
+		if unicode.IsLetter(char) || unicode.IsDigit(char) || char == '.' || char == '_' || char == '-' {
+			result.WriteRune(char)
+			dash = false
+		} else if !dash {
+			result.WriteByte('-')
+			dash = true
+		}
+	}
+	return strings.Trim(result.String(), "-")
+}
+
 type ChangeFeed interface {
 	Changes(context.Context, RepositoryRef, string, string) ([]Change, error)
 }

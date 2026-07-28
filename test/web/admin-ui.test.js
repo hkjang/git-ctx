@@ -15,6 +15,9 @@ for (const id of [
   "profile-dropdown",
   "quick-nav-button",
   "quick-nav-dialog",
+  "key-scope-dialog",
+  "key-scope-form",
+  "key-scope-options",
   "keycloak-runtime-status",
   "setting-tabs",
   "setting-load-status",
@@ -55,6 +58,11 @@ assert.match(script, /data-secret-stored/);
 assert.match(script, /api\/v1\/admin\/users/);
 assert.match(script, /configureMCPKeyScopes/);
 assert.match(html, /search-repositories/);
+assert.match(html, /search-code/);
+assert.match(script, /api\/v1\/tools\/search-code\/test/);
+assert.match(script, /openKeyScopeEditor/);
+assert.match(script, /api\/v1\/admin\/api-keys\/\$\{encodeURIComponent\(key\.id\)\}\/scopes/);
+assert.match(script, /api\/v1\/me\/api-keys\/\$\{encodeURIComponent\(key\.id\)\}\/scopes/);
 assert.match(html, /reindex-repository/);
 assert.match(script, /const isAdminEntry = location\.pathname === "\/admin"/);
 assert.match(script, /!isAdminEntry \|\| !bootstrapInfo\.required/);
@@ -72,6 +80,8 @@ for (const category of [
   "keycloak",
   "bitbucket",
   "gitlab",
+  "confluence",
+  "jira",
   "mcp",
   "search",
   "model",

@@ -560,6 +560,23 @@
       <div id="quick-nav-results" class="quick-nav-results"></div>
       <small>↑↓ 이동 · Enter 선택 · Esc 닫기</small>
     </dialog>
+    <dialog id="key-scope-dialog" class="quick-nav-dialog">
+      <form id="key-scope-form">
+        <div class="quick-nav-head">
+          <strong>MCP 키 Scope 편집</strong>
+          <button id="key-scope-close" type="button" aria-label="닫기">×</button>
+        </div>
+        <p id="key-scope-description"></p>
+        <fieldset>
+          <legend>허용 도구</legend>
+          <div id="key-scope-options" class="scope-grid"></div>
+        </fieldset>
+        <div class="actions">
+          <button type="submit">저장</button>
+          <button id="key-scope-cancel" type="button" class="secondary">취소</button>
+        </div>
+      </form>
+    </dialog>
     <script src="/roles.js"></script>
     <script src="/app.js"></script>
   </body>

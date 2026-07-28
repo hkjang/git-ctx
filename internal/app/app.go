@@ -1711,8 +1711,69 @@ func (a *App) testIntegrationSetting(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	details := map[string]any{}
+	if category == "bitbucket" || category == "gitlab" {
+		sourceValue := value
+		if a.secrets != nil {
+			resolved, resolveErr := a.secrets.Resolve(ctx, value)
+			if resolveErr != nil {
+				problem(w, 400, "setting_query_search_test_failed", resolveErr.Error())
+				return
+			}
+			sourceValue = resolved
+		}
+		queryStatus, queryErr := testSourceQueryAPI(ctx, category, sourceValue)
+		if queryErr != nil {
+			a.audit(r, p, "settings.test", category, category, "failure", map[string]any{"component": "query-search", "error": truncateText(queryErr.Error(), 500)})
+			problem(w, 400, "setting_query_search_test_failed", queryErr.Error())
+			return
+		}
+		details["querySearch"] = queryStatus
+	}
 	a.audit(r, p, "settings.test", category, category, "success", nil)
-	jsonOut(w, http.StatusOK, map[string]any{"category": category, "status": "verified", "testedAt": time.Now().UTC()})
+	jsonOut(w, http.StatusOK, map[string]any{"category": category, "status": "verified", "details": details, "testedAt": time.Now().UTC()})
+}
+
+func testSourceQueryAPI(ctx context.Context, sourceType string, value map[string]any) (map[string]any, error) {
+	adapter, err := sourceAdapterFromMap(sourceType, value)
+	if err != nil {
+		return nil, err
+	}
+	searcher, ok := adapter.(source.QuerySearcher)
+	if !ok {
+		return nil, fmt.Errorf("%s adapter does not support query search", sourceType)
+	}
+	projects, err := adapter.ListProjects(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%s project discovery for query search: %w", sourceType, err)
+	}
+	if len(projects) == 0 {
+		return map[string]any{"status": "skipped", "reason": "no accessible project"}, nil
+	}
+	repositories, err := adapter.ListRepositories(ctx, projects[0].Key)
+	if err != nil {
+		return nil, fmt.Errorf("%s repository discovery for query search: %w", sourceType, err)
+	}
+	if len(repositories) == 0 {
+		return map[string]any{"status": "skipped", "reason": "no accessible repository"}, nil
+	}
+	repository := repositories[0]
+	ref := repository.DefaultBranch
+	if ref == "" {
+		ref = "main"
+	}
+	query := strings.TrimSpace(stringValue(value, "searchTestQuery"))
+	if query == "" {
+		query = repository.Slug
+	}
+	hits, err := searcher.SearchQuery(ctx, source.RepositoryRef{ProjectKey: repository.ProjectKey, Slug: repository.Slug}, ref, query, 1)
+	if err != nil {
+		return nil, fmt.Errorf("%s query search API test: %w", sourceType, err)
+	}
+	return map[string]any{
+		"status": "verified", "project": repository.ProjectKey, "repository": repository.Slug,
+		"ref": ref, "query": query, "matches": len(hits),
+	}, nil
 }
 func (a *App) getSetting(w http.ResponseWriter, r *http.Request) {
 	category := r.PathValue("category")
@@ -1904,9 +1965,10 @@ func sourceAdapterFromMap(sourceType string, settings map[string]any) (source.Re
 	switch sourceType {
 	case "bitbucket":
 		apiPrefix, _ := settings["apiPrefix"].(string)
+		searchAPIPath, _ := settings["searchApiPath"].(string)
 		username, _ := settings["username"].(string)
 		password, _ := settings["password"].(string)
-		return bitbucketv6.New(bitbucketv6.Config{BaseURL: baseURL, APIPrefix: apiPrefix, Token: token, Username: username, Password: password, Timeout: timeout, TLSVerify: tlsVerify, CACertificate: caCertificate, ProxyURL: proxyURL})
+		return bitbucketv6.New(bitbucketv6.Config{BaseURL: baseURL, APIPrefix: apiPrefix, SearchAPIPath: searchAPIPath, Token: token, Username: username, Password: password, Timeout: timeout, TLSVerify: tlsVerify, CACertificate: caCertificate, ProxyURL: proxyURL})
 	case "gitlab":
 		return gitlabsource.New(gitlabsource.Config{BaseURL: baseURL, Token: token, Timeout: timeout, TLSVerify: tlsVerify, CACertificate: caCertificate, ProxyURL: proxyURL})
 	case "confluence":

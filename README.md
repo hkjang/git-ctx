@@ -132,8 +132,9 @@ Kubernetes 배포는 [deploy/kubernetes/README.md](deploy/kubernetes/README.md)�
 `search-code`는 Library ID 없이 접근 가능한 저장소 이름과 코드를 함께 검색합니다.
 GitLab은 Project Search API(`scope=blobs`), Bitbucket Server는 Code Search API를
 사용하며, 로컬 색인이 아직 없는 파일도 ACL 검증과 Secret 마스킹 후 결과에
-포함합니다. 예를 들어 `dify 소스 검색해`는 검색 명령 표현을 제거한 `dify`를
-원격 API에 전달합니다. 기존 `search-source`와 `query-docs`도 같은 안전한 원격
+포함합니다. 아직 카탈로그에 등록되지 않은 저장소도 원격 발견 후 저장소 ACL이 현재
+사용자 Principal과 일치할 때만 표시합니다. 예를 들어 `dify 소스 검색해`는 검색 명령
+표현을 제거한 `dify`를 원격 API에 전달합니다. 기존 `search-source`와 `query-docs`도 같은 안전한 원격
 검색 결과 경로를 사용합니다.
 
 발급된 MCP API 키의 도구 Scope는 사용자 키 관리 화면에서 변경할 수 있으며,

@@ -41,6 +41,8 @@ endpoint를 표시하므로 입력값 시험과 실제 적용 상태를 구분�
 {
   "baseUrl": "https://bitbucket.company",
   "apiPrefix": "/rest/api/1.0",
+  "searchApiPath": "/rest/search/latest/search",
+  "searchTestQuery": "README",
   "pat": "secret",
   "webhookSecret": "secret",
   "tlsVerify": true,
@@ -50,8 +52,10 @@ endpoint를 표시하므로 입력값 시험과 실제 적용 상태를 구분�
 }
 ```
 
-PAT 대신 `username`과 `password`를 설정할 수 있다. 연결 시험은 프로젝트와 첫
-저장소를 탐색한 뒤 저장소·프로젝트 권한과 브랜치 API까지 확인한다. Bitbucket 6.x의
+PAT 대신 `username`과 `password`를 설정할 수 있다. Code Search 경로는 설치된
+Bitbucket Search 모듈의 경로가 다른 경우 관리자 화면에서 변경할 수 있다. 연결 시험은
+프로젝트와 첫 저장소를 탐색한 뒤 저장소·프로젝트 권한, 브랜치 API 및 실제 Code
+Search POST 요청까지 확인하고 결과 수를 표시한다. Bitbucket 6.x의
 권한 조회 및 Webhook 등록 API 자체가 관리자 권한을 요구하므로 서비스 계정에는 색인
 대상 프로젝트의 `PROJECT_ADMIN`이 필요하다. 전역 `ADMIN`/`SYS_ADMIN`
 사용자의 상속 권한은 서비스 계정이 전역 권한 API를 읽을 수 있을 때만 합성하며,
@@ -63,6 +67,7 @@ PAT 대신 `username`과 `password`를 설정할 수 있다. 연결 시험은 �
 {
   "baseUrl": "https://gitlab.company",
   "token": "secret",
+  "searchTestQuery": "README",
   "webhookSecret": "secret",
   "tlsVerify": true,
   "caCertificate": "",
@@ -71,8 +76,8 @@ PAT 대신 `username`과 `password`를 설정할 수 있다. 연결 시험은 �
 }
 ```
 
-연결 시험은 그룹·프로젝트 탐색뿐 아니라 첫 프로젝트의 멤버 ACL과 브랜치 API까지
-검증한다. `internal` 프로젝트의 전체 접근은 GitLab 사용자 ID가 매핑된 플랫폼
+연결 시험은 그룹·프로젝트 탐색뿐 아니라 첫 프로젝트의 멤버 ACL, 브랜치 API 및
+`scope=blobs` Project Search API까지 검증한다. `internal` 프로젝트의 전체 접근은 GitLab 사용자 ID가 매핑된 플랫폼
 사용자에게만 적용하고, `public` 프로젝트만 모든 인증 사용자에게 허용한다.
 
 ## MCP와 색인
@@ -86,7 +91,10 @@ PAT 대신 `username`과 `password`를 설정할 수 있다. 연결 시험은 �
 ```
 
 Strict Compatibility를 켜면 `resolve-library-id`, `query-docs`만 노출한다. 기본 확장
-모드에서는 `search-repositories`, `search-source`가 추가되며 관리자 역할의 개인 MCP
+모드에서는 `search-repositories`, `search-source`, `search-code`가 추가된다.
+`search-code`는 등록된 저장소뿐 아니라 연결된 원격 소스에서 이름이 일치하는 저장소를
+발견하고 원격 ACL을 현재 사용자 Principal과 대조한 뒤에만 결과와 안전하게 마스킹된
+스니펫을 반환한다. 관리자 역할의 개인 MCP
 키에는 선택한 Scope에 따라 `get-platform-status`, `list-index-jobs`,
 `reindex-repository`가 추가된다. 관리자 도구는 역할과 API 키 Scope를 동시에 검사하며
 일반 사용자 키나 브라우저 세션에는 노출하지 않는다.

@@ -19,6 +19,7 @@ import (
 type Config struct {
 	BaseURL       string
 	APIPrefix     string
+	SearchAPIPath string
 	Token         string
 	Username      string
 	Password      string
@@ -41,6 +42,12 @@ func New(cfg Config) (*Client, error) {
 	}
 	if cfg.APIPrefix == "" {
 		cfg.APIPrefix = "/rest/api/1.0"
+	}
+	if cfg.SearchAPIPath == "" {
+		cfg.SearchAPIPath = "/rest/search/latest/search"
+	}
+	if !strings.HasPrefix(cfg.SearchAPIPath, "/") || strings.ContainsAny(cfg.SearchAPIPath, "?#") {
+		return nil, errors.New("Bitbucket search API path must be an absolute path without query or fragment")
 	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 30 * time.Second
@@ -238,7 +245,7 @@ func (c *Client) SearchQuery(ctx context.Context, r source.RepositoryRef, ref, q
 		return nil, err
 	}
 	u := *c.base
-	u.Path = strings.TrimSuffix(c.base.Path, "/") + "/rest/search/latest/search"
+	u.Path = strings.TrimSuffix(c.base.Path, "/") + "/" + strings.Trim(c.cfg.SearchAPIPath, "/")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), strings.NewReader(string(raw)))
 	if err != nil {
 		return nil, err

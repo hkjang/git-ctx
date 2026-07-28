@@ -56,11 +56,7 @@ func LibraryID(projectKey, slug string) string {
 }
 
 func LibraryIDForSource(sourceType, projectKey, slug string) string {
-	project := normalize(projectKey)
-	if sourceType != "" && sourceType != "bitbucket" {
-		project = normalize(sourceType) + "~" + project
-	}
-	return "/" + project + "/" + normalize(slug)
+	return source.LibraryID(sourceType, projectKey, slug)
 }
 
 func (i *Indexer) SyncRepository(ctx context.Context, adapter source.RepositorySource, sourceType string, repo source.Repository, refs []source.Reference) error {

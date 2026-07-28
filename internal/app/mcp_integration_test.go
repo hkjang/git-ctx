@@ -188,3 +188,40 @@ func TestBootstrapAdministratorMCPKeyExpiresWithBootstrap(t *testing.T) {
 		t.Fatalf("expired bootstrap key status=%d body=%s", expired.Code, expired.Body.String())
 	}
 }
+
+func TestExistingMCPKeyScopesCanBeChangedByOwnerAndAdministrator(t *testing.T) {
+	a, raw := mcpFixture(t)
+	info, err := a.keys.AuthenticateRequest(context.Background(), raw, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerRequest := httptest.NewRequest(http.MethodPut, "/api/v1/me/api-keys/"+info.KeyID+"/scopes", strings.NewReader(`{"scopes":["query-docs","search-code"]}`))
+	ownerRequest.Header.Set("Content-Type", "application/json")
+	ownerRequest.Header.Set("CONTEXT7_API_KEY", raw)
+	ownerResponse := httptest.NewRecorder()
+	a.Handler().ServeHTTP(ownerResponse, ownerRequest)
+	if ownerResponse.Code != http.StatusNoContent {
+		t.Fatalf("owner update=%d %s", ownerResponse.Code, ownerResponse.Body.String())
+	}
+	updated, err := a.keys.AuthenticateRequest(context.Background(), raw, "")
+	if err != nil || len(updated.Scopes) != 2 || updated.Scopes[1] != "search-code" {
+		t.Fatalf("updated scopes=%v err=%v", updated.Scopes, err)
+	}
+
+	adminRequest := httptest.NewRequest(http.MethodPut, "/api/v1/admin/api-keys/"+info.KeyID+"/scopes", strings.NewReader(`{"scopes":["resolve-library-id"]}`))
+	adminRequest.Header.Set("Authorization", "Bearer bootstrap")
+	adminRequest.Header.Set("Content-Type", "application/json")
+	adminResponse := httptest.NewRecorder()
+	a.Handler().ServeHTTP(adminResponse, adminRequest)
+	if adminResponse.Code != http.StatusNoContent {
+		t.Fatalf("admin update=%d %s", adminResponse.Code, adminResponse.Body.String())
+	}
+	updated, err = a.keys.AuthenticateRequest(context.Background(), raw, "")
+	if err != nil || len(updated.Scopes) != 1 || updated.Scopes[0] != "resolve-library-id" {
+		t.Fatalf("admin scopes=%v err=%v", updated.Scopes, err)
+	}
+	var audits int
+	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE resource_id=? AND action IN ('api_key.scopes_update','api_key.admin_scopes_update')`, info.KeyID).Scan(&audits); err != nil || audits != 2 {
+		t.Fatalf("scope audit count=%d err=%v", audits, err)
+	}
+}

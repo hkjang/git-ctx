@@ -609,6 +609,7 @@ func TestVaultAdminConnectionTest(t *testing.T) {
 
 func TestBitbucketConnectionTestValidatesACLAndBranches(t *testing.T) {
 	denyACL := false
+	denySearch := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/rest/api/1.0/projects":
@@ -633,6 +634,12 @@ func TestBitbucketConnectionTestValidatesACLAndBranches(t *testing.T) {
 			io.WriteString(w, `{"permitted":false}`)
 		case "/rest/api/1.0/projects/PRJ/repos/repo/branches":
 			io.WriteString(w, `{"values":[{"displayId":"main","latestCommit":"abc","isDefault":true}],"isLastPage":true}`)
+		case "/rest/search/latest/search":
+			if denySearch {
+				http.Error(w, "code search unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			io.WriteString(w, `{"code":{"values":[]}}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -654,9 +661,14 @@ func TestBitbucketConnectionTestValidatesACLAndBranches(t *testing.T) {
 		a.Handler().ServeHTTP(rec, req)
 		return rec
 	}
-	if rec := test(); rec.Code != http.StatusOK {
+	if rec := test(); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"querySearch"`) || !strings.Contains(rec.Body.String(), `"status":"verified"`) {
 		t.Fatalf("complete connection test=%d body=%s", rec.Code, rec.Body.String())
 	}
+	denySearch = true
+	if rec := test(); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "query search API test") {
+		t.Fatalf("query search failure status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	denySearch = false
 	denyACL = true
 	if rec := test(); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "ACL synchronization") {
 		t.Fatalf("insufficient ACL permission status=%d body=%s", rec.Code, rec.Body.String())

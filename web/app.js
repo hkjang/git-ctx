@@ -30,9 +30,11 @@ const integrationSettingFields = {
   bitbucket: [
     ["baseUrl", "Bitbucket Base URL", "url", ""],
     ["apiPrefix", "REST API Prefix", "text", "/rest/api/1.0"],
+    ["searchApiPath", "Code Search API Path", "text", "/rest/search/latest/search"],
     ["pat", "Personal Access Token", "password", ""],
     ["username", "Username (PAT 미사용 시)", "text", ""],
     ["password", "Password", "password", ""],
+    ["searchTestQuery", "Code Search 검증 질의", "text", "README"],
     ["webhookSecret", "Webhook Secret", "password", ""],
     ["tlsVerify", "TLS 인증서 검증 사용", "boolean", true],
     ["caCertificate", "사내 CA PEM", "textarea", ""],
@@ -42,6 +44,7 @@ const integrationSettingFields = {
   gitlab: [
     ["baseUrl", "GitLab Base URL", "url", ""],
     ["token", "Access Token", "password", ""],
+    ["searchTestQuery", "Code Search 검증 질의", "text", "README"],
     ["webhookSecret", "Webhook Secret", "password", ""],
     ["tlsVerify", "TLS 인증서 검증 사용", "boolean", true],
     ["caCertificate", "사내 CA PEM", "textarea", ""],
@@ -481,7 +484,70 @@ function setupKnowledgeSearch() {
     }
   };
 }
+let currentRoleSet = new Set();
+let activeScopeEditor = null;
+const userMCPScopes = [
+  "resolve-library-id", "query-docs", "search-repositories", "search-source",
+  "search-code", "get-repository-map", "find-symbol", "get-symbol-context",
+  "trace-dependencies", "compare-refs", "get-change-impact", "get-context-pack",
+  "find-runbook", "export-context", "explain-search-result",
+];
+const managementMCPScopes = ["get-platform-status", "list-index-jobs", "reindex-repository"];
+
+function grantableMCPScopes() {
+  const platform = currentRoleSet.has("platform-admin");
+  const source = platform || currentRoleSet.has("source-admin");
+  const operator = source || currentRoleSet.has("readonly-operator");
+  const anyAdmin = platform || [...currentRoleSet].some((role) =>
+    ["source-admin", "mcp-admin", "search-admin", "security-admin", "auditor", "readonly-operator"].includes(role),
+  );
+  return [
+    ...userMCPScopes,
+    ...(anyAdmin ? ["get-platform-status"] : []),
+    ...(operator ? ["list-index-jobs"] : []),
+    ...(source ? ["reindex-repository"] : []),
+  ];
+}
+
+function openKeyScopeEditor(key, administrator = false, onSaved = loadKeys) {
+  const dialog = $("#key-scope-dialog");
+  const allowed = new Set(grantableMCPScopes());
+  const selected = new Set(key.scopes || []);
+  $("#key-scope-description").textContent =
+    `${administrator ? `${key.username} / ` : ""}${key.name} (${key.prefix})`;
+  $("#key-scope-options").innerHTML = [...userMCPScopes, ...managementMCPScopes]
+    .map((scope) => `<label><input type="checkbox" name="scope" value="${scope}" ${selected.has(scope) ? "checked" : ""} ${allowed.has(scope) ? "" : "disabled"} /> ${scope}</label>`)
+    .join("");
+  activeScopeEditor = { key, administrator, onSaved };
+  dialog.showModal();
+}
+
+$("#key-scope-close").onclick = () => $("#key-scope-dialog").close();
+$("#key-scope-cancel").onclick = () => $("#key-scope-dialog").close();
+$("#key-scope-form").onsubmit = async (event) => {
+  event.preventDefault();
+  if (!activeScopeEditor) return;
+  const scopes = new FormData(event.currentTarget).getAll("scope");
+  if (!scopes.length) {
+    alert("하나 이상의 도구 Scope를 선택해야 합니다.");
+    return;
+  }
+  const { key, administrator, onSaved } = activeScopeEditor;
+  const path = administrator
+    ? `/api/v1/admin/api-keys/${encodeURIComponent(key.id)}/scopes`
+    : `/api/v1/me/api-keys/${encodeURIComponent(key.id)}/scopes`;
+  try {
+    await api(path, { method: "PUT", body: JSON.stringify({ scopes }) });
+    $("#key-scope-dialog").close();
+    activeScopeEditor = null;
+    await onSaved();
+  } catch (error) {
+    $("#key-scope-description").textContent = error.message;
+  }
+};
+
 function configureMCPKeyScopes(roles) {
+  currentRoleSet = new Set(roles);
   const platform = roles.has("platform-admin");
   const source = platform || roles.has("source-admin");
   const operator = source || roles.has("readonly-operator");
@@ -684,16 +750,9 @@ async function loadKeys() {
     `<table><thead><tr><th>이름</th><th>Prefix / 제한</th><th>상태</th><th>만료</th><th>마지막 사용</th><th></th></tr></thead><tbody>${keys.map((k) => `<tr><td>${esc(k.name)}</td><td>${esc(k.prefix)}<br><small>${esc((k.scopes || []).join(", "))}<br>${esc((k.restrictions?.allowedCidrs || []).join(", "))} ${esc((k.restrictions?.allowedRepositories || []).join(", "))}<br>분/시/일 ${k.restrictions?.ratePerMinute || 0}/${k.restrictions?.ratePerHour || 0}/${k.restrictions?.ratePerDay || 0}</small></td><td>${esc(k.status)}</td><td>${date(k.expiresAt)}</td><td>${date(k.lastUsedAt)}</td><td>${k.status === "active" || k.status === "disabled" ? `<button class="secondary" data-scopes="${k.id}">Scope 편집</button> ` : ""}${k.status === "active" ? `<button class="secondary" data-disable="${k.id}">중지</button> <button data-rotate="${k.id}">회전</button> <button class="danger" data-revoke="${k.id}">폐기</button>` : k.status === "disabled" ? `<button data-enable="${k.id}">재활성화</button> <button class="danger" data-revoke="${k.id}">폐기</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
   document.querySelectorAll("[data-scopes]").forEach(
     (button) =>
-      (button.onclick = async () => {
+      (button.onclick = () => {
         const key = keys.find((item) => item.id === button.dataset.scopes);
-        const value = prompt("허용할 MCP 도구 Scope를 쉼표로 구분해 입력하세요.", (key?.scopes || []).join(", "));
-        if (value === null) return;
-        const scopes = value.split(",").map((item) => item.trim()).filter(Boolean);
-        await api(`/api/v1/me/api-keys/${button.dataset.scopes}/scopes`, {
-          method: "PUT",
-          body: JSON.stringify({ scopes }),
-        });
-        loadKeys();
+        if (key) openKeyScopeEditor(key);
       }),
   );
   document.querySelectorAll("[data-revoke]").forEach(
@@ -973,7 +1032,11 @@ function setupAdmin(roles, capabilities) {
         method: "POST",
         body: $("#setting-json").value,
       });
-      showAdmin(`${x.category} 연결 테스트와 검증에 성공했습니다.`, true);
+      const querySearch = x.details?.querySearch;
+      const queryMessage = querySearch
+        ? ` · Query Search ${querySearch.status}${querySearch.repository ? ` (${querySearch.project}/${querySearch.repository}, 결과 ${querySearch.matches})` : ""}`
+        : "";
+      showAdmin(`${x.category} 연결 테스트와 검증에 성공했습니다${queryMessage}.`, true);
     } catch (e) {
       showAdmin(e.message, false);
     }
@@ -1604,7 +1667,14 @@ async function refreshSecurity(capabilities = activeCapabilities) {
       $("#system-health").classList.add("ok");
     }
     $("#admin-keys").innerHTML =
-      `<table><thead><tr><th>사용자/이름</th><th>Prefix</th><th>상태</th><th>마지막 사용</th><th></th></tr></thead><tbody>${keys.map((k) => `<tr><td>${esc(k.username)} / ${esc(k.name)}</td><td>${esc(k.prefix)}</td><td>${esc(k.status)}</td><td>${date(k.lastUsedAt)}</td><td>${k.status === "active" ? `<button class="danger" data-admin-revoke="${esc(k.id)}">강제 폐기</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+      `<table><thead><tr><th>사용자/이름</th><th>Prefix / Scope</th><th>상태</th><th>마지막 사용</th><th></th></tr></thead><tbody>${keys.map((k) => `<tr><td>${esc(k.username)} / ${esc(k.name)}</td><td>${esc(k.prefix)}<br><small>${esc((k.scopes || []).join(", "))}</small></td><td>${esc(k.status)}</td><td>${date(k.lastUsedAt)}</td><td>${k.status === "active" || k.status === "disabled" ? `<button class="secondary" data-admin-scopes="${esc(k.id)}">Scope 편집</button> ` : ""}${k.status === "active" ? `<button class="danger" data-admin-revoke="${esc(k.id)}">강제 폐기</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+    document.querySelectorAll("[data-admin-scopes]").forEach(
+      (button) =>
+        (button.onclick = () => {
+          const key = keys.find((item) => item.id === button.dataset.adminScopes);
+          if (key) openKeyScopeEditor(key, true, () => refreshSecurity(capabilities));
+        }),
+    );
     document.querySelectorAll("[data-admin-revoke]").forEach(
       (b) =>
         (b.onclick = async () => {

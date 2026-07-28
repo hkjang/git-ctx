@@ -818,10 +818,160 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 	if sourceErr != nil {
 		result.Warning = "The remote source query API was unavailable; repository matches are still shown."
 	}
+	if s.sources != nil && len(principals) > 0 && repository == "" && len(result.Repositories) < limit {
+		discoveredRepositories, discoveredHits, discoveryWarning := s.discoverRemoteCode(ctx, principals, normalized, sourceType, project, ref, limit, result.Repositories)
+		result.Repositories = append(result.Repositories, discoveredRepositories...)
+		result.Hits = append(result.Hits, discoveredHits...)
+		if result.Warning == "" {
+			result.Warning = discoveryWarning
+		}
+	}
+	if len(result.Repositories) > limit {
+		result.Repositories = result.Repositories[:limit]
+	}
+	if len(result.Hits) > limit {
+		result.Hits = result.Hits[:limit]
+	}
 	if repoErr != nil && sourceErr != nil {
 		return CodeSearchResult{}, sourceErr
 	}
 	return result, repoErr
+}
+
+func (s *Service) discoverRemoteCode(ctx context.Context, principals []string, query, sourceType, project, ref string, limit int, existing []RepositoryResult) ([]RepositoryResult, []SourceResult, string) {
+	sourceTypes := []string{sourceType}
+	if sourceType == "" {
+		sourceTypes = []string{"bitbucket", "gitlab"}
+	}
+	seen := map[string]bool{}
+	for _, item := range existing {
+		seen[strings.ToLower(item.LibraryID)] = true
+	}
+	var repositories []RepositoryResult
+	var hits []SourceResult
+	var failures int
+	for _, currentSourceType := range sourceTypes {
+		adapter, err := s.sources(ctx, currentSourceType)
+		if err != nil {
+			continue
+		}
+		searcher, ok := adapter.(source.QuerySearcher)
+		if !ok {
+			continue
+		}
+		projects, err := adapter.ListProjects(ctx)
+		if err != nil {
+			failures++
+			continue
+		}
+		for _, remoteProject := range projects {
+			if project != "" && !strings.EqualFold(project, remoteProject.Key) {
+				continue
+			}
+			remoteRepositories, listErr := adapter.ListRepositories(ctx, remoteProject.Key)
+			if listErr != nil {
+				failures++
+				continue
+			}
+			for _, remoteRepository := range remoteRepositories {
+				if remoteRepository.Archived || !repositoryMetadataMatches(remoteRepository, query) {
+					continue
+				}
+				libraryID := source.LibraryID(currentSourceType, remoteRepository.ProjectKey, remoteRepository.Slug)
+				if seen[strings.ToLower(libraryID)] {
+					continue
+				}
+				repositoryRef := source.RepositoryRef{ProjectKey: remoteRepository.ProjectKey, Slug: remoteRepository.Slug}
+				permissions, permissionErr := adapter.GetPermissions(ctx, repositoryRef)
+				if permissionErr != nil || !permissionsAllowPrincipals(permissions, principals) {
+					if permissionErr != nil {
+						failures++
+					}
+					continue
+				}
+				seen[strings.ToLower(libraryID)] = true
+				repositories = append(repositories, RepositoryResult{
+					ID: fmt.Sprint(remoteRepository.ID), ProjectKey: remoteRepository.ProjectKey, Slug: remoteRepository.Slug,
+					Name: remoteRepository.Name, Description: remoteRepository.Description, LibraryID: libraryID,
+					DefaultBranch: remoteRepository.DefaultBranch, SourceType: currentSourceType,
+				})
+				selectedRef := ref
+				if selectedRef == "" {
+					selectedRef = remoteRepository.DefaultBranch
+				}
+				if selectedRef == "" {
+					selectedRef = "main"
+				}
+				if len(hits) < limit {
+					remoteHits, queryErr := searcher.SearchQuery(ctx, repositoryRef, selectedRef, query, limit-len(hits))
+					if queryErr != nil {
+						failures++
+					} else {
+						for _, hit := range s.safeSourceHits(ctx, "remote:"+libraryID, selectedRef, remoteHits, limit-len(hits)) {
+							hits = append(hits, SourceResult{
+								LibraryID: libraryID, SourceType: currentSourceType, ProjectKey: remoteRepository.ProjectKey,
+								RepositorySlug: remoteRepository.Slug, Ref: selectedRef, QueryResult: hit,
+							})
+						}
+					}
+				}
+				if len(repositories) >= limit {
+					break
+				}
+			}
+			if len(repositories) >= limit {
+				break
+			}
+		}
+	}
+	warning := ""
+	if failures > 0 {
+		warning = "Some remote repositories could not be discovered, ACL-verified, or searched."
+	}
+	return repositories, hits, warning
+}
+
+func repositoryMetadataMatches(repository source.Repository, query string) bool {
+	haystack := strings.ToLower(strings.Join([]string{repository.ProjectKey, repository.Slug, repository.Name, repository.Description}, " "))
+	for _, term := range embedding.Tokens(strings.ToLower(query)) {
+		if strings.Contains(haystack, term) {
+			return true
+		}
+	}
+	return strings.Contains(haystack, strings.ToLower(query))
+}
+
+func permissionsAllowPrincipals(permissions []source.Permission, principals []string) bool {
+	if len(principals) == 0 {
+		return false
+	}
+	allowed := map[string]bool{}
+	for _, principal := range principals {
+		allowed[strings.ToLower(strings.TrimSpace(principal))] = true
+	}
+	for _, permission := range permissions {
+		if !readableSourcePermission(permission.Permission) {
+			continue
+		}
+		principal := strings.ToLower(strings.TrimSpace(permission.Principal))
+		if permission.Kind == "group" && !strings.HasPrefix(principal, "group:") {
+			principal = "group:" + strings.TrimPrefix(principal, "/")
+		}
+		if principal == "*" || allowed[principal] {
+			return true
+		}
+	}
+	return false
+}
+
+func readableSourcePermission(permission string) bool {
+	switch strings.ToLower(strings.TrimSpace(permission)) {
+	case "read", "write", "admin", "repo_read", "repo_write", "repo_admin", "project_read", "project_write", "project_admin",
+		"developer", "reporter", "maintainer", "owner":
+		return true
+	default:
+		return false
+	}
 }
 
 // NormalizeSourceQuery removes common conversational search commands while

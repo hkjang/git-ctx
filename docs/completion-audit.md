@@ -8,10 +8,11 @@
 | 영역 | 상태 | 구현·검증 증거 |
 |---|---|---|
 | Context7 MCP | 완료 | `/mcp` GET/POST/DELETE, initialize, 세션형 SSE heartbeat·DELETE 종료, tools/list, tools/call, 두 호환 도구의 통합 시험과 실제 Codex CLI·Claude Code 호출 |
-| 확장·관리 MCP | 완료(계약 시험) | Library ID 없는 저장소 검색과 Bitbucket/GitLab Query API 소스 검색, 관리자 키 역할+Scope 이중 인가, 상태·작업·멱등 재색인 도구, Strict 모드 |
-| 인증과 API 키 | 완료 | OIDC/JWKS, PKCE, HMAC 키 저장, 1회 노출, 회전·중지·폐기, CIDR·도구·저장소·호출량 제한 |
+| 확장·관리 MCP | 완료(계약 시험) | Library ID 없는 저장소·코드 통합 검색, 미등록 원격 저장소 발견+실시간 ACL 확인, Bitbucket/GitLab Query API 소스 검색, 관리자 키 역할+Scope 이중 인가, 상태·작업·멱등 재색인 도구, Strict 모드 |
+| 인증과 API 키 | 완료 | OIDC/JWKS, PKCE, HMAC 키 저장, 1회 노출, 회전·중지·폐기, 기존 키 Scope 사용자·관리자 변경과 감사, CIDR·도구·저장소·호출량 제한 |
 | 권한 | 완료 | 사용자/그룹/키 제한을 후보 SQL 단계에서 적용하고 미인가 저장소를 일반화된 오류로 처리, Bitbucket·GitLab 이중 사용자 매핑과 소스별 전체 사용자 범위 분리 |
-| Bitbucket/GitLab 어댑터 | 완료 | Bitbucket Server REST 1.0 저장소·프로젝트·전역 상속 ACL과 기본 프로젝트 권한, GitLab API v4 직접·상속 멤버 및 public/internal 가시성 계약 시험, webhook 검증·중복 제거 |
+| Bitbucket/GitLab 어댑터 | 완료 | Bitbucket Server REST 1.0 저장소·프로젝트·전역 상속 ACL, 관리자 설정형 Code Search 경로와 실제 검색 연결 시험, GitLab API v4 직접·상속 멤버·가시성·Project Search 계약 시험, webhook 검증·중복 제거 |
+| Confluence/Jira 어댑터 | 완료(계약 시험) | Capability 기반 소스 어댑터, Bearer 및 Basic Auth, 문서·이슈 검색, 관리자 설정·연결 시험과 명시적 ACL Principal |
 | 색인 | 완료 | ref별 작업, 저장소 정책, Markdown/코드 청킹, Secret 차단·마스킹, 재시도·polling |
 | 검색 | 완료 | DB BM25·벡터와 선택적 OpenSearch projection, 후보 질의 ACL 필터, DB 원문 재검증, 사내 `/v1/rerank`와 장애 fallback |
 | 모델 미설정 검색 | 완료 | ACL 검증 뒤 Bitbucket/GitLab source query API, Context7 출력 조립과 안전한 BM25 fallback 계약 시험 |
@@ -22,7 +23,7 @@
 | 관측성 | 완료 | JSON 요청 로그, 동적 로그 레벨, request ID, health/readiness, Prometheus와 동적 OTLP HTTP tracing |
 | 백업·복구 | 완료(애플리케이션 범위) | SQLite/PostgreSQL 공통 암호화 아카이브, 주기·보존, 무결성 검증, 트랜잭션 복원, 세션 무효화와 관리자 UI/API |
 | 검색 품질 평가 | 완료 | ACL 적용 정답 사례, Recall@K·MRR·nDCG@K, 임계값 회귀 판정, 이력·상세 UI/API |
-| 관리자 연동 설정 | 완료 | Keycloak·Bitbucket·GitLab·Embedding·Reranker 전용 필드, 실제 호출 시험, 일반값 자동 재조회, 버전·수정자·시각과 비밀 필드별 마스킹·암호화 저장 |
+| 관리자 연동 설정 | 완료 | Keycloak·Bitbucket·GitLab·Confluence·Jira·Embedding·Reranker 전용 필드, Bitbucket/GitLab 실제 Query Search 진단과 결과 표시, 일반값 자동 재조회, 버전·수정자·시각과 비밀 필드별 마스킹·암호화 저장 |
 | OpenSearch | 완료(계약 시험) | 관리자 연결·index mapping 시험, ref별 delete/bulk projection, repository·ref·principal 선필터, DB 청크 hydration, Worker 재시도 |
 | 최초·복구 관리자 세션 | 완료 | 최초 일회용 토큰을 30분 HttpOnly·SameSite 세션으로 교환하고 실제 `platform-admin` SSO 로그인 성공 시 전역 폐기. 이후 CLI 서명 복구 토큰의 1회 소비·만료·Origin 검증·영구 MCP 키 생성 차단 |
 | 버전 표시 | 완료 | 공개 설정과 `/api/v1/me` 버전 제공, 로그인 전 상단·안내와 로그인 후 프로필 표시 |
@@ -32,7 +33,7 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
-2026-07-27 로컬 검증 결과:
+2026-07-28 로컬 검증 결과:
 
 - Keycloak 26.3.3에서 별도 `groups` Client Scope나 ID Token 역할 Mapper 없이
   Authorization Code+PKCE 로그인, `/admin` 복귀, `/api/v1/me` 200,
@@ -44,7 +45,7 @@ go vet ./...                                PASS
 node --check web/app.js                     PASS
 node test/web/roles.test.js                 PASS
 kubectl kustomize deploy/kubernetes/base    PASS
-PostgreSQL 16 migration 001..017            PASS
+PostgreSQL 16 migration 001..028            PASS
 PostgreSQL 16 backup/restore round trip     PASS
 PostgreSQL 16 quality benchmark contract    PASS
 PostgreSQL 16 notification outbox delivery  PASS
@@ -66,7 +67,7 @@ Claude Code 2.1.218 resolve-library-id       PASS
 | 항목 | 현재 상태 | 완료에 필요한 작업 |
 |---|---|---|
 | 레거시 MCP SSE endpoint | 미구현(선택) | 승인 대상 구형 클라이언트가 요구할 때 추가 |
-| Confluence/PDF 등 확장 소스 | 미구현(3단계) | SourceRepository 플러그인과 파서 구현 |
+| PDF 바이너리 직접 추출 | 미구현(선택 확장) | 현재 OpenAPI·텍스트·코드와 Confluence/Jira는 지원하며, PDF OCR/텍스트 추출은 별도 격리 Worker가 필요 |
 
 ## 사내 배포 환경 승인 게이트
 
@@ -75,7 +76,7 @@ Claude Code 2.1.218 resolve-library-id       PASS
 1. 실제 Keycloak에서 PKCE 로그인, 역할·그룹·사용자 속성 매핑, 로그아웃, 잘못된
    issuer/audience와 키 회전 시험
 2. 실제 Bitbucket Server 6.9.1에서 프로젝트·저장소·ACL·branch/tag 수집과
-   저장소별 push webhook, 누락 polling 시험
+   저장소별 push webhook, 누락 polling 및 설치된 Search 모듈의 Code Search 경로·응답 시험
 3. Codex CLI와 Claude Code 실제 호출은 로컬 Docker에서 통과했다. 조직 승인 버전과
    실제 사내 저장소에서 두 단계 호출·출처 확인 필요
 4. 권한 부여·회수 전후 저장소 이름, ID, 캐시, 오류 내용의 완전 비노출 시험

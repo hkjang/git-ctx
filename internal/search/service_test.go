@@ -2,6 +2,7 @@ package search
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -59,6 +60,24 @@ func TestHybridRankingAndGitLabSource(t *testing.T) {
 type querySource struct {
 	calls     int
 	lastQuery string
+}
+
+type discoveryQuerySource struct {
+	querySource
+	allowed bool
+}
+
+func (q *discoveryQuerySource) ListProjects(context.Context) ([]source.Project, error) {
+	return []source.Project{{Key: "apps", Name: "Applications"}}, nil
+}
+func (q *discoveryQuerySource) ListRepositories(context.Context, string) ([]source.Repository, error) {
+	return []source.Repository{{ID: 77, ProjectKey: "apps", Slug: "dify", Name: "Dify", Description: "AI application platform", DefaultBranch: "main"}}, nil
+}
+func (q *discoveryQuerySource) GetPermissions(context.Context, source.RepositoryRef) ([]source.Permission, error) {
+	if !q.allowed {
+		return []source.Permission{{Principal: "bob", Kind: "user", Permission: "read"}}, nil
+	}
+	return []source.Permission{{Principal: "alice", Kind: "user", Permission: "read"}}, nil
 }
 
 func (q *querySource) ListProjects(context.Context) ([]source.Project, error) { return nil, nil }
@@ -172,6 +191,41 @@ func TestSearchCodeReturnsRepositoryAndSafeUnindexedRemoteResult(t *testing.T) {
 	hidden, err := service.SearchCode(ctx, []string{"mallory"}, "dify 소스 검색해", "", "", "", "", 10)
 	if err != nil || len(hidden.Repositories) != 0 || len(hidden.Hits) != 0 || remote.calls != 1 {
 		t.Fatalf("ACL leak=%#v calls=%d err=%v", hidden, remote.calls, err)
+	}
+}
+
+func TestSearchCodeDiscoversUnregisteredRemoteRepositoryAfterACL(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:remote-discovery?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	remote := &discoveryQuerySource{allowed: true}
+	service := New(db)
+	service.SetSourceLoader(func(_ context.Context, sourceType string) (source.RepositorySource, error) {
+		if sourceType != "gitlab" {
+			return nil, errors.New("not configured")
+		}
+		return remote, nil
+	})
+	result, err := service.SearchCode(ctx, []string{"alice"}, "dify 소스 검색해", "gitlab", "", "", "", 10)
+	if err != nil || len(result.Repositories) != 1 || result.Repositories[0].LibraryID != "/gitlab~apps/dify" || len(result.Hits) != 1 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if result.Hits[0].LibraryID != "/gitlab~apps/dify" || remote.lastQuery != "dify" {
+		t.Fatalf("remote hit=%#v query=%q", result.Hits[0], remote.lastQuery)
+	}
+	remote.calls = 0
+	unmapped, err := service.SearchCode(ctx, nil, "dify 소스 검색해", "gitlab", "", "", "", 10)
+	if err != nil || len(unmapped.Repositories) != 0 || len(unmapped.Hits) != 0 || remote.calls != 0 {
+		t.Fatalf("unmapped identity leak=%#v calls=%d err=%v", unmapped, remote.calls, err)
+	}
+	remote.allowed = false
+	remote.calls = 0
+	hidden, err := service.SearchCode(ctx, []string{"alice"}, "dify 소스 검색해", "gitlab", "", "", "", 10)
+	if err != nil || len(hidden.Repositories) != 0 || len(hidden.Hits) != 0 || remote.calls != 0 {
+		t.Fatalf("remote ACL leak=%#v calls=%d err=%v", hidden, remote.calls, err)
 	}
 }
 
