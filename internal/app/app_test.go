@@ -1760,3 +1760,251 @@ VALUES(?,?,'u1',?,?,40,'10.0.0.1',800,?,'claude-code','2.1','query=결제 재시
 		t.Fatal("the self-check must return the stage trace of the retrieval it ran")
 	}
 }
+
+// Deleting a setting leaves its version history behind, so the next save has to
+// continue the numbering. Restarting at 1 collides with the history row that is
+// still there and made a perfectly normal "delete, then configure again" fail.
+func TestSettingSaveAfterDeleteContinuesVersionHistory(t *testing.T) {
+	a, err := New(context.Background(), config.Config{DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "settings-version.db") + "?_foreign_keys=on", KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(t.TempDir(), "backups")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer bootstrap")
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+	if saved := call(http.MethodPut, "/api/v1/admin/settings/logging", `{"level":"debug"}`); saved.Code != http.StatusOK {
+		t.Fatalf("first save=%d body=%s", saved.Code, saved.Body.String())
+	}
+	if deleted := call(http.MethodDelete, "/api/v1/admin/settings/logging", ""); deleted.Code != http.StatusNoContent {
+		t.Fatalf("delete=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+	again := call(http.MethodPut, "/api/v1/admin/settings/logging", `{"level":"info"}`)
+	if again.Code != http.StatusOK {
+		t.Fatalf("save after delete=%d body=%s", again.Code, again.Body.String())
+	}
+	if !strings.Contains(again.Body.String(), `"version":2`) {
+		t.Fatalf("the version must continue the history: %s", again.Body.String())
+	}
+	versions := call(http.MethodGet, "/api/v1/admin/settings/logging/versions", "")
+	if !strings.Contains(versions.Body.String(), `"version":2`) || !strings.Contains(versions.Body.String(), `"version":1`) {
+		t.Fatalf("history=%s", versions.Body.String())
+	}
+}
+
+// Settings history is only useful if a previous configuration can be read and
+// put back, and two administrators must not silently overwrite each other.
+func TestSettingVersionDiffRestoreAndConflict(t *testing.T) {
+	a, err := New(context.Background(), config.Config{DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "settings-restore.db") + "?_foreign_keys=on", KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(t.TempDir(), "backups")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer bootstrap")
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+	if saved := call(http.MethodPut, "/api/v1/admin/settings/search", `{"keywordWeight":1,"vectorWeight":0.35,"finalDocuments":8}`); saved.Code != http.StatusOK {
+		t.Fatalf("v1=%d body=%s", saved.Code, saved.Body.String())
+	}
+	if saved := call(http.MethodPut, "/api/v1/admin/settings/search", `{"keywordWeight":2,"vectorWeight":0.9,"finalDocuments":20}`); saved.Code != http.StatusOK {
+		t.Fatalf("v2=%d body=%s", saved.Code, saved.Body.String())
+	}
+
+	// Reading v1 shows what restoring it would change.
+	detail := call(http.MethodGet, "/api/v1/admin/settings/search/versions/1", "")
+	if detail.Code != http.StatusOK {
+		t.Fatalf("version detail=%d body=%s", detail.Code, detail.Body.String())
+	}
+	var version struct {
+		Version, CurrentVersion int
+		Value                   map[string]any
+		Changes                 []struct {
+			Field, Kind, Before, After string
+			Secret                     bool
+		}
+	}
+	if err := json.Unmarshal(detail.Body.Bytes(), &version); err != nil {
+		t.Fatal(err)
+	}
+	if version.CurrentVersion != 2 || len(version.Changes) == 0 {
+		t.Fatalf("diff=%#v", version)
+	}
+	var weight bool
+	for _, change := range version.Changes {
+		if change.Field == "vectorWeight" && change.Kind == "changed" && strings.HasPrefix(change.After, "0.35") {
+			weight = true
+		}
+	}
+	if !weight {
+		t.Fatalf("the diff must state the target value: %#v", version.Changes)
+	}
+
+	// Restoring appends a new version rather than rewriting history.
+	restored := call(http.MethodPost, "/api/v1/admin/settings/search/versions/1/restore", "")
+	if restored.Code != http.StatusOK || !strings.Contains(restored.Body.String(), `"version":3`) {
+		t.Fatalf("restore=%d body=%s", restored.Code, restored.Body.String())
+	}
+	current := call(http.MethodGet, "/api/v1/admin/settings/search", "")
+	if !strings.Contains(current.Body.String(), `"vectorWeight":0.35`) {
+		t.Fatalf("restored value=%s", current.Body.String())
+	}
+
+	// A save that carries a stale version is refused instead of clobbering.
+	stale := call(http.MethodPut, "/api/v1/admin/settings/search", `{"keywordWeight":5,"expectedVersion":2}`)
+	if stale.Code != http.StatusConflict {
+		t.Fatalf("stale save=%d body=%s", stale.Code, stale.Body.String())
+	}
+	fresh := call(http.MethodPut, "/api/v1/admin/settings/search", `{"keywordWeight":5,"vectorWeight":0.35,"finalDocuments":8,"expectedVersion":3}`)
+	if fresh.Code != http.StatusOK {
+		t.Fatalf("fresh save=%d body=%s", fresh.Code, fresh.Body.String())
+	}
+	if strings.Contains(call(http.MethodGet, "/api/v1/admin/settings/search", "").Body.String(), "expectedVersion") {
+		t.Fatal("expectedVersion must not be stored as part of the setting")
+	}
+}
+
+// A source server in a maintenance window must not stop an administrator from
+// saving a configuration, but the skipped validation has to be visible rather
+// than silently accepted.
+func TestSettingForceSaveRecordsSkippedValidation(t *testing.T) {
+	a, err := New(context.Background(), config.Config{DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "settings-force.db") + "?_foreign_keys=on", KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(t.TempDir(), "backups")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	call := func(path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPut, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer bootstrap")
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+	// Nothing listens on this port, so validation fails.
+	setting := `{"provider":"milvus","baseUrl":"http://127.0.0.1:9","collection":"git_ctx_chunk_vectors","dimensions":256,"timeoutSeconds":1}`
+	refused := call("/api/v1/admin/settings/vector", setting)
+	if refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), "setting_validation_failed") {
+		t.Fatalf("unreachable target must be refused by default: %d %s", refused.Code, refused.Body.String())
+	}
+	forced := call("/api/v1/admin/settings/vector?force=true", setting)
+	if forced.Code != http.StatusOK {
+		t.Fatalf("forced save=%d body=%s", forced.Code, forced.Body.String())
+	}
+	if !strings.Contains(forced.Body.String(), "validationSkipped") || !strings.Contains(forced.Body.String(), "warning") {
+		t.Fatalf("a forced save must report what it skipped: %s", forced.Body.String())
+	}
+	var audited int
+	if err := a.store.DB.QueryRow(`SELECT COUNT(*) FROM audit_logs WHERE action='settings.update' AND metadata LIKE '%validationSkipped%'`).Scan(&audited); err != nil || audited == 0 {
+		t.Fatalf("the skip must be auditable: %d err=%v", audited, err)
+	}
+}
+
+// An export has to be safe to carry between environments: no credentials in the
+// file, a dry run that says what would change, and an import that keeps the
+// target's own secrets.
+func TestSettingsExportImportRoundTrip(t *testing.T) {
+	newApp := func(name string) *App {
+		t.Helper()
+		instance, err := New(context.Background(), config.Config{DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), name) + "?_foreign_keys=on", KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(t.TempDir(), "backups")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(instance.Close)
+		return instance
+	}
+	call := func(instance *App, method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer bootstrap")
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		instance.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	source := newApp("export-source.db")
+	if saved := call(source, http.MethodPut, "/api/v1/admin/settings/search", `{"keywordWeight":3,"vectorWeight":0.5,"finalDocuments":12}`); saved.Code != http.StatusOK {
+		t.Fatalf("search=%d body=%s", saved.Code, saved.Body.String())
+	}
+	if saved := call(source, http.MethodPut, "/api/v1/admin/settings/notifications", `{"enabled":true,"webhookUrl":"https://hooks.internal/x","apiToken":"super-secret-token"}`); saved.Code != http.StatusOK {
+		t.Fatalf("notifications=%d body=%s", saved.Code, saved.Body.String())
+	}
+
+	exported := call(source, http.MethodGet, "/api/v1/admin/settings-export", "")
+	if exported.Code != http.StatusOK {
+		t.Fatalf("export=%d body=%s", exported.Code, exported.Body.String())
+	}
+	document := exported.Body.String()
+	if strings.Contains(document, "super-secret-token") {
+		t.Fatal("an export must never contain a credential")
+	}
+	if !strings.Contains(document, `"keywordWeight":3`) || !strings.Contains(document, "********") {
+		t.Fatalf("export=%s", document)
+	}
+
+	target := newApp("export-target.db")
+	preview := call(target, http.MethodPost, "/api/v1/admin/settings-import", document)
+	if preview.Code != http.StatusOK {
+		t.Fatalf("dry run=%d body=%s", preview.Code, preview.Body.String())
+	}
+	var result struct {
+		DryRun  bool
+		Applied int
+		Results []struct {
+			Category, Status, Detail string
+			Changes                  []struct{ Field, Kind string }
+		}
+	}
+	if err := json.Unmarshal(preview.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.DryRun || result.Applied != 0 {
+		t.Fatalf("a dry run must not change anything: %#v", result)
+	}
+	status := map[string]string{}
+	for _, item := range result.Results {
+		status[item.Category] = item.Status
+	}
+	if status["search"] != "ready" {
+		t.Fatalf("dry run=%#v", result.Results)
+	}
+	// Nothing was written yet.
+	if call(target, http.MethodGet, "/api/v1/admin/settings/search", "").Code != http.StatusNotFound {
+		t.Fatal("the dry run wrote a setting")
+	}
+
+	applied := call(target, http.MethodPost, "/api/v1/admin/settings-import?apply=true", document)
+	if applied.Code != http.StatusOK {
+		t.Fatalf("apply=%d body=%s", applied.Code, applied.Body.String())
+	}
+	loaded := call(target, http.MethodGet, "/api/v1/admin/settings/search", "")
+	if !strings.Contains(loaded.Body.String(), `"keywordWeight":3`) || !strings.Contains(loaded.Body.String(), `"version":1`) {
+		t.Fatalf("imported value=%s", loaded.Body.String())
+	}
+	// The masked secret must not have been stored literally.
+	notifications, err := target.loadSettingMapRaw(context.Background(), "notifications")
+	if err == nil {
+		if token, _ := notifications["apiToken"].(string); token == "********" {
+			t.Fatal("the mask was imported as the secret itself")
+		}
+	}
+	// Importing the same document twice reports no change rather than churning
+	// the version history.
+	second := call(target, http.MethodPost, "/api/v1/admin/settings-import?apply=true", document)
+	if !strings.Contains(second.Body.String(), "unchanged") {
+		t.Fatalf("second import=%s", second.Body.String())
+	}
+}

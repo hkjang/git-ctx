@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -492,6 +493,12 @@ func (a *App) routes() {
 	// roles that already see audit data.
 	a.mux.Handle("GET /api/v1/admin/mcp/calls", a.authorize(http.HandlerFunc(a.mcpCalls), "mcp-admin", "auditor", "security-admin"))
 	a.mux.Handle("GET /api/v1/admin/mcp/calls/{id}", a.authorize(http.HandlerFunc(a.mcpCallTrace), "mcp-admin", "auditor", "security-admin"))
+	// A whole-configuration export or import crosses every category, so it stays
+	// with platform-admin rather than any delegated settings role.
+	a.mux.Handle("GET /api/v1/admin/settings-export", a.authorize(http.HandlerFunc(a.exportSettings), "platform-admin"))
+	a.mux.Handle("POST /api/v1/admin/settings-import", a.authorize(http.HandlerFunc(a.importSettings), "platform-admin"))
+	a.mux.Handle("GET /api/v1/admin/settings/{category}/versions/{version}", a.settingsAuthorize(http.HandlerFunc(a.settingVersion)))
+	a.mux.Handle("POST /api/v1/admin/settings/{category}/versions/{version}/restore", a.settingsAuthorize(http.HandlerFunc(a.restoreSettingVersion)))
 	a.mux.Handle("GET /api/v1/admin/mcp/sessions", a.authorize(http.HandlerFunc(a.mcpSessions), "mcp-admin", "auditor", "security-admin"))
 	a.mux.Handle("POST /api/v1/admin/mcp/selfcheck", a.authorize(http.HandlerFunc(a.mcpSelfCheck), "mcp-admin", "source-admin", "search-admin"))
 	// A developer debugging their own agent needs the same X-ray for their own
@@ -2013,18 +2020,39 @@ func (a *App) putSetting(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "Invalid JSON")
 		return
 	}
-	if previous, err := a.loadSettingMapRaw(r.Context(), category); err == nil {
-		preserveMasked(previous, value)
+	// expectedVersion is the version the editor loaded. It travels in the body so
+	// the JSON editor and the field form can both send it, and it is removed
+	// before the value is stored.
+	expected := 0
+	if raw, ok := value["expectedVersion"]; ok {
+		if number, ok := raw.(float64); ok {
+			expected = int(number)
+		}
+		delete(value, "expectedVersion")
 	}
+	// force saves a configuration whose target is unreachable right now. A
+	// maintenance window on the source server must not stop an administrator from
+	// preparing the configuration, but the skip is recorded and reported.
+	force := r.URL.Query().Get("force") == "true"
+	unresolvedSecrets := []string{}
+	previous, err := a.loadSettingMapRaw(r.Context(), category)
+	if err != nil {
+		previous = map[string]any{}
+	}
+	unresolvedSecrets = preserveMasked(previous, value)
 	if err := a.normalizeSetting(r.Context(), category, value); err != nil {
 		problem(w, 400, "setting_normalization_failed", err.Error())
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
+	validationSkipped := ""
 	if err := a.validateSetting(ctx, category, value); err != nil {
-		problem(w, 400, "setting_validation_failed", err.Error())
-		return
+		if !force {
+			problem(w, 400, "setting_validation_failed", err.Error())
+			return
+		}
+		validationSkipped = err.Error()
 	}
 	raw, _ := json.Marshal(value)
 	sealed, e := a.seal(raw)
@@ -2037,7 +2065,11 @@ func (a *App) putSetting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	var version int
+	// The next version continues the history rather than the live row. Deleting a
+	// setting removes the live row but keeps its versions, so restarting at 1
+	// collided with the history that is still there and made "delete, then
+	// configure again" fail with a constraint error.
+	var version, historyVersion int
 	e = tx.QueryRowContext(r.Context(), a.store.Rebind(`SELECT version FROM system_settings WHERE category=?`), category).Scan(&version)
 	if errors.Is(e, sql.ErrNoRows) {
 		version = 0
@@ -2045,7 +2077,18 @@ func (a *App) putSetting(w http.ResponseWriter, r *http.Request) {
 		problem(w, 500, "internal_error", e.Error())
 		return
 	}
-	version++
+	if e = tx.QueryRowContext(r.Context(), a.store.Rebind(`SELECT COALESCE(MAX(version),0) FROM setting_versions WHERE category=?`), category).Scan(&historyVersion); e != nil {
+		problem(w, 500, "internal_error", e.Error())
+		return
+	}
+	// A caller that loaded version N may only save over version N. Without this
+	// two administrators editing the same category silently overwrite each other.
+	if expected > 0 && expected != version {
+		problem(w, http.StatusConflict, "setting_version_conflict",
+			fmt.Sprintf("이 설정은 이미 v%d 입니다. 다른 관리자가 저장한 내용을 덮어쓰지 않도록 화면을 새로 불러온 뒤 다시 저장하세요.", version))
+		return
+	}
+	version = max(version, historyVersion) + 1
 	_, e = tx.ExecContext(r.Context(), a.store.Rebind(`INSERT INTO setting_versions(category,version,value_encrypted,changed_by,reason) VALUES(?,?,?,?,?)`), category, version, sealed, p.UserID, "")
 	if e == nil {
 		_, e = tx.ExecContext(r.Context(), a.store.Rebind(`INSERT INTO system_settings(category,version,value_encrypted,updated_by,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(category) DO UPDATE SET version=excluded.version,value_encrypted=excluded.value_encrypted,updated_by=excluded.updated_by,updated_at=excluded.updated_at`), category, version, sealed, p.UserID, time.Now().UTC())
@@ -2070,8 +2113,16 @@ func (a *App) putSetting(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	a.audit(r, p, "settings.update", category, category, "success", map[string]any{"version": version})
+	a.audit(r, p, "settings.update", category, category, "success", map[string]any{"version": version, "validationSkipped": validationSkipped})
 	result := map[string]any{"category": category, "version": version, "secretFields": "encrypted and masked", "applied": true, "appliedAt": time.Now().UTC()}
+	if len(unresolvedSecrets) > 0 {
+		result["missingSecrets"] = unresolvedSecrets
+		result["warning"] = fmt.Sprintf("저장된 값이 없는 비밀 항목(%s)은 비워 둔 채 저장했습니다. 실제 값을 입력해 다시 저장하세요.", strings.Join(unresolvedSecrets, ", "))
+	}
+	if validationSkipped != "" {
+		result["validationSkipped"] = validationSkipped
+		result["warning"] = "연결 검증에 실패했지만 요청에 따라 저장했습니다. 대상 서버가 복구되면 [연동 테스트]로 다시 확인하세요."
+	}
 	if category == "operations" {
 		result["restartRequired"] = true
 		result["dynamicFields"] = []string{"maintenanceMode", "maintenanceMessage"}
@@ -3494,12 +3545,34 @@ func maskSecretPaths(value map[string]any, prefix string, masked *[]string) {
 		}
 	}
 }
-func preserveMasked(previous, incoming map[string]any) {
+
+// preserveMasked substitutes the stored value for every field the client sent
+// back as the mask, and reports the ones it could not resolve.
+//
+// An unresolved mask is a real hazard: the target has no stored value, so
+// keeping the literal "********" would configure a token, password or DSN whose
+// value is eight asterisks. Those keys are dropped instead and returned, so the
+// caller can say which secrets still have to be entered.
+func preserveMasked(previous, incoming map[string]any) []string {
+	unresolved := []string{}
+	preserveMaskedPaths(previous, incoming, "", &unresolved)
+	sort.Strings(unresolved)
+	return unresolved
+}
+
+func preserveMaskedPaths(previous, incoming map[string]any, prefix string, unresolved *[]string) {
 	for key, value := range incoming {
+		path := key
+		if prefix != "" {
+			path = prefix + "." + key
+		}
 		if value == "********" {
 			if old, ok := previous[key]; ok {
 				incoming[key] = old
+				continue
 			}
+			delete(incoming, key)
+			*unresolved = append(*unresolved, path)
 			continue
 		}
 		next, ok := value.(map[string]any)
@@ -3507,7 +3580,9 @@ func preserveMasked(previous, incoming map[string]any) {
 			continue
 		}
 		if old, ok := previous[key].(map[string]any); ok {
-			preserveMasked(old, next)
+			preserveMaskedPaths(old, next, path, unresolved)
+		} else {
+			preserveMaskedPaths(map[string]any{}, next, path, unresolved)
 		}
 	}
 }
@@ -4988,6 +5063,341 @@ func parseTimestamp(value string) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+// settingVersion returns one stored version with its secrets masked, so an
+// administrator can read what a previous configuration actually contained
+// before deciding to restore it. Storing versions without a way to read them
+// made the history a list of dates and nothing else.
+func (a *App) settingVersion(w http.ResponseWriter, r *http.Request) {
+	category := r.PathValue("category")
+	if !settingCategories()[category] {
+		problem(w, http.StatusNotFound, "not_found", "Setting category not found")
+		return
+	}
+	version, err := strconv.Atoi(r.PathValue("version"))
+	if err != nil || version < 1 {
+		problem(w, http.StatusBadRequest, "invalid_request", "version must be a positive integer")
+		return
+	}
+	value, changedBy, changedAt, err := a.settingVersionValue(r.Context(), category, version)
+	if errors.Is(err, sql.ErrNoRows) {
+		problem(w, http.StatusNotFound, "not_found", "Setting version not found")
+		return
+	}
+	if err != nil {
+		problem(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	current, currentVersion := map[string]any{}, 0
+	if loaded, err := a.loadSettingMapRaw(r.Context(), category); err == nil {
+		current = loaded
+		_ = a.store.DB.QueryRowContext(r.Context(), a.store.Rebind(`SELECT version FROM system_settings WHERE category=?`), category).Scan(&currentVersion)
+	}
+	// The difference is computed before masking, on the real values, and only the
+	// keys are reported for secrets: "the token changed" is what the reader needs,
+	// not the token.
+	changes := settingDifference(current, value)
+	maskSecrets(value)
+	maskSecrets(current)
+	jsonOut(w, http.StatusOK, map[string]any{
+		"category": category, "version": version, "changedBy": changedBy, "changedAt": changedAt,
+		"value": value, "currentVersion": currentVersion, "changes": changes,
+	})
+}
+
+func (a *App) settingVersionValue(ctx context.Context, category string, version int) (map[string]any, string, time.Time, error) {
+	var sealed []byte
+	var changedBy string
+	var changedAt time.Time
+	err := a.store.DB.QueryRowContext(ctx, a.store.Rebind(`SELECT value_encrypted,changed_by,created_at FROM setting_versions WHERE category=? AND version=?`), category, version).
+		Scan(&sealed, &changedBy, &changedAt)
+	if err != nil {
+		return nil, "", time.Time{}, err
+	}
+	raw, err := a.open(sealed)
+	if err != nil {
+		return nil, "", time.Time{}, err
+	}
+	value := map[string]any{}
+	if err = json.Unmarshal(raw, &value); err != nil {
+		return nil, "", time.Time{}, err
+	}
+	return value, changedBy, changedAt, nil
+}
+
+// settingDifference describes what restoring a version would change. Values are
+// rendered short and secrets are reported as changed without their content.
+func settingDifference(current, target map[string]any) []map[string]any {
+	changes := []map[string]any{}
+	keys := map[string]bool{}
+	for key := range current {
+		keys[key] = true
+	}
+	for key := range target {
+		keys[key] = true
+	}
+	ordered := make([]string, 0, len(keys))
+	for key := range keys {
+		ordered = append(ordered, key)
+	}
+	sort.Strings(ordered)
+	for _, key := range ordered {
+		before, after := current[key], target[key]
+		if fmt.Sprint(before) == fmt.Sprint(after) {
+			continue
+		}
+		change := map[string]any{"field": key}
+		if secretField(key) {
+			change["before"], change["after"] = "(비밀값)", "(비밀값)"
+			change["secret"] = true
+		} else {
+			change["before"], change["after"] = truncateText(fmt.Sprint(before), 120), truncateText(fmt.Sprint(after), 120)
+		}
+		switch {
+		case before == nil:
+			change["kind"] = "added"
+		case after == nil:
+			change["kind"] = "removed"
+		default:
+			change["kind"] = "changed"
+		}
+		changes = append(changes, change)
+	}
+	return changes
+}
+
+func secretField(key string) bool {
+	lower := strings.ToLower(key)
+	return lower == "dsn" || strings.Contains(lower, "secret") || strings.Contains(lower, "password") ||
+		strings.Contains(lower, "token") || strings.Contains(lower, "apikey") ||
+		strings.Contains(lower, "api-key") || strings.Contains(lower, "authorization") || strings.HasSuffix(lower, "pat")
+}
+
+// restoreSettingVersion writes an old configuration back as a new version. The
+// history stays append-only, so a restore can itself be undone, and the restored
+// value goes through the same validation as a normal save unless the caller
+// explicitly forces it.
+func (a *App) restoreSettingVersion(w http.ResponseWriter, r *http.Request) {
+	category := r.PathValue("category")
+	if !settingCategories()[category] {
+		problem(w, http.StatusNotFound, "not_found", "Setting category not found")
+		return
+	}
+	version, err := strconv.Atoi(r.PathValue("version"))
+	if err != nil || version < 1 {
+		problem(w, http.StatusBadRequest, "invalid_request", "version must be a positive integer")
+		return
+	}
+	value, _, _, err := a.settingVersionValue(r.Context(), category, version)
+	if errors.Is(err, sql.ErrNoRows) {
+		problem(w, http.StatusNotFound, "not_found", "Setting version not found")
+		return
+	}
+	if err != nil {
+		problem(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	// The stored value is complete and unmasked, so it is replayed through the
+	// normal save path: one place decides validation, encryption and versioning.
+	raw, err := json.Marshal(value)
+	if err != nil {
+		problem(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	replay := r.Clone(r.Context())
+	replay.Method = http.MethodPut
+	replay.Body = io.NopCloser(bytes.NewReader(raw))
+	replay.ContentLength = int64(len(raw))
+	replay.Header.Set("Content-Type", "application/json")
+	query := replay.URL.Query()
+	query.Set("restoredFrom", strconv.Itoa(version))
+	replay.URL.RawQuery = query.Encode()
+	replay.SetPathValue("category", category)
+	p, _ := auth.FromContext(r.Context())
+	a.audit(r, p, "settings.restore", category, fmt.Sprintf("v%d", version), "success", map[string]any{"restoredFrom": version})
+	a.putSetting(w, replay)
+}
+
+// exportSettings writes the whole configuration as one document so a verified
+// environment can be reproduced elsewhere. Secrets are never included: an
+// export is a file that travels by mail and USB stick in an air-gapped install,
+// and a credential in it would outlive the reason it was exported. Every secret
+// field is written as the mask, which the import side treats as "keep whatever
+// the target already has".
+func (a *App) exportSettings(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	categories := make([]string, 0, len(settingCategories()))
+	for category := range settingCategories() {
+		categories = append(categories, category)
+	}
+	sort.Strings(categories)
+	out := map[string]any{}
+	exported := 0
+	for _, category := range categories {
+		value, err := a.loadSettingMapRaw(r.Context(), category)
+		if err != nil {
+			continue
+		}
+		var version int
+		_ = a.store.DB.QueryRowContext(r.Context(), a.store.Rebind(`SELECT version FROM system_settings WHERE category=?`), category).Scan(&version)
+		masked := maskSecrets(value)
+		out[category] = map[string]any{"value": value, "version": version, "secretFields": masked}
+		exported++
+	}
+	a.audit(r, p, "settings.export", "settings", "all", "success", map[string]any{"categories": exported})
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"git-ctx-settings-%s.json\"", time.Now().UTC().Format("20060102")))
+	jsonOut(w, http.StatusOK, map[string]any{
+		"exportedAt": time.Now().UTC(), "platformVersion": version.Version, "secretsIncluded": false,
+		"note":       "비밀값은 ******** 로 표기되어 있습니다. 가져오는 환경에 이미 저장된 비밀값은 그대로 유지되고, 없으면 가져온 뒤 직접 입력해야 합니다.",
+		"categories": out,
+	})
+}
+
+// importSettings applies an exported document. It defaults to a dry run,
+// because the interesting question is not "did it import" but "what would
+// change", and answering that before touching a running platform is the whole
+// point of having the diff.
+func (a *App) importSettings(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	var document struct {
+		Categories map[string]struct {
+			Value map[string]any `json:"value"`
+		} `json:"categories"`
+	}
+	if decode(r, &document) != nil || len(document.Categories) == 0 {
+		problem(w, http.StatusBadRequest, "invalid_request", "내보내기 파일 형식이 아닙니다. categories 객체가 필요합니다.")
+		return
+	}
+	apply := r.URL.Query().Get("apply") == "true"
+	force := r.URL.Query().Get("force") == "true"
+	names := make([]string, 0, len(document.Categories))
+	for category := range document.Categories {
+		names = append(names, category)
+	}
+	sort.Strings(names)
+	results := make([]map[string]any, 0, len(names))
+	applied := 0
+	for _, category := range names {
+		item := map[string]any{"category": category}
+		if !settingCategories()[category] {
+			item["status"], item["detail"] = "skipped", "이 버전이 모르는 설정 영역입니다."
+			results = append(results, item)
+			continue
+		}
+		if !a.settingCategoryAllowed(p, category) {
+			item["status"], item["detail"] = "forbidden", "이 설정 영역을 변경할 권한이 없습니다."
+			results = append(results, item)
+			continue
+		}
+		value := map[string]any{}
+		for key, raw := range document.Categories[category].Value {
+			value[key] = raw
+		}
+		current, _ := a.loadSettingMapRaw(r.Context(), category)
+		if current == nil {
+			current = map[string]any{}
+		}
+		// The mask means "keep the target's secret", which is what makes an export
+		// without credentials usable at all.
+		missing := preserveMasked(current, value)
+		if len(missing) > 0 {
+			item["missingSecrets"] = missing
+		}
+		changes := settingDifference(current, value)
+		item["changes"] = changes
+		if len(changes) == 0 {
+			item["status"], item["detail"] = "unchanged", "현재 값과 동일합니다."
+			results = append(results, item)
+			continue
+		}
+		normalized := map[string]any{}
+		for key, raw := range value {
+			normalized[key] = raw
+		}
+		if err := a.normalizeSetting(r.Context(), category, normalized); err != nil {
+			item["status"], item["detail"] = "invalid", err.Error()
+			results = append(results, item)
+			continue
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+		validationErr := a.validateSetting(ctx, category, normalized)
+		cancel()
+		if validationErr != nil && !force {
+			item["status"], item["detail"] = "invalid", validationErr.Error()
+			results = append(results, item)
+			continue
+		}
+		if validationErr != nil {
+			item["validationSkipped"] = validationErr.Error()
+		}
+		if !apply {
+			item["status"], item["detail"] = "ready", fmt.Sprintf("%d개 항목이 바뀝니다.", len(changes))
+			results = append(results, item)
+			continue
+		}
+		if err := a.saveSettingValue(r.Context(), p, category, normalized); err != nil {
+			item["status"], item["detail"] = "failed", err.Error()
+			results = append(results, item)
+			continue
+		}
+		applied++
+		item["status"], item["detail"] = "applied", fmt.Sprintf("%d개 항목을 적용했습니다.", len(changes))
+		results = append(results, item)
+	}
+	if apply {
+		a.audit(r, p, "settings.import", "settings", "all", "success", map[string]any{"applied": applied, "categories": len(names)})
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"dryRun": !apply, "applied": applied, "results": results})
+}
+
+// settingCategoryAllowed mirrors the per-category delegation used by the
+// settings routes, so an import cannot become a way around it.
+func (a *App) settingCategoryAllowed(p auth.Principal, category string) bool {
+	if p.HasRole("platform-admin") {
+		return true
+	}
+	for _, role := range settingCategoryRoles()[category] {
+		if p.HasRole(role) {
+			return true
+		}
+	}
+	return false
+}
+
+// saveSettingValue persists one already normalized and validated category. It
+// exists so the import path stores settings exactly the way the HTTP handler
+// does: same encryption, same append-only version history.
+func (a *App) saveSettingValue(ctx context.Context, p auth.Principal, category string, value map[string]any) error {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	sealed, err := a.seal(raw)
+	if err != nil {
+		return err
+	}
+	tx, err := a.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var live, history int
+	if err = tx.QueryRowContext(ctx, a.store.Rebind(`SELECT version FROM system_settings WHERE category=?`), category).Scan(&live); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err = tx.QueryRowContext(ctx, a.store.Rebind(`SELECT COALESCE(MAX(version),0) FROM setting_versions WHERE category=?`), category).Scan(&history); err != nil {
+		return err
+	}
+	next := max(live, history) + 1
+	if _, err = tx.ExecContext(ctx, a.store.Rebind(`INSERT INTO setting_versions(category,version,value_encrypted,changed_by,reason) VALUES(?,?,?,?,?)`), category, next, sealed, p.UserID, "import"); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, a.store.Rebind(`INSERT INTO system_settings(category,version,value_encrypted,updated_by,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(category) DO UPDATE SET version=excluded.version,value_encrypted=excluded.value_encrypted,updated_by=excluded.updated_by,updated_at=excluded.updated_at`),
+		category, next, sealed, p.UserID, time.Now().UTC()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func boolInt(value bool) int {

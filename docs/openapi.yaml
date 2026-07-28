@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.32.0
+  version: 0.33.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -671,6 +671,49 @@ paths:
         summary: Stage by stage trace of one MCP call with the session sequence around it,
         parameters: [{ $ref: "#/components/parameters/Id" }],
         responses: { "200": { description: Call steps and session sequence } },
+      }
+  /api/v1/admin/settings-export:
+    get:
+      {
+        summary: Export every configured setting category as one document with secrets masked,
+        responses: { "200": { description: Export document } },
+      }
+  /api/v1/admin/settings-import:
+    post:
+      {
+        summary: Preview or apply an exported settings document; defaults to a dry run that reports the per-category difference,
+        parameters:
+          [
+            { name: apply, in: query, schema: { type: boolean } },
+            { name: force, in: query, schema: { type: boolean } },
+          ],
+        responses: { "200": { description: Per-category result with the changes each one would make } },
+      }
+  /api/v1/admin/settings/{category}/versions/{version}:
+    get:
+      {
+        summary: One stored setting version with its secrets masked and the difference against the current value,
+        parameters:
+          [
+            { $ref: "#/components/parameters/Category" },
+            { name: version, in: path, required: true, schema: { type: integer } },
+          ],
+        responses: { "200": { description: Version value and diff } },
+      }
+  /api/v1/admin/settings/{category}/versions/{version}/restore:
+    post:
+      {
+        summary: Restore a previous setting version as a new version,
+        parameters:
+          [
+            { $ref: "#/components/parameters/Category" },
+            { name: version, in: path, required: true, schema: { type: integer } },
+          ],
+        responses:
+          {
+            "200": { description: Saved as a new version },
+            "404": { description: Unknown version },
+          },
       }
   /api/v1/admin/mcp/sessions:
     get:

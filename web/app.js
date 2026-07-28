@@ -1377,7 +1377,12 @@ function renderSettingFields(category, value) {
           : reference
             ? `관리 Secret 참조: ${current}`
             : "저장 시 암호화되며 다시 원문으로 표시되지 않습니다.";
-        return `<label data-field-key="${key}">${esc(label)}<input data-setting-key="${key}" data-setting-type="password" data-secret-stored="${stored}" type="password" value="${esc(shown)}" autocomplete="new-password" /><small class="field-help">${esc(help)}</small></label>`;
+        // 저장된 비밀값을 지우려면 명시적인 조작이 필요합니다. 입력란을 비우는
+        // 것만으로는 "변경 없음"과 구분되지 않아 값이 그대로 유지됩니다.
+        const clearButton = stored
+          ? `<button type="button" class="secondary" data-clear-secret="${key}">저장된 값 지우기</button>`
+          : "";
+        return `<label data-field-key="${key}">${esc(label)}<input data-setting-key="${key}" data-setting-type="password" data-secret-stored="${stored}" type="password" value="${esc(shown)}" autocomplete="new-password" /><small class="field-help">${esc(help)}</small>${clearButton}</label>`;
       }
       const inputType = type === "array" ? "text" : type;
       const shown = Array.isArray(current) ? current.join(",") : current;
@@ -1401,7 +1406,9 @@ function renderSettingFields(category, value) {
           type === "boolean"
             ? field.checked
             : type === "number"
-              ? Number(field.value)
+              ? field.value.trim() === ""
+                ? undefined
+                : Number(field.value)
               : type === "array"
                 ? field.value
                     .split(",")
@@ -1414,6 +1421,8 @@ function renderSettingFields(category, value) {
                       (!field.value && field.dataset.secretStored === "true"))
                   ? "********"
                 : field.value;
+          // 비운 숫자 항목은 0 으로 저장되지 않도록 키 자체를 제거합니다.
+          if (next[field.dataset.settingKey] === undefined) delete next[field.dataset.settingKey];
           $("#setting-json").value = JSON.stringify(next, null, 2);
           field.setCustomValidity("");
           if (field.dataset.settingKey === "tlsVerify") applyTLSFieldState();
@@ -1430,20 +1439,162 @@ function renderSettingFields(category, value) {
           if (field.value === "********") field.select();
         }),
     );
+  $$("[data-clear-secret]").forEach(
+    (button) =>
+      (button.onclick = () => {
+        const key = button.dataset.clearSecret;
+        const field = document.querySelector(`[data-setting-key="${key}"]`);
+        if (!field || !confirm(`${key} 에 저장된 비밀값을 지웁니다. 저장하면 이 항목은 비어 있게 됩니다.`)) return;
+        field.dataset.secretStored = "false";
+        field.value = "";
+        field.dispatchEvent(new Event("input"));
+        button.remove();
+      }),
+  );
   applyTLSFieldState();
 }
+
+// 저장 중인 설정의 버전. 다른 관리자가 먼저 저장했으면 서버가 409 로 막고,
+// 화면은 그 사실과 함께 다시 불러올지 묻습니다. 마지막 저장이 이기는 조용한
+// 덮어쓰기가 설정 화면에서 가장 흔한 사고입니다.
+let loadedSettingVersion = 0;
+
+async function saveSettingValue(category, json, force = false) {
+  const body = JSON.parse(json);
+  if (loadedSettingVersion > 0) body.expectedVersion = loadedSettingVersion;
+  try {
+    return await api(`/api/v1/admin/settings/${category}${force ? "?force=true" : ""}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    if (error.status === 409) {
+      if (confirm(`${error.message}\n\n지금 화면을 다시 불러올까요? (편집 중인 내용은 사라집니다)`)) {
+        await loadCurrentSetting(category);
+      }
+      return null;
+    }
+    if (error.status === 400 && /setting_validation_failed|검증|unreachable|refused|dial|timeout/i.test(`${error.title || ""} ${error.message}`)) {
+      // 대상 서버 점검 중에도 설정을 준비할 수 있어야 합니다. 다만 건너뛴
+      // 사실을 저장 결과와 감사 로그에 남깁니다.
+      if (confirm(`연결 검증에 실패했습니다.\n\n${error.message}\n\n검증을 건너뛰고 그대로 저장할까요?`)) {
+        return saveSettingValue(category, json, true);
+      }
+      return null;
+    }
+    throw error;
+  }
+}
+
+// 설정 내보내기·가져오기
+// 온프레미스에서는 검증한 환경을 다른 환경에 그대로 옮기는 일이 잦습니다. 파일에
+// 비밀값을 담지 않고, 적용 전에 무엇이 바뀌는지 먼저 보여 주는 것이 핵심입니다.
+let importDocument = null;
+function setupSettingTransfer(capabilities) {
+  const block = $("#setting-transfer");
+  block.hidden = !capabilities.platform;
+  if (!capabilities.platform) return;
+  $("#export-settings").onclick = () => {
+    location.href = "/api/v1/admin/settings-export";
+  };
+  const output = $("#import-settings-result");
+  const readFile = async () => {
+    const file = $("#import-settings-file").files?.[0];
+    if (!file) {
+      output.innerHTML = '<p class="field-help">가져올 JSON 파일을 먼저 선택하세요.</p>';
+      return null;
+    }
+    return file.text();
+  };
+  const render = (result) => {
+    const items = rows(result.results);
+    const label = { ready: "적용 대기", applied: "적용됨", unchanged: "변경 없음", invalid: "검증 실패", forbidden: "권한 없음", skipped: "알 수 없는 영역", failed: "저장 실패" };
+    output.innerHTML = `<div class="notice ${result.dryRun ? "" : "ok"}">${result.dryRun ? "미리보기" : `적용 완료 · ${result.applied}개 영역`}</div>
+<table><thead><tr><th>영역</th><th>상태</th><th>변경 항목</th></tr></thead><tbody>${items
+      .map(
+        (item) =>
+          `<tr><td>${esc(item.category)}</td><td>${esc(label[item.status] || item.status)}<br><small>${esc(item.detail || "")}</small></td>
+<td>${rows(item.changes).map((change) => `${esc(change.field)}: <code>${esc(change.before)}</code> → <code>${esc(change.after)}</code>`).join("<br>") || "-"}
+${item.missingSecrets ? `<br><small>입력 필요: ${esc(item.missingSecrets.join(", "))}</small>` : ""}</td></tr>`,
+      )
+      .join("")}</tbody></table>`;
+  };
+  $("#preview-import-settings").onclick = async () => {
+    const text = await readFile();
+    if (!text) return;
+    try {
+      importDocument = text;
+      render(await api("/api/v1/admin/settings-import", { method: "POST", body: text }));
+      $("#apply-import-settings").hidden = false;
+    } catch (error) {
+      output.innerHTML = `<div class="notice error">${esc(error.message)}</div>`;
+    }
+  };
+  $("#apply-import-settings").onclick = async () => {
+    if (!importDocument || !confirm("미리본 변경 내용을 지금 적용합니다. 각 영역은 새 버전으로 기록되어 되돌릴 수 있습니다.")) return;
+    try {
+      render(await api("/api/v1/admin/settings-import?apply=true", { method: "POST", body: importDocument }));
+      $("#apply-import-settings").hidden = true;
+      await loadCurrentSetting($("#category").value);
+    } catch (error) {
+      output.innerHTML = `<div class="notice error">${esc(error.message)}</div>`;
+    }
+  };
+}
+
 // loadSettingHistory는 누가 언제 몇 번째 버전을 저장했는지만 보여 줍니다.
 // 저장된 값 자체는 암호문으로만 남아 있어 화면에 노출하지 않습니다.
 async function loadSettingHistory(category) {
   const target = $("#setting-history-list");
   try {
     const versions = rows(await api(`/api/v1/admin/settings/${category}/versions`));
-    target.innerHTML = `<table><thead><tr><th>버전</th><th>변경자</th><th>변경 시각</th></tr></thead><tbody>${versions
-      .map((item) => `<tr><td>v${item.version}</td><td>${esc(item.changedBy)}</td><td>${date(item.changedAt)}</td></tr>`)
+    target.innerHTML = `<table><thead><tr><th>버전</th><th>변경자</th><th>변경 시각</th><th></th></tr></thead><tbody>${versions
+      .map(
+        (item) =>
+          `<tr><td>v${item.version}</td><td>${esc(item.changedBy)}</td><td>${date(item.changedAt)}</td><td><button class="secondary" data-version-view="${item.version}">비교·되돌리기</button></td></tr>`,
+      )
       .join("")}</tbody></table>`;
+    $$("[data-version-view]").forEach(
+      (button) => (button.onclick = () => openSettingVersion(category, Number(button.dataset.versionView))),
+    );
     markEmptyTables();
   } catch (error) {
     target.innerHTML = `<div class="empty">${esc(error.message)}</div>`;
+  }
+}
+
+// openSettingVersion은 과거 버전과 현재 값의 차이를 먼저 보여 준 뒤 되돌립니다.
+// 비밀값은 "변경됨"까지만 표시하고 내용은 드러내지 않습니다.
+async function openSettingVersion(category, version) {
+  const dialog = $("#setting-version-dialog");
+  try {
+    const detail = await api(`/api/v1/admin/settings/${category}/versions/${version}`);
+    $("#setting-version-title").textContent = `${category} v${version} · 현재 v${detail.currentVersion}`;
+    $("#setting-version-meta").textContent = `${detail.changedBy || "알 수 없음"} · ${date(detail.changedAt)}`;
+    const changes = rows(detail.changes);
+    $("#setting-version-diff").innerHTML = changes.length
+      ? `<table><thead><tr><th>항목</th><th>현재</th><th>이 버전</th></tr></thead><tbody>${changes
+          .map(
+            (change) =>
+              `<tr><td>${esc(change.field)}${change.secret ? " 🔒" : ""}</td><td><code>${esc(change.before)}</code></td><td><code>${esc(change.after)}</code></td></tr>`,
+          )
+          .join("")}</tbody></table>`
+      : '<p class="field-help">현재 값과 동일합니다. 되돌려도 바뀌는 항목이 없습니다.</p>';
+    $("#setting-version-json").textContent = JSON.stringify(detail.value, null, 2);
+    $("#setting-version-restore").onclick = async () => {
+      if (!confirm(`${category} 설정을 v${version} 내용으로 되돌립니다. 이력은 지워지지 않고 새 버전으로 기록됩니다.`)) return;
+      try {
+        const result = await api(`/api/v1/admin/settings/${category}/versions/${version}/restore`, { method: "POST" });
+        dialog.close();
+        showAdmin(`v${version} 내용을 v${result.version} 으로 되돌렸습니다.`, true);
+        await loadCurrentSetting(category);
+      } catch (error) {
+        showAdmin(`되돌리지 못했습니다: ${error.message}`, false);
+      }
+    };
+    dialog.showModal();
+  } catch (error) {
+    showAdmin(`설정 버전을 불러오지 못했습니다: ${error.message}`, false);
   }
 }
 
@@ -1668,6 +1819,7 @@ function setupAdmin(roles, capabilities) {
     try {
       const x = await api(`/api/v1/admin/settings/${category}`);
       if ($("#category").value !== category) return;
+      loadedSettingVersion = x.version || 0;
       $("#setting-json").value = JSON.stringify(x.value, null, 2);
       renderSettingFields(category, x.value);
       const maskedCount = (x.maskedFields || []).length;
@@ -1686,6 +1838,7 @@ function setupAdmin(roles, capabilities) {
         showAdmin(`설정을 불러오지 못했습니다: ${e.message}`, false);
         return;
       }
+      loadedSettingVersion = 0;
       const defaults = settingDefaults(category);
       $("#setting-json").value = JSON.stringify(defaults, null, 2);
       renderSettingFields(category, defaults);
@@ -1847,10 +2000,8 @@ function setupAdmin(roles, capabilities) {
       JSON.parse($("#setting-json").value);
       button.disabled = true;
       button.textContent = "저장·검증 중…";
-      const x = await api(`/api/v1/admin/settings/${$("#category").value}`, {
-        method: "PUT",
-        body: $("#setting-json").value,
-      });
+      const x = await saveSettingValue($("#category").value, $("#setting-json").value);
+      if (!x) return;
       if ($("#category").value === "keycloak" && bootstrapInfo.required) {
         showAdmin(
           `버전 ${x.version} 저장 완료. 이제 “Keycloak 로그인 시험”으로 platform-admin 로그인을 완료하세요. 성공할 때까지 최초 관리자 복구 세션은 유지됩니다.`,
@@ -1862,6 +2013,9 @@ function setupAdmin(roles, capabilities) {
           : "";
         showAdmin(`버전 ${x.version} 저장 완료.${restart}`, true);
       }
+      if (x.validationSkipped) {
+        renderSettingResult(false, "연결 검증을 건너뛰고 저장했습니다", [x.validationSkipped, x.warning]);
+      }
       await loadCurrentSetting($("#category").value);
     } catch (e) {
       renderSettingResult(false, "설정을 저장하지 못했습니다", [e.message]);
@@ -1871,6 +2025,9 @@ function setupAdmin(roles, capabilities) {
       button.textContent = "저장";
     }
   };
+  setupSettingTransfer(capabilities);
+  $("#setting-version-close").onclick = () => $("#setting-version-dialog").close();
+  $("#setting-version-cancel").onclick = () => $("#setting-version-dialog").close();
   $("#delete-setting").onclick = async () => {
     const category = $("#category").value;
     if (!confirm(`${settingCategoryMeta[category]?.[0] || category} 설정을 삭제하시겠습니까?`)) return;

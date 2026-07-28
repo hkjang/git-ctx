@@ -376,6 +376,7 @@
               </div>
               <div class="button-row">
                 <button id="acl-guide-button" class="secondary" type="button" data-guide="acl">ACL 설정 가이드</button>
+                <button id="settings-workflow-guide" class="secondary" type="button" data-guide="settings-workflow">저장·이력·이관 가이드</button>
                 <button id="setting-guide-button" class="secondary" type="button">이 탭 가이드</button>
               </div>
             </div>
@@ -445,6 +446,17 @@
                 <details id="setting-history" class="wide advanced-json">
                   <summary>변경 이력</summary>
                   <div id="setting-history-list" class="table-wrap"></div>
+                </details>
+                <details id="setting-transfer" class="wide advanced-json">
+                  <summary>설정 내보내기 · 가져오기</summary>
+                  <p class="field-help">전체 설정을 JSON 한 파일로 옮깁니다. 비밀값은 포함되지 않으며, 가져오는 환경에 이미 있는 비밀값은 그대로 유지됩니다.</p>
+                  <div class="button-row">
+                    <button id="export-settings" type="button" class="secondary">내보내기</button>
+                    <label class="inline-field">가져올 파일<input id="import-settings-file" type="file" accept="application/json,.json" /></label>
+                    <button id="preview-import-settings" type="button" class="secondary">변경 미리보기</button>
+                    <button id="apply-import-settings" type="button" hidden>미리본 내용 적용</button>
+                  </div>
+                  <div id="import-settings-result" class="table-wrap"></div>
                 </details>
                 <div id="setting-test-result" class="wide result-panel" hidden></div>
                 <div class="wide setting-actions">
@@ -750,6 +762,21 @@
           <button id="index-policy-cancel" type="button" class="secondary">취소</button>
         </div>
       </form>
+    </dialog>
+    <dialog id="setting-version-dialog" class="app-dialog guide-dialog">
+      <div class="dialog-head">
+        <strong id="setting-version-title">설정 버전</strong>
+        <button id="setting-version-close" type="button" aria-label="닫기">×</button>
+      </div>
+      <p id="setting-version-meta" class="field-help"></p>
+      <h4>현재 값과의 차이</h4>
+      <div id="setting-version-diff" class="table-wrap"></div>
+      <h4>이 버전의 전체 값</h4>
+      <pre id="setting-version-json" class="result-panel"></pre>
+      <div class="dialog-foot">
+        <button id="setting-version-restore" type="button">이 버전으로 되돌리기</button>
+        <button id="setting-version-cancel" type="button" class="secondary">닫기</button>
+      </div>
     </dialog>
     <dialog id="mcp-trace-dialog" class="app-dialog guide-dialog">
       <div class="dialog-head">
