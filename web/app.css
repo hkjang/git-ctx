@@ -819,6 +819,7 @@ dd {
   border-radius: 999px;
   background: var(--bg-inset);
   font-size: 12px;
+  white-space: nowrap;
 }
 .state.completed,
 .state.fresh,
@@ -828,9 +829,18 @@ dd {
 }
 .state.failed,
 .state.stale,
-.state.dead {
+.state.dead,
+.state.error {
   background: var(--danger-soft);
   color: var(--danger);
+}
+.state.ok {
+  background: var(--success-soft);
+  color: var(--success);
+}
+.state.warn {
+  background: var(--warning-soft);
+  color: var(--warning);
 }
 .secret {
   background: var(--warning-soft);

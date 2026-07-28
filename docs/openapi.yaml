@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.22.0
+  version: 0.23.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -250,6 +250,12 @@ paths:
       {
         summary: Default index file policy used when a repository has no override,
         responses: { "200": { description: Default include extensions exclude prefixes and size limit } },
+      }
+  /api/v1/admin/index-diagnostics:
+    get:
+      {
+        summary: Per-repository index state with the blocking cause and the operator action,
+        responses: { "200": { description: Index diagnostics and job queue counters } },
       }
   /api/v1/admin/setup-status:
     get:

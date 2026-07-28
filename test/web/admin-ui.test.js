@@ -79,6 +79,9 @@ for (const id of [
   "index-policy-extensions",
   "index-policy-excludes",
   "index-policy-max-bytes",
+  "index-diagnostics",
+  "index-queue",
+  "refresh-index-diagnostics",
 ]) {
   assert.match(html, new RegExp(`id=["']${id}["']`), `missing ${id}`);
 }
@@ -121,6 +124,8 @@ assert.match(script, /api\/v1\/admin\/search-diagnostics/);
 assert.match(script, /settings\/\$\{category\}\/versions/);
 assert.match(script, /function markEmptyTables/);
 assert.match(script, /registerSelected/);
+assert.match(script, /api\/v1\/admin\/index-diagnostics/);
+assert.match(script, /indexStateLabels/);
 // 새로고침해도 화면이 유지되어야 하므로 위치를 주소에 기록하고 복원한다.
 assert.match(script, /function rememberView/);
 assert.match(script, /function parseViewHash/);

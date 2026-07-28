@@ -30,14 +30,27 @@ type Worker struct {
 	maxAttempts      int
 	embeddingFactory EmbeddingFactory
 	projection       Projection
+	lease            time.Duration
+	timeout          time.Duration
 }
 
 func (w *Worker) SetEmbeddingFactory(factory EmbeddingFactory) { w.embeddingFactory = factory }
 func (w *Worker) SetProjection(projection Projection)          { w.projection = projection }
 
 func New(s *store.Store, idx *indexer.Indexer, f SourceFactory) *Worker {
-	return &Worker{store: s, indexer: idx, factory: f, poll: 2 * time.Second, maxAttempts: 5}
+	return &Worker{store: s, indexer: idx, factory: f, poll: 2 * time.Second, maxAttempts: 5, lease: jobLease, timeout: jobTimeout}
 }
+
+const (
+	// jobLease is how long a claimed job may stay in `running` before another
+	// worker pass reclaims it. Without this a job that was interrupted by a
+	// restart, a crash or a hung remote call stays `running` forever and the
+	// repository never gets indexed again.
+	jobLease = 15 * time.Minute
+	// jobTimeout bounds one index run so a single unresponsive source server
+	// cannot block every other repository behind it.
+	jobTimeout = 30 * time.Minute
+)
 
 type job struct {
 	ID, RepositoryID, RefName string
@@ -52,6 +65,7 @@ func (w *Worker) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.poll)
 	defer ticker.Stop()
 	for {
+		_, _ = w.RecoverStaleJobs(ctx)
 		_, _ = w.RunOnce(ctx)
 		select {
 		case <-ctx.Done():
@@ -60,12 +74,39 @@ func (w *Worker) Run(ctx context.Context) {
 		}
 	}
 }
+
+// RecoverStaleJobs requeues jobs whose lease expired. It reports how many rows
+// were recovered so operators can see that indexing resumed by itself.
+func (w *Worker) RecoverStaleJobs(ctx context.Context) (int64, error) {
+	lease := w.lease
+	if lease <= 0 {
+		lease = jobLease
+	}
+	result, err := w.store.DB.ExecContext(ctx, w.store.Rebind(
+		`UPDATE index_jobs SET status='pending',next_run_at=?,error_message=? WHERE status='running' AND started_at IS NOT NULL AND started_at<?`),
+		time.Now().UTC(), "Requeued automatically: the previous run stopped without finishing (service restart or stalled source call).", time.Now().UTC().Add(-lease))
+	if err != nil {
+		return 0, err
+	}
+	recovered, _ := result.RowsAffected()
+	return recovered, nil
+}
+
 func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	j, ok, err := w.claim(ctx)
 	if err != nil || !ok {
 		return ok, err
 	}
-	err = w.execute(ctx, j)
+	timeout := w.timeout
+	if timeout <= 0 {
+		timeout = jobTimeout
+	}
+	jobCtx, cancel := context.WithTimeout(ctx, timeout)
+	err = w.execute(jobCtx, j)
+	cancel()
+	if errors.Is(err, context.DeadlineExceeded) {
+		err = fmt.Errorf("index job exceeded the %s limit; check source server responsiveness, repository size and the embedding endpoint", timeout)
+	}
 	if err == nil {
 		// error_message keeps the indexer's skip warning; only the status changes.
 		_, err = w.store.DB.ExecContext(ctx, w.store.Rebind(`UPDATE index_jobs SET status='completed',completed_at=? WHERE id=?`), time.Now().UTC(), j.ID)
@@ -138,7 +179,7 @@ func (w *Worker) execute(ctx context.Context, j job) (err error) {
 	r.ID, _ = strconv.ParseInt(external, 10, 64)
 	adapter, err := w.factory(ctx, r.SourceType)
 	if err != nil {
-		return err
+		return fmt.Errorf("%s connector: %w (check the %s setting)", r.SourceType, err, r.SourceType)
 	}
 	refName := j.RefName
 	if refName == "" {
@@ -146,7 +187,7 @@ func (w *Worker) execute(ctx context.Context, j job) (err error) {
 	}
 	refs, err := adapter.ListBranches(ctx, source.RepositoryRef{ProjectKey: r.ProjectKey, Slug: r.Slug})
 	if err != nil {
-		return fmt.Errorf("list branches: %w", err)
+		return fmt.Errorf("list branches for %s/%s: %w", r.ProjectKey, r.Slug, err)
 	}
 	tags, tagErr := adapter.ListTags(ctx, source.RepositoryRef{ProjectKey: r.ProjectKey, Slug: r.Slug})
 	if tagErr == nil {
@@ -160,7 +201,14 @@ func (w *Worker) execute(ctx context.Context, j job) (err error) {
 		}
 	}
 	if selected == nil {
-		return fmt.Errorf("source ref %q does not exist", refName)
+		available := make([]string, 0, min(len(refs), 8))
+		for index := range refs {
+			if index == 8 {
+				break
+			}
+			available = append(available, refs[index].Name)
+		}
+		return fmt.Errorf("source ref %q does not exist in %s/%s; available refs include %s", refName, r.ProjectKey, r.Slug, strings.Join(available, ", "))
 	}
 	activeIndexer := w.indexer
 	policy := indexer.DefaultPolicy()
@@ -173,12 +221,21 @@ func (w *Worker) execute(ctx context.Context, j job) (err error) {
 	if w.embeddingFactory != nil {
 		provider, err := w.embeddingFactory(ctx)
 		if err != nil {
-			return err
+			return fmt.Errorf("embedding provider: %w (check the model setting)", err)
+		}
+		// Probe the model before downloading anything. A wrong URL, model name or
+		// API key then fails in a second with a precise message instead of after
+		// the whole repository has been fetched.
+		probeCtx, cancelProbe := context.WithTimeout(ctx, 30*time.Second)
+		_, probeErr := provider.Embed(probeCtx, "git-ctx embedding probe")
+		cancelProbe()
+		if probeErr != nil {
+			return fmt.Errorf("embedding endpoint rejected a probe request: %w (model setting: run the connection test)", probeErr)
 		}
 		activeIndexer = indexer.NewWithEmbedder(w.store, policy, provider)
 	}
 	if err := activeIndexer.ApplyPendingJob(ctx, adapter, r.SourceType, r.Repository, []source.Reference{*selected}, j.ID); err != nil {
-		return err
+		return fmt.Errorf("index %s@%s: %w", r.ProjectKey+"/"+r.Slug, selected.Name, err)
 	}
 	if w.projection != nil {
 		if err := w.projection(ctx, j.RepositoryID, selected.Name); err != nil {

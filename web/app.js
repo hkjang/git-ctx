@@ -1828,6 +1828,7 @@ function setupOps(capabilities) {
   refreshSecurity(capabilities);
   refreshBackups(capabilities);
   setupIndexPolicyDialog();
+  $("#refresh-index-diagnostics").onclick = () => refreshIndexDiagnostics(capabilities);
   $("#refresh-setup-status").onclick = refreshSetupStatus;
   refreshSetupStatus();
   if (capabilities.qualityWrite) {
@@ -2339,9 +2340,61 @@ async function refreshOps(capabilities = activeCapabilities) {
         }),
     );
     markEmptyTables();
+    refreshIndexDiagnostics(capabilities);
     scheduleOpsRefresh(jobs, capabilities);
   } catch (e) {
     showAdmin(e.message, false);
+  }
+}
+
+const indexStateLabels = {
+  indexed: ["검색 가능", "ok"],
+  partial: ["일부 누락", "warn"],
+  indexing: ["색인 중", "warn"],
+  queued: ["대기 중", "warn"],
+  stalled: ["정체", "error"],
+  failed: ["실패", "error"],
+  empty: ["색인 0건", "error"],
+  "never-run": ["작업 없음", "error"],
+};
+
+// refreshIndexDiagnostics는 "왜 미색인인지"를 저장소별로 보여 줍니다. 상태 문자열만
+// 보여 주면 대기·정체·정책 불일치·엔드포인트 오류를 구분할 수 없습니다.
+async function refreshIndexDiagnostics(capabilities = activeCapabilities) {
+  if (!capabilities.source) return;
+  try {
+    const result = await api("/api/v1/admin/index-diagnostics");
+    const queue = result.queue || {};
+    const blocked = rows(result.repositories).filter((item) =>
+      ["failed", "stalled", "empty", "never-run"].includes(item.state),
+    ).length;
+    const banner = $("#index-queue");
+    banner.className = `notice ${blocked ? "error" : queue.running || queue.pending ? "warn" : "ok"}`;
+    banner.textContent = `대기 ${queue.pending || 0} · 실행 중 ${queue.running || 0} · 실패 ${queue.failed || 0} · 조치 필요 저장소 ${blocked}개`;
+    $("#index-diagnostics").innerHTML =
+      `<table><thead><tr><th>Library</th><th>상태</th><th>내용</th><th>원인과 조치</th><th></th></tr></thead><tbody>${rows(result.repositories)
+        .map((item) => {
+          const [label, tone] = indexStateLabels[item.state] || [item.state, ""];
+          return `<tr><td><code>${esc(item.libraryId)}</code><br><small>${esc(item.sourceType)} · ${esc(item.defaultBranch)}</small></td><td><span class="state ${esc(tone)}">${esc(label)}</span></td><td>청크 ${item.chunks} · 심볼 ${item.symbols}<br><small>${esc(item.commitId ? item.commitId.slice(0, 12) : "-")}</small></td><td>${esc(item.detail)}${item.action ? `<br><small>${esc(item.action)}</small>` : ""}</td><td><button data-index="${esc(item.repositoryId)}">재색인</button></td></tr>`;
+        })
+        .join("")}</tbody></table>`;
+    // 재색인 버튼은 등록 저장소 표와 동일한 핸들러를 사용합니다.
+    $$("#index-diagnostics [data-index]").forEach(
+      (button) =>
+        (button.hidden = !capabilities.sourceWrite) ||
+        (button.onclick = async () => {
+          try {
+            await api(`/api/v1/admin/repositories/${encodeURIComponent(button.dataset.index)}/index`, { method: "POST", body: "{}" });
+            toast("재색인 작업을 생성했습니다.", "ok");
+            refreshOps(capabilities);
+          } catch (error) {
+            reportError(error, "재색인");
+          }
+        }),
+    );
+    markEmptyTables();
+  } catch (error) {
+    $("#index-diagnostics").innerHTML = `<div class="notice error">${esc(error.message)}</div>`;
   }
 }
 

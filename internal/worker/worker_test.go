@@ -5,6 +5,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
+
+	"git-ctx/internal/embedding"
 
 	"git-ctx/internal/indexer"
 	"git-ctx/internal/source"
@@ -42,7 +45,8 @@ func TestRunOnceMovesRepeatedFailureToFailed(t *testing.T) {
 	if err = db.DB.QueryRow(`SELECT status,attempts,error_message FROM index_jobs WHERE id='fail-job'`).Scan(&status, &attempts, &message); err != nil {
 		t.Fatal(err)
 	}
-	if status != "failed" || attempts != 5 || message != "source unavailable" {
+	// The recorded message must name the failing step and where to fix it.
+	if status != "failed" || attempts != 5 || !strings.Contains(message, "source unavailable") || !strings.Contains(message, "bitbucket setting") {
 		t.Fatalf("status=%s attempts=%d message=%s", status, attempts, message)
 	}
 }
@@ -155,6 +159,86 @@ func TestWorkerJobReportsSkippedFilesInsteadOfFailing(t *testing.T) {
 	if !strings.Contains(message, "gone.md") {
 		t.Fatalf("the skipped file must stay visible on the job: %q", message)
 	}
+}
+
+// A job left in `running` by a restart or a hung remote call must return to the
+// queue by itself. Without this the repository stays unindexed forever and no
+// screen ever shows a failure.
+func TestStaleRunningJobsAreRequeued(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:stale-jobs?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('bitbucket:5','KCB','demo','Demo','bitbucket','5','/kcb/demo','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO index_jobs(id,repository_id,ref_name,kind,status,attempts,started_at) VALUES('stuck','bitbucket:5','main','initial','running',1,?)`, time.Now().UTC().Add(-time.Hour))
+	_, _ = db.DB.Exec(`INSERT INTO index_jobs(id,repository_id,ref_name,kind,status,attempts,started_at) VALUES('fresh','bitbucket:5','main','initial','running',1,?)`, time.Now().UTC())
+	w := New(db, indexer.New(db, indexer.DefaultPolicy()), func(context.Context, string) (source.RepositorySource, error) { return fakeSource{}, nil })
+	recovered, err := w.RecoverStaleJobs(ctx)
+	if err != nil || recovered != 1 {
+		t.Fatalf("recovered=%d err=%v", recovered, err)
+	}
+	var status, message string
+	if err = db.DB.QueryRow(`SELECT status,error_message FROM index_jobs WHERE id='stuck'`).Scan(&status, &message); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" || !strings.Contains(message, "Requeued automatically") {
+		t.Fatalf("stale job status=%s message=%q", status, message)
+	}
+	var fresh string
+	_ = db.DB.QueryRow(`SELECT status FROM index_jobs WHERE id='fresh'`).Scan(&fresh)
+	if fresh != "running" {
+		t.Fatalf("a job inside its lease must not be requeued: %s", fresh)
+	}
+	// The recovered job runs on the next pass instead of staying stuck.
+	if ok, runErr := w.RunOnce(ctx); !ok || runErr != nil {
+		t.Fatalf("ok=%v err=%v", ok, runErr)
+	}
+}
+
+// A misconfigured embedding endpoint must fail in seconds with a message that
+// names the setting, not after the whole repository has been downloaded.
+func TestEmbeddingProbeFailsFastWithActionableMessage(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:embedding-probe?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('bitbucket:6','KCB','demo','Demo','bitbucket','6','/kcb/demo','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO index_jobs(id,repository_id,ref_name,kind,status) VALUES('probe','bitbucket:6','main','initial','pending')`)
+	downloads := 0
+	counting := countingSource{downloads: &downloads}
+	w := New(db, indexer.New(db, indexer.DefaultPolicy()), func(context.Context, string) (source.RepositorySource, error) { return counting, nil })
+	w.SetEmbeddingFactory(func(context.Context) (embedding.Provider, error) { return brokenEmbedder{}, nil })
+	if ok, runErr := w.RunOnce(ctx); !ok || runErr == nil {
+		t.Fatalf("ok=%v err=%v", ok, runErr)
+	}
+	var message string
+	_ = db.DB.QueryRow(`SELECT error_message FROM index_jobs WHERE id='probe'`).Scan(&message)
+	if !strings.Contains(message, "embedding endpoint rejected a probe") || !strings.Contains(message, "model setting") {
+		t.Fatalf("message=%q", message)
+	}
+	if downloads != 0 {
+		t.Fatalf("the probe must run before any file download, downloads=%d", downloads)
+	}
+}
+
+type brokenEmbedder struct{}
+
+func (brokenEmbedder) Embed(context.Context, string) ([]float32, error) {
+	return nil, errors.New("embedding API 404: unknown model")
+}
+
+type countingSource struct {
+	fakeSource
+	downloads *int
+}
+
+func (c countingSource) GetFile(context.Context, source.RepositoryRef, string, string) ([]byte, error) {
+	*c.downloads++
+	return []byte("# Guide\ncontent"), nil
 }
 
 func TestProjectionFailureRetriesIndexJob(t *testing.T) {

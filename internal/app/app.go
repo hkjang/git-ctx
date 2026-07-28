@@ -454,6 +454,7 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/admin/search-diagnostics", a.authorize(http.HandlerFunc(a.searchDiagnostics), "search-admin"))
 	a.mux.Handle("GET /api/v1/admin/settings/{category}/versions", a.settingsAuthorize(http.HandlerFunc(a.settingVersions)))
 	a.mux.Handle("GET /api/v1/admin/health", a.authorize(http.HandlerFunc(a.adminHealth), "readonly-operator"))
+	a.mux.Handle("GET /api/v1/admin/index-diagnostics", a.authorize(http.HandlerFunc(a.indexDiagnostics), "source-admin", "readonly-operator"))
 	a.mux.Handle("GET /api/v1/admin/freshness", a.authorize(http.HandlerFunc(a.adminFreshness), "source-admin", "readonly-operator"))
 	a.mux.Handle("GET /api/v1/admin/database/status", a.authorize(http.HandlerFunc(a.adminDatabaseStatus), "readonly-operator"))
 	a.mux.Handle("POST /api/v1/admin/database/test", a.admin(http.HandlerFunc(a.testDatabaseTarget)))
@@ -4179,6 +4180,8 @@ func (a *App) setupStatus(w http.ResponseWriter, r *http.Request) {
 	repositories := count(`SELECT COUNT(*) FROM repositories WHERE enabled=1`)
 	chunks := count(`SELECT COUNT(*) FROM document_chunks`)
 	failedJobs := count(`SELECT COUNT(*) FROM index_jobs WHERE status='failed'`)
+	runningJobs := count(`SELECT COUNT(*) FROM index_jobs WHERE status='running'`)
+	pendingJobs := count(`SELECT COUNT(*) FROM index_jobs WHERE status='pending'`)
 	mappedIdentities := count(`SELECT COUNT(*) FROM user_identities WHERE bitbucket_user_slug<>'' OR gitlab_user_id<>''`)
 	users := count(`SELECT COUNT(*) FROM users WHERE status='active' AND id NOT IN ('bootstrap-admin','break-glass-admin')`)
 	sourceConfigured := configured["bitbucket"] || configured["gitlab"] || configured["confluence"] || configured["jira"]
@@ -4206,7 +4209,7 @@ func (a *App) setupStatus(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("등록된 저장소 %d개", repositories),
 			map[bool]string{true: "done", false: "todo"}[repositories > 0], "source-admin-section", ""),
 		step("index", "초기 색인",
-			fmt.Sprintf("색인 청크 %d개, 실패한 작업 %d개", chunks, failedJobs),
+			fmt.Sprintf("색인 청크 %d개 · 대기 %d · 실행 중 %d · 실패 %d", chunks, pendingJobs, runningJobs, failedJobs),
 			map[bool]string{true: "done", false: "todo"}[chunks > 0 && failedJobs == 0], "source-admin-section", ""),
 		step("backup", "백업 예약",
 			map[bool]string{true: "백업 설정이 저장되었습니다.", false: "예약 백업이 설정되지 않았습니다."}[configured["backup"]],
@@ -4314,6 +4317,109 @@ func (a *App) settingVersions(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOut(w, http.StatusOK, out)
 }
+
+// indexDiagnostics explains, per repository, whether content is searchable and
+// what is blocking it. "Not indexed" has half a dozen very different causes -
+// no job, a stalled worker, a failed download, a rejected embedding endpoint or
+// a file policy that matched nothing - and an operator cannot act on the word
+// "pending" alone.
+func (a *App) indexDiagnostics(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	rows, err := a.store.DB.QueryContext(ctx, `SELECT r.id,r.source_type,r.library_id,r.default_branch,r.indexed_at,
+COALESCE(s.commit_id,''),COALESCE(s.embedding_revision,''),s.indexed_at,
+(SELECT COUNT(*) FROM document_chunks c WHERE c.repository_id=r.id) AS chunks,
+(SELECT COUNT(*) FROM code_symbols y WHERE y.repository_id=r.id) AS symbols
+FROM repositories r LEFT JOIN repository_ref_states s ON s.repository_id=r.id AND s.ref_name=r.default_branch
+WHERE r.enabled=1 ORDER BY r.library_id`)
+	if err != nil {
+		problem(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	defer rows.Close()
+	type repositoryDiagnostic struct {
+		id                                                     string
+		sourceType, libraryID, defaultBranch, commit, revision string
+		indexedAt, refIndexedAt                                sql.NullTime
+		chunks, symbols                                        int
+	}
+	var repositories []repositoryDiagnostic
+	for rows.Next() {
+		var item repositoryDiagnostic
+		if err = rows.Scan(&item.id, &item.sourceType, &item.libraryID, &item.defaultBranch, &item.indexedAt,
+			&item.commit, &item.revision, &item.refIndexedAt, &item.chunks, &item.symbols); err != nil {
+			problem(w, http.StatusInternalServerError, "internal_error", err.Error())
+			return
+		}
+		repositories = append(repositories, item)
+	}
+	now := time.Now().UTC()
+	out := make([]map[string]any, 0, len(repositories))
+	counts := map[string]int{}
+	for _, item := range repositories {
+		var status, message string
+		var attempts, files int
+		var startedAt, completedAt sql.NullTime
+		_ = a.store.DB.QueryRowContext(ctx, a.store.Rebind(`SELECT status,attempts,error_message,files_processed,started_at,completed_at
+FROM index_jobs WHERE repository_id=? ORDER BY created_at DESC LIMIT 1`), item.id).Scan(&status, &attempts, &message, &files, &startedAt, &completedAt)
+		state, detail, action := indexState(item.chunks, status, message, files, startedAt, now)
+		counts[state]++
+		entry := map[string]any{
+			"repositoryId": item.id, "libraryId": item.libraryID, "sourceType": item.sourceType,
+			"defaultBranch": item.defaultBranch, "chunks": item.chunks, "symbols": item.symbols,
+			"commitId": item.commit, "embeddingRevision": item.revision,
+			"state": state, "detail": detail, "action": action,
+			"lastJob": map[string]any{"status": status, "attempts": attempts, "filesProcessed": files, "error": message},
+		}
+		if item.refIndexedAt.Valid {
+			entry["refIndexedAt"] = item.refIndexedAt.Time
+		}
+		if startedAt.Valid {
+			entry["startedAt"] = startedAt.Time
+		}
+		if completedAt.Valid {
+			entry["completedAt"] = completedAt.Time
+		}
+		out = append(out, entry)
+	}
+	var pending, running, failed int64
+	_ = a.store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM index_jobs WHERE status='pending'`).Scan(&pending)
+	_ = a.store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM index_jobs WHERE status='running'`).Scan(&running)
+	_ = a.store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM index_jobs WHERE status='failed'`).Scan(&failed)
+	jsonOut(w, http.StatusOK, map[string]any{
+		"repositories": out, "states": counts,
+		"queue":     map[string]int64{"pending": pending, "running": running, "failed": failed},
+		"checkedAt": now,
+	})
+}
+
+// indexState turns the raw job row into a state an operator can act on.
+func indexState(chunks int, status, message string, files int, startedAt sql.NullTime, now time.Time) (state, detail, action string) {
+	stalled := status == "running" && startedAt.Valid && now.Sub(startedAt.Time) > jobStallWarning
+	switch {
+	case status == "":
+		return "never-run", "색인 작업이 한 번도 생성되지 않았습니다.", "등록 저장소 목록에서 [재색인]을 실행하세요."
+	case status == "failed":
+		return "failed", "마지막 색인 작업이 실패했습니다: " + truncateText(message, 300), "오류 원인을 해결한 뒤 [재시도]하세요."
+	case stalled:
+		return "stalled", "작업이 " + fmt.Sprint(int(now.Sub(startedAt.Time).Minutes())) + "분째 실행 중입니다.", "소스 서버 응답과 임베딩 엔드포인트를 확인하세요. 리스 시간이 지나면 자동으로 다시 큐에 넣습니다."
+	case status == "running":
+		return "indexing", "색인이 진행 중입니다. 처리 파일 " + fmt.Sprint(files) + "개.", "완료될 때까지 기다리세요. 검색은 소스 API failover로 동작합니다."
+	case status == "pending":
+		return "queued", "색인 작업이 대기 중입니다.", "Worker 동작과 메타 DB 연결을 확인하세요."
+	case chunks == 0 && message != "":
+		return "empty", "작업은 완료됐지만 색인된 내용이 없습니다: " + truncateText(message, 300), "색인 정책의 확장자와 제외 경로를 확인하세요."
+	case chunks == 0:
+		return "empty", "작업은 완료됐지만 색인된 청크가 0개입니다.", "색인 정책의 확장자와 제외 경로를 확인한 뒤 재색인하세요."
+	case message != "":
+		return "partial", "색인됐지만 일부 파일을 건너뛰었습니다: " + truncateText(message, 300), "건너뛴 파일이 필요하면 원인을 해결하고 재색인하세요."
+	default:
+		return "indexed", fmt.Sprintf("청크 %d개가 검색 가능합니다.", chunks), ""
+	}
+}
+
+// jobStallWarning is when a running job starts looking stuck to an operator.
+// The worker reclaims it slightly later, so the screen warns before that.
+const jobStallWarning = 10 * time.Minute
 
 func (a *App) adminFreshness(w http.ResponseWriter, r *http.Request) {
 	sloMinutes := 60

@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1398,5 +1399,43 @@ func TestForwardedIPRequiresConfiguredTrustedProxy(t *testing.T) {
 	}
 	if got := a.requestIP(req); got != "10.20.30.40" {
 		t.Fatalf("trusted forwarded IP rejected: %s", got)
+	}
+}
+
+// The index diagnostics must name a cause and an action for every state an
+// operator can land in, because "not indexed" alone is not actionable.
+func TestIndexStateExplainsEveryBlockedCase(t *testing.T) {
+	now := time.Now().UTC()
+	stalled := sql.NullTime{Time: now.Add(-30 * time.Minute), Valid: true}
+	fresh := sql.NullTime{Time: now.Add(-time.Minute), Valid: true}
+	for _, testCase := range []struct {
+		name              string
+		chunks            int
+		status, message   string
+		files             int
+		startedAt         sql.NullTime
+		wantState         string
+		wantDetailKeyword string
+		wantAction        bool
+	}{
+		{"no job", 0, "", "", 0, sql.NullTime{}, "never-run", "생성되지", true},
+		{"failed", 0, "failed", "embedding endpoint rejected a probe request", 0, fresh, "failed", "probe", true},
+		{"stalled", 0, "running", "", 3, stalled, "stalled", "분째", true},
+		{"running", 0, "running", "", 3, fresh, "indexing", "진행", true},
+		{"queued", 0, "pending", "", 0, sql.NullTime{}, "queued", "대기", true},
+		{"policy matched nothing", 0, "completed", "12 file(s) listed but none matched the index policy", 0, fresh, "empty", "none matched the index policy", true},
+		{"partial", 7, "completed", "1 file(s) skipped: gone.md", 7, fresh, "partial", "건너뛰", true},
+		{"indexed", 7, "completed", "", 7, fresh, "indexed", "검색 가능", false},
+	} {
+		state, detail, action := indexState(testCase.chunks, testCase.status, testCase.message, testCase.files, testCase.startedAt, now)
+		if state != testCase.wantState {
+			t.Errorf("%s: state=%s want %s", testCase.name, state, testCase.wantState)
+		}
+		if !strings.Contains(detail, testCase.wantDetailKeyword) {
+			t.Errorf("%s: detail=%q must mention %q", testCase.name, detail, testCase.wantDetailKeyword)
+		}
+		if testCase.wantAction != (action != "") {
+			t.Errorf("%s: action=%q", testCase.name, action)
+		}
 	}
 }
