@@ -62,22 +62,11 @@ func (s *Service) CreateWithRestrictions(ctx context.Context, userID, name strin
 	if name == "" || len(name) > 100 {
 		return Key{}, "", errors.New("name is required and must not exceed 100 characters")
 	}
-	allowed := map[string]bool{
-		"resolve-library-id": true, "query-docs": true,
-		"search-repositories": true, "search-source": true,
-		"get-repository-map": true, "find-symbol": true, "get-symbol-context": true,
-		"trace-dependencies": true, "compare-refs": true, "get-change-impact": true,
-		"get-context-pack": true, "find-runbook": true, "export-context": true,
-		"explain-search-result": true,
-		"get-platform-status":   true, "list-index-jobs": true, "reindex-repository": true,
-	}
-	for _, scope := range scopes {
-		if !allowed[scope] {
-			return Key{}, "", fmt.Errorf("unsupported scope %q", scope)
-		}
-	}
 	if len(scopes) == 0 {
 		scopes = []string{"resolve-library-id", "query-docs"}
+	}
+	if err := validateScopes(scopes); err != nil {
+		return Key{}, "", err
 	}
 	if err := validateRestrictions(restrictions); err != nil {
 		return Key{}, "", err
@@ -114,6 +103,61 @@ func (s *Service) CreateWithRestrictions(ctx context.Context, userID, name strin
 		return Key{}, "", err
 	}
 	return Key{ID: id, Name: name, Prefix: prefix, Scopes: scopes, Restrictions: restrictions, ExpiresAt: expiresAt, CreatedAt: now, Status: "active"}, plain, nil
+}
+
+func validateScopes(scopes []string) error {
+	allowed := map[string]bool{
+		"resolve-library-id": true, "query-docs": true,
+		"search-repositories": true, "search-source": true, "search-code": true,
+		"get-repository-map": true, "find-symbol": true, "get-symbol-context": true,
+		"trace-dependencies": true, "compare-refs": true, "get-change-impact": true,
+		"get-context-pack": true, "find-runbook": true, "export-context": true,
+		"explain-search-result": true,
+		"get-platform-status":   true, "list-index-jobs": true, "reindex-repository": true,
+	}
+	if len(scopes) == 0 {
+		return errors.New("at least one scope is required")
+	}
+	seen := map[string]bool{}
+	for _, scope := range scopes {
+		if !allowed[scope] {
+			return fmt.Errorf("unsupported scope %q", scope)
+		}
+		if seen[scope] {
+			return fmt.Errorf("duplicate scope %q", scope)
+		}
+		seen[scope] = true
+	}
+	return nil
+}
+
+func (s *Service) UpdateScopes(ctx context.Context, userID, id string, scopes []string) error {
+	return s.updateScopes(ctx, userID, id, scopes, false)
+}
+
+func (s *Service) UpdateScopesAdmin(ctx context.Context, id string, scopes []string) error {
+	return s.updateScopes(ctx, "", id, scopes, true)
+}
+
+func (s *Service) updateScopes(ctx context.Context, userID, id string, scopes []string, administrator bool) error {
+	if err := validateScopes(scopes); err != nil {
+		return err
+	}
+	query := `UPDATE api_keys SET scopes=? WHERE id=? AND revoked_at IS NULL`
+	args := []any{strings.Join(scopes, ","), id}
+	if !administrator {
+		query += ` AND user_id=?`
+		args = append(args, userID)
+	}
+	result, err := s.store.DB.ExecContext(ctx, s.store.Rebind(query), args...)
+	if err != nil {
+		return err
+	}
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		return errors.New("active API key not found")
+	}
+	return nil
 }
 func (s *Service) Authenticate(ctx context.Context, raw string) (userID, keyID, prefix string, scopes []string, err error) {
 	info, err := s.AuthenticateRequest(ctx, raw, "")

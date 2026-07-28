@@ -126,3 +126,15 @@ Kubernetes 배포는 [deploy/kubernetes/README.md](deploy/kubernetes/README.md)�
 
 인터넷이 차단된 환경의 이미지 반입과 실행 절차는
 [docs/offline-deployment.md](docs/offline-deployment.md)를 참고하십시오.
+
+### 원격 소스 검색
+
+`search-code`는 Library ID 없이 접근 가능한 저장소 이름과 코드를 함께 검색합니다.
+GitLab은 Project Search API(`scope=blobs`), Bitbucket Server는 Code Search API를
+사용하며, 로컬 색인이 아직 없는 파일도 ACL 검증과 Secret 마스킹 후 결과에
+포함합니다. 예를 들어 `dify 소스 검색해`는 검색 명령 표현을 제거한 `dify`를
+원격 API에 전달합니다. 기존 `search-source`와 `query-docs`도 같은 안전한 원격
+검색 결과 경로를 사용합니다.
+
+발급된 MCP API 키의 도구 Scope는 사용자 키 관리 화면에서 변경할 수 있으며,
+관리자는 API 키 관리 API를 통해 Scope를 수정할 수 있습니다.

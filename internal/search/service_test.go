@@ -56,7 +56,10 @@ func TestHybridRankingAndGitLabSource(t *testing.T) {
 	}
 }
 
-type querySource struct{ calls int }
+type querySource struct {
+	calls     int
+	lastQuery string
+}
 
 func (q *querySource) ListProjects(context.Context) ([]source.Project, error) { return nil, nil }
 func (q *querySource) ListRepositories(context.Context, string) ([]source.Repository, error) {
@@ -85,6 +88,7 @@ func (q *querySource) RegisterWebhook(context.Context, source.RepositoryRef, str
 }
 func (q *querySource) SearchQuery(_ context.Context, repo source.RepositoryRef, ref, query string, limit int) ([]source.QueryResult, error) {
 	q.calls++
+	q.lastQuery = query
 	return []source.QueryResult{{Path: "docs/source-api.md", Snippet: "source API result", CommitID: "remote-commit", LineStart: 4, LineEnd: 8}}, nil
 }
 
@@ -139,6 +143,35 @@ func TestRepositoryAndSourceSearchWithoutLibraryID(t *testing.T) {
 	}
 	if hidden, err := service.SearchSource(ctx, []string{"mallory"}, "GPU usage", "", "", "", "", 10); err != nil || len(hidden) != 0 || remote.calls != 1 {
 		t.Fatalf("ACL source leak=%#v calls=%d err=%v", hidden, remote.calls, err)
+	}
+}
+
+func TestSearchCodeReturnsRepositoryAndSafeUnindexedRemoteResult(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:unindexed-source-search?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch) VALUES('r','apps','dify','Dify','AI application platform','gitlab','1','/apps/dify','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r','alice','read')`)
+	remote := &querySource{}
+	service := New(db)
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) { return remote, nil })
+
+	result, err := service.SearchCode(ctx, []string{"alice"}, "dify 소스 검색해", "gitlab", "", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Query != "dify" || remote.lastQuery != "dify" || len(result.Repositories) != 1 || len(result.Hits) != 1 {
+		t.Fatalf("result=%#v remote=%#v", result, remote)
+	}
+	if result.Hits[0].Snippet != "source API result" || result.Hits[0].CommitID != "remote-commit" {
+		t.Fatalf("unindexed remote hit was not preserved safely: %#v", result.Hits[0])
+	}
+	hidden, err := service.SearchCode(ctx, []string{"mallory"}, "dify 소스 검색해", "", "", "", "", 10)
+	if err != nil || len(hidden.Repositories) != 0 || len(hidden.Hits) != 0 || remote.calls != 1 {
+		t.Fatalf("ACL leak=%#v calls=%d err=%v", hidden, remote.calls, err)
 	}
 }
 

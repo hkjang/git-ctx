@@ -272,12 +272,20 @@ func Catalog() []map[string]any {
 		{"name": "search-repositories", "description": "Searches accessible Bitbucket and GitLab projects and repositories without requiring a library ID.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
 				"query":      map[string]string{"type": "string", "description": "Project, repository, product, or description search text"},
-				"sourceType": map[string]any{"type": "string", "enum": []string{"bitbucket", "gitlab"}, "description": "Optional source filter"},
+				"sourceType": map[string]any{"type": "string", "enum": []string{"bitbucket", "gitlab", "confluence", "jira"}, "description": "Optional source filter"},
 				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 50}}}},
 		{"name": "search-source", "description": "Searches code and files through the connected Bitbucket or GitLab query API across accessible repositories.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
 				"query":      map[string]string{"type": "string", "description": "Code, symbol, API, or text query"},
-				"sourceType": map[string]any{"type": "string", "enum": []string{"bitbucket", "gitlab"}},
+				"sourceType": map[string]any{"type": "string", "enum": []string{"bitbucket", "gitlab", "confluence", "jira"}},
+				"project":    map[string]string{"type": "string", "description": "Optional project key or namespace"},
+				"repository": map[string]string{"type": "string", "description": "Optional repository slug or library ID"},
+				"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"},
+				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 50}}}},
+		{"name": "search-code", "description": "Finds accessible repositories and searches their source without requiring a library ID. Uses Bitbucket, GitLab, Confluence, or Jira query APIs when configured.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
+				"query":      map[string]string{"type": "string", "description": "Natural-language request, repository name, code symbol, API, or text query"},
+				"sourceType": map[string]any{"type": "string", "enum": []string{"bitbucket", "gitlab", "confluence", "jira"}},
 				"project":    map[string]string{"type": "string", "description": "Optional project key or namespace"},
 				"repository": map[string]string{"type": "string", "description": "Optional repository slug or library ID"},
 				"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"},
@@ -432,6 +440,28 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 				hits = filtered
 			}
 			text = formatSourceResults(hits)
+		}
+	case "search-code":
+		var result search.CodeSearchResult
+		result, err = s.search.SearchCode(r.Context(), principalACLs(p), stringArg(params.Arguments, "query"), stringArg(params.Arguments, "sourceType"), stringArg(params.Arguments, "project"), stringArg(params.Arguments, "repository"), stringArg(params.Arguments, "ref"), intArg(params.Arguments, "limit", 20))
+		if err == nil {
+			if len(p.AllowedRepositories) > 0 {
+				repositories := result.Repositories[:0]
+				for _, item := range result.Repositories {
+					if libraryAllowed(item.LibraryID, p.AllowedRepositories) {
+						repositories = append(repositories, item)
+					}
+				}
+				result.Repositories = repositories
+				hits := result.Hits[:0]
+				for _, hit := range result.Hits {
+					if libraryAllowed(hit.LibraryID, p.AllowedRepositories) {
+						hits = append(hits, hit)
+					}
+				}
+				result.Hits = hits
+			}
+			text = formatCodeSearch(result)
 		}
 	case "get-repository-map":
 		if p.KeyID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
@@ -829,12 +859,40 @@ func formatRepositories(items []search.RepositoryResult) string {
 
 func formatSourceResults(items []search.SourceResult) string {
 	if len(items) == 0 {
-		return "No source matches were found in accessible, safely indexed files. Broaden the query or run an index first."
+		return "No source matches were found in accessible repositories. Broaden the query, check the source connection, or run an index."
 	}
 	var b strings.Builder
 	b.WriteString("## Source Search Results\n")
 	for _, item := range items {
 		fmt.Fprintf(&b, "\n### %s · %s\n\n%s\n\nSource: %s://%s/%s@%s/%s#L%d-L%d\n", item.LibraryID, item.Path, item.Snippet, item.SourceType, item.ProjectKey, item.RepositorySlug, item.CommitID, item.Path, item.LineStart, item.LineEnd)
+	}
+	return b.String()
+}
+
+func formatCodeSearch(result search.CodeSearchResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Code Search\n\nNormalized query: `%s`\n", result.Query)
+	if result.Warning != "" {
+		fmt.Fprintf(&b, "\n> %s\n", result.Warning)
+	}
+	b.WriteString("\n### Repository Matches\n")
+	if len(result.Repositories) == 0 {
+		b.WriteString("\nNo repository names or descriptions matched.\n")
+	} else {
+		for _, item := range result.Repositories {
+			fmt.Fprintf(&b, "\n- **%s** — `%s` (%s, default ref `%s`)\n", item.Name, item.LibraryID, item.SourceType, item.DefaultBranch)
+			if item.Description != "" {
+				fmt.Fprintf(&b, "  %s\n", item.Description)
+			}
+		}
+	}
+	b.WriteString("\n### Source Matches\n")
+	if len(result.Hits) == 0 {
+		b.WriteString("\nNo matching source snippets were returned by the connected query APIs.\n")
+	} else {
+		for _, item := range result.Hits {
+			fmt.Fprintf(&b, "\n#### %s · %s\n\n%s\n\nSource: %s://%s/%s@%s/%s#L%d-L%d\n", item.LibraryID, item.Path, item.Snippet, item.SourceType, item.ProjectKey, item.RepositorySlug, item.CommitID, item.Path, item.LineStart, item.LineEnd)
+		}
 	}
 	return b.String()
 }

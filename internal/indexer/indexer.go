@@ -16,6 +16,7 @@ import (
 	"unicode"
 
 	"git-ctx/internal/codeintel"
+	"git-ctx/internal/contentsecurity"
 	"git-ctx/internal/embedding"
 	"git-ctx/internal/source"
 	"git-ctx/internal/store"
@@ -72,7 +73,7 @@ func (i *Indexer) ApplyPendingJob(ctx context.Context, adapter source.Repository
 }
 
 func (i *Indexer) syncRepository(ctx context.Context, adapter source.RepositorySource, sourceType string, repo source.Repository, refs []source.Reference, trackJobs bool) error {
-	if sourceType != "bitbucket" && sourceType != "gitlab" {
+	if sourceType != "bitbucket" && sourceType != "gitlab" && sourceType != "confluence" && sourceType != "jira" {
 		return errors.New("unsupported source type")
 	}
 	repoID := sourceType + ":" + fmt.Sprint(repo.ID)
@@ -100,7 +101,7 @@ func (i *Indexer) syncRepository(ctx context.Context, adapter source.RepositoryS
 		}
 		principal := p.Principal
 		if p.Kind == "group" {
-			principal = "group:" + strings.TrimPrefix(principal, "/")
+			principal = "group:" + strings.TrimPrefix(strings.TrimPrefix(principal, "group:"), "/")
 		}
 		if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES(?,?,?) ON CONFLICT(repository_id,principal) DO UPDATE SET permission=excluded.permission`), repoID, principal, p.Permission); err != nil {
 			return err
@@ -530,8 +531,6 @@ type chunk struct {
 }
 
 var headingRE = regexp.MustCompile(`^(#{1,6})\s+(.+?)\s*$`)
-var secretAssignmentRE = regexp.MustCompile(`(?i)(api[_-]?key|access[_-]?token|client[_-]?secret|password|passwd)\s*[:=]\s*["']?([A-Za-z0-9_./+=-]{8,})`)
-var awsKeyRE = regexp.MustCompile(`\bAKIA[A-Z0-9]{16}\b`)
 
 func parse(path, content string) []chunk {
 	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
@@ -567,20 +566,7 @@ func parse(path, content string) []chunk {
 	return out
 }
 func sanitize(content string) (string, string) {
-	if strings.Contains(content, "-----BEGIN PRIVATE KEY-----") || strings.Contains(content, "-----BEGIN RSA PRIVATE KEY-----") || strings.Contains(content, "-----BEGIN OPENSSH PRIVATE KEY-----") {
-		return "", "private_key"
-	}
-	finding := ""
-	masked := secretAssignmentRE.ReplaceAllStringFunc(content, func(value string) string {
-		finding = "credential_assignment"
-		at := strings.IndexAny(value, ":=")
-		if at < 0 {
-			return "[REDACTED]"
-		}
-		return value[:at+1] + " [REDACTED]"
-	})
-	masked = awsKeyRE.ReplaceAllStringFunc(masked, func(string) string { finding = "cloud_access_key"; return "[REDACTED]" })
-	return masked, finding
+	return contentsecurity.Sanitize(content)
 }
 func normalize(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))

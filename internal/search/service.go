@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"git-ctx/internal/contentsecurity"
 	"git-ctx/internal/embedding"
 	"git-ctx/internal/rerank"
 	"git-ctx/internal/source"
@@ -85,6 +86,13 @@ type RepositoryResult struct {
 type SourceResult struct {
 	LibraryID, SourceType, ProjectKey, RepositorySlug, Ref string
 	source.QueryResult
+}
+
+type CodeSearchResult struct {
+	Query        string
+	Repositories []RepositoryResult
+	Hits         []SourceResult
+	Warning      string
 }
 
 type SymbolResult struct {
@@ -633,12 +641,12 @@ func splitLibraryID(libraryID string) (string, string, bool) {
 }
 
 func (s *Service) SearchRepositories(ctx context.Context, principals []string, query, sourceType string, limit int) ([]RepositoryResult, error) {
-	query, sourceType = strings.TrimSpace(query), strings.ToLower(strings.TrimSpace(sourceType))
+	query, sourceType = NormalizeSourceQuery(query), strings.ToLower(strings.TrimSpace(sourceType))
 	if query == "" {
 		return nil, errors.New("query is required")
 	}
-	if sourceType != "" && sourceType != "bitbucket" && sourceType != "gitlab" {
-		return nil, errors.New("sourceType must be bitbucket, gitlab, or empty")
+	if sourceType != "" && sourceType != "bitbucket" && sourceType != "gitlab" && sourceType != "confluence" && sourceType != "jira" {
+		return nil, errors.New("sourceType must be bitbucket, gitlab, confluence, jira, or empty")
 	}
 	if len(principals) == 0 {
 		return []RepositoryResult{}, nil
@@ -707,13 +715,13 @@ WHERE r.enabled=1 AND (p.principal IN (` + placeholders + `) OR p.principal='*')
 }
 
 func (s *Service) SearchSource(ctx context.Context, principals []string, query, sourceType, project, repository, ref string, limit int) ([]SourceResult, error) {
-	query, sourceType = strings.TrimSpace(query), strings.ToLower(strings.TrimSpace(sourceType))
+	query, sourceType = NormalizeSourceQuery(query), strings.ToLower(strings.TrimSpace(sourceType))
 	project, repository, ref = strings.TrimSpace(project), strings.TrimSpace(repository), strings.TrimSpace(ref)
 	if query == "" {
 		return nil, errors.New("query is required")
 	}
-	if sourceType != "" && sourceType != "bitbucket" && sourceType != "gitlab" {
-		return nil, errors.New("sourceType must be bitbucket, gitlab, or empty")
+	if sourceType != "" && sourceType != "bitbucket" && sourceType != "gitlab" && sourceType != "confluence" && sourceType != "jira" {
+		return nil, errors.New("sourceType must be bitbucket, gitlab, confluence, jira, or empty")
 	}
 	if len(principals) == 0 {
 		return []SourceResult{}, nil
@@ -783,7 +791,7 @@ WHERE r.enabled=1 AND (p.principal IN (` + placeholders + `) OR p.principal='*')
 			lastErr = searchErr
 			continue
 		}
-		hits = s.indexedSourceHits(ctx, item.id, selectedRef, hits, limit-len(out))
+		hits = s.safeSourceHits(ctx, item.id, selectedRef, hits, limit-len(out))
 		for _, hit := range hits {
 			out = append(out, SourceResult{LibraryID: item.libraryID, SourceType: item.sourceType, ProjectKey: item.project, RepositorySlug: item.slug, Ref: selectedRef, QueryResult: hit})
 		}
@@ -795,6 +803,42 @@ WHERE r.enabled=1 AND (p.principal IN (` + placeholders + `) OR p.principal='*')
 		return nil, lastErr
 	}
 	return out, nil
+}
+
+// SearchCode combines repository discovery with source query APIs so callers
+// can find a repository by name even when no library ID or local index exists.
+func (s *Service) SearchCode(ctx context.Context, principals []string, query, sourceType, project, repository, ref string, limit int) (CodeSearchResult, error) {
+	normalized := NormalizeSourceQuery(query)
+	if normalized == "" {
+		return CodeSearchResult{}, errors.New("query is required")
+	}
+	repositories, repoErr := s.SearchRepositories(ctx, principals, normalized, sourceType, limit)
+	hits, sourceErr := s.SearchSource(ctx, principals, normalized, sourceType, project, repository, ref, limit)
+	result := CodeSearchResult{Query: normalized, Repositories: repositories, Hits: hits}
+	if sourceErr != nil {
+		result.Warning = "The remote source query API was unavailable; repository matches are still shown."
+	}
+	if repoErr != nil && sourceErr != nil {
+		return CodeSearchResult{}, sourceErr
+	}
+	return result, repoErr
+}
+
+// NormalizeSourceQuery removes common conversational search commands while
+// preserving the repository, symbol, or product terms sent to source APIs.
+func NormalizeSourceQuery(query string) string {
+	normalized := strings.TrimSpace(query)
+	for _, suffix := range []string{
+		"소스 검색해 줘", "소스 검색해줘", "소스 검색해", "소스 검색",
+		"코드 검색해 줘", "코드 검색해줘", "코드 검색해", "코드 검색",
+		"검색해 줘", "검색해줘", "검색해", "찾아 줘", "찾아줘",
+	} {
+		normalized = strings.TrimSpace(strings.TrimSuffix(normalized, suffix))
+	}
+	if normalized == "" {
+		return strings.TrimSpace(query)
+	}
+	return normalized
 }
 
 func (s *Service) Resolve(ctx context.Context, principals []string, name, query string) (libraries []Library, err error) {
@@ -946,9 +990,9 @@ WHERE r.library_id=? AND r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p
 		adapter, sourceErr := s.sources(ctx, sourceType)
 		if sourceErr == nil {
 			if querySearcher, ok := adapter.(source.QuerySearcher); ok {
-				remoteHits, queryErr := querySearcher.SearchQuery(ctx, source.RepositoryRef{ProjectKey: projectKey, Slug: repositorySlug}, ref, query, cfg.FinalK)
+				remoteHits, queryErr := querySearcher.SearchQuery(ctx, source.RepositoryRef{ProjectKey: projectKey, Slug: repositorySlug}, ref, NormalizeSourceQuery(query), cfg.FinalK)
 				if queryErr == nil && len(remoteHits) > 0 {
-					safeHits := s.indexedSourceHits(ctx, repoID, ref, remoteHits, cfg.FinalK)
+					safeHits := s.safeSourceHits(ctx, repoID, ref, remoteHits, cfg.FinalK)
 					if len(safeHits) > 0 {
 						span.SetAttributes(attribute.Int("git_ctx.search.result_count", len(safeHits)), attribute.String("git_ctx.search.mode", "source-query-api"))
 						return assembleSourceQueryResults(name, sourceType, baseID, ref, safeHits), nil
@@ -1092,7 +1136,7 @@ WHERE r.library_id=? AND r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p
 	}
 	return b.String(), nil
 }
-func (s *Service) indexedSourceHits(ctx context.Context, repoID, ref string, remote []source.QueryResult, limit int) []source.QueryResult {
+func (s *Service) safeSourceHits(ctx context.Context, repoID, ref string, remote []source.QueryResult, limit int) []source.QueryResult {
 	out := make([]source.QueryResult, 0, min(limit, len(remote)))
 	seen := map[string]bool{}
 	for _, hit := range remote {
@@ -1112,6 +1156,25 @@ WHERE repository_id=? AND ref_name=? AND file_path=?
 ORDER BY CASE WHEN line_end>=? AND line_start<=? THEN 0 ELSE 1 END,ABS(line_start-?) LIMIT 1`),
 			repoID, ref, hit.Path, lineStart, lineEnd, lineStart).Scan(&safe.Path, &safe.Snippet, &safe.CommitID, &safe.LineStart, &safe.LineEnd)
 		if err != nil {
+			snippet, finding := contentsecurity.Sanitize(strings.TrimSpace(hit.Snippet))
+			if finding == "private_key" || snippet == "" {
+				continue
+			}
+			if len(snippet) > 16000 {
+				snippet = snippet[:16000]
+			}
+			safe = hit
+			safe.Snippet = snippet
+			safe.LineStart = lineStart
+			safe.LineEnd = lineEnd
+			if safe.CommitID == "" {
+				safe.CommitID = ref
+			}
+			seen[safe.Path] = true
+			out = append(out, safe)
+			if len(out) == limit {
+				break
+			}
 			continue
 		}
 		neighborRows, neighborErr := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT content,line_start,line_end FROM document_chunks

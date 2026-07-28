@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.17.0
+  version: 0.18.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -75,6 +75,13 @@ paths:
         parameters: [{ $ref: "#/components/parameters/Id" }],
         responses: { "204": { description: Disabled } },
       }
+  /api/v1/me/api-keys/{id}/scopes:
+    put:
+      {
+        summary: Replace the allowed MCP tool scopes of an existing key,
+        parameters: [{ $ref: "#/components/parameters/Id" }],
+        responses: { "204": { description: Scopes updated } },
+      }
   /api/v1/me/api-keys/{id}/enable:
     post:
       {
@@ -125,6 +132,12 @@ paths:
       {
         summary: Test query-docs with current ACL,
         responses: { "200": { description: Text content } },
+      }
+  /api/v1/tools/search-code/test:
+    post:
+      {
+        summary: Search accessible repositories and remote source APIs without a library ID,
+        responses: { "200": { description: Repository and safe source matches } },
       }
   /api/v1/tools/repository-map/test:
     post:

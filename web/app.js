@@ -3,6 +3,8 @@ const categories = [
   "keycloak",
   "bitbucket",
   "gitlab",
+  "confluence",
+  "jira",
   "mcp",
   "search",
   "model",
@@ -46,6 +48,24 @@ const integrationSettingFields = {
     ["proxyUrl", "Proxy URL", "url", ""],
     ["timeoutSeconds", "Timeout(초)", "number", 30],
   ],
+  confluence: [
+    ["baseUrl", "Confluence Base URL", "url", ""],
+    ["authType", "인증 방식", "select:bearer|basic", "bearer"],
+    ["token", "Personal Access Token", "password", ""],
+    ["username", "Basic Auth Username", "text", ""],
+    ["password", "Basic Auth Password", "password", ""],
+    ["allowedPrincipals", "허용 사용자·그룹 (쉼표 구분)", "array", ""],
+    ["timeoutSeconds", "Timeout(초)", "number", 30],
+  ],
+  jira: [
+    ["baseUrl", "Jira Base URL", "url", ""],
+    ["authType", "인증 방식", "select:bearer|basic", "bearer"],
+    ["token", "Personal Access Token", "password", ""],
+    ["username", "Basic Auth Username", "text", ""],
+    ["password", "Basic Auth Password", "password", ""],
+    ["allowedPrincipals", "허용 사용자·그룹 (쉼표 구분)", "array", ""],
+    ["timeoutSeconds", "Timeout(초)", "number", 30],
+  ],
   mcp: [
     ["strictCompatibility", "Context7 Strict Compatibility (2개 도구만 노출)", "boolean", false],
     ["allowedOrigins", "허용 Origin (쉼표 구분)", "array", ""],
@@ -60,6 +80,7 @@ const integrationSettingFields = {
   ],
   index: [
     ["pollingMinutes", "무결성 Polling 주기(분)", "number", 30],
+    ["freshnessSloMinutes", "검색 최신성 SLO(분)", "number", 60],
   ],
   security: [
     ["trustedProxyCidrs", "신뢰 Proxy CIDR (쉼표 구분)", "array", ""],
@@ -191,6 +212,8 @@ const settingCategoryMeta = {
   keycloak: ["Keycloak SSO", "4개 항목으로 자동 구성하는 OIDC 로그인"],
   bitbucket: ["Bitbucket", "Bitbucket Server 6.9.1 연결과 Webhook"],
   gitlab: ["GitLab", "GitLab API v4 연결과 Webhook"],
+  confluence: ["Confluence", "Space와 Page 문서 수집·검색, Fail-Closed Principal ACL"],
+  jira: ["Jira", "Project와 Issue·Comment 지식 수집, Fail-Closed Principal ACL"],
   mcp: ["MCP", "Transport, Origin, 호출 제한"],
   search: ["검색", "키워드·벡터 가중치와 결과 수"],
   model: ["모델", "Embedding과 Reranker"],
@@ -384,6 +407,15 @@ async function boot() {
 }
 function setupKnowledgeSearch() {
   const output = $("#knowledge-result");
+  $("#search-code-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.currentTarget));
+    try {
+      output.textContent = JSON.stringify(await api("/api/v1/tools/search-code/test", { method: "POST", body: JSON.stringify({ ...data, limit: 20 }) }), null, 2);
+    } catch (error) {
+      output.textContent = error.message;
+    }
+  };
   $("#repository-map-form").onsubmit = async (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.currentTarget));
@@ -649,7 +681,21 @@ async function loadActivity() {
 async function loadKeys() {
   const keys = await api("/api/v1/me/api-keys");
   $("#key-list").innerHTML =
-    `<table><thead><tr><th>이름</th><th>Prefix / 제한</th><th>상태</th><th>만료</th><th>마지막 사용</th><th></th></tr></thead><tbody>${keys.map((k) => `<tr><td>${esc(k.name)}</td><td>${esc(k.prefix)}<br><small>${esc((k.scopes || []).join(", "))}<br>${esc((k.restrictions?.allowedCidrs || []).join(", "))} ${esc((k.restrictions?.allowedRepositories || []).join(", "))}<br>분/시/일 ${k.restrictions?.ratePerMinute || 0}/${k.restrictions?.ratePerHour || 0}/${k.restrictions?.ratePerDay || 0}</small></td><td>${esc(k.status)}</td><td>${date(k.expiresAt)}</td><td>${date(k.lastUsedAt)}</td><td>${k.status === "active" ? `<button class="secondary" data-disable="${k.id}">중지</button> <button data-rotate="${k.id}">회전</button> <button class="danger" data-revoke="${k.id}">폐기</button>` : k.status === "disabled" ? `<button data-enable="${k.id}">재활성화</button> <button class="danger" data-revoke="${k.id}">폐기</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+    `<table><thead><tr><th>이름</th><th>Prefix / 제한</th><th>상태</th><th>만료</th><th>마지막 사용</th><th></th></tr></thead><tbody>${keys.map((k) => `<tr><td>${esc(k.name)}</td><td>${esc(k.prefix)}<br><small>${esc((k.scopes || []).join(", "))}<br>${esc((k.restrictions?.allowedCidrs || []).join(", "))} ${esc((k.restrictions?.allowedRepositories || []).join(", "))}<br>분/시/일 ${k.restrictions?.ratePerMinute || 0}/${k.restrictions?.ratePerHour || 0}/${k.restrictions?.ratePerDay || 0}</small></td><td>${esc(k.status)}</td><td>${date(k.expiresAt)}</td><td>${date(k.lastUsedAt)}</td><td>${k.status === "active" || k.status === "disabled" ? `<button class="secondary" data-scopes="${k.id}">Scope 편집</button> ` : ""}${k.status === "active" ? `<button class="secondary" data-disable="${k.id}">중지</button> <button data-rotate="${k.id}">회전</button> <button class="danger" data-revoke="${k.id}">폐기</button>` : k.status === "disabled" ? `<button data-enable="${k.id}">재활성화</button> <button class="danger" data-revoke="${k.id}">폐기</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+  document.querySelectorAll("[data-scopes]").forEach(
+    (button) =>
+      (button.onclick = async () => {
+        const key = keys.find((item) => item.id === button.dataset.scopes);
+        const value = prompt("허용할 MCP 도구 Scope를 쉼표로 구분해 입력하세요.", (key?.scopes || []).join(", "));
+        if (value === null) return;
+        const scopes = value.split(",").map((item) => item.trim()).filter(Boolean);
+        await api(`/api/v1/me/api-keys/${button.dataset.scopes}/scopes`, {
+          method: "PUT",
+          body: JSON.stringify({ scopes }),
+        });
+        loadKeys();
+      }),
+  );
   document.querySelectorAll("[data-revoke]").forEach(
     (b) =>
       (b.onclick = async () => {
@@ -1469,12 +1515,13 @@ async function registerRepository(sourceType, repository) {
 async function refreshOps(capabilities = activeCapabilities) {
   try {
     const tools = capabilities.mcp ? await api("/api/v1/admin/mcp/tools") : [];
-    const [repos, jobs] = capabilities.source
+    const [repos, jobs, freshness] = capabilities.source
       ? await Promise.all([
           api("/api/v1/admin/repositories"),
           api("/api/v1/admin/index-jobs"),
+          api("/api/v1/admin/freshness"),
         ])
-      : [[], []];
+      : [[], [], { repositories: [], staleCount: 0, sloMinutes: 0 }];
     $("#mcp-tools").innerHTML =
       `<table><thead><tr><th>도구</th><th>상태</th><th>Timeout</th><th>Cache</th><th></th></tr></thead><tbody>${tools.map((t) => `<tr><td>${esc(t.name)}<br><small>${esc(t.description)}</small></td><td>${t.enabled ? "활성" : "비활성"}</td><td>${t.timeoutMs} ms</td><td>${t.cacheSeconds} s</td><td><button data-tool="${esc(t.name)}" data-enabled="${t.enabled}" data-timeout="${t.timeoutMs}" data-cache="${t.cacheSeconds}">설정</button></td></tr>`).join("")}</tbody></table>`;
     document.querySelectorAll("[data-tool]").forEach(
@@ -1503,6 +1550,8 @@ async function refreshOps(capabilities = activeCapabilities) {
     );
     $("#repositories").innerHTML =
       `<table><thead><tr><th>소스</th><th>Library ID</th><th>기본 브랜치</th><th>마지막 색인</th><th></th></tr></thead><tbody>${repos.map((r) => `<tr><td>${esc(r.sourceType)}</td><td>${esc(r.libraryId)}</td><td>${esc(r.defaultBranch)}</td><td>${date(r.indexedAt)}</td><td><button data-index="${esc(r.id)}">재색인</button></td></tr>`).join("")}</tbody></table>`;
+    $("#freshness").innerHTML =
+      `<div class="notice ${freshness.staleCount ? "error" : "ok"}">SLO ${freshness.sloMinutes}분 · 지연/미색인 ${freshness.staleCount}/${freshness.repositoryCount}</div><table><thead><tr><th>소스/Library</th><th>Ref/Commit</th><th>마지막 색인</th><th>지연</th><th>상태</th></tr></thead><tbody>${(freshness.repositories || []).map((item) => `<tr><td>${esc(item.sourceType)}<br><code>${esc(item.libraryId)}</code></td><td>${esc(item.ref)}<br><small>${esc(item.commitId || "-")}</small></td><td>${date(item.indexedAt?.Time || item.indexedAt)}</td><td>${item.ageMinutes < 0 ? "-" : `${item.ageMinutes}분`}</td><td><span class="state ${esc(item.status)}">${esc(item.status)}</span></td></tr>`).join("")}</tbody></table>`;
     document.querySelectorAll("[data-index]").forEach(
       (b) =>
         (b.hidden = !capabilities.sourceWrite) ||

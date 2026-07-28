@@ -2,6 +2,38 @@ package source
 
 import "context"
 
+type Capability string
+
+const (
+	CapabilityDiscovery  Capability = "discovery"
+	CapabilityContent    Capability = "content"
+	CapabilityACL        Capability = "acl"
+	CapabilityChangeFeed Capability = "change-feed"
+	CapabilityQuery      Capability = "query"
+	CapabilityWebhook    Capability = "webhook"
+)
+
+type CapabilityProvider interface {
+	Capabilities() []Capability
+}
+
+// Discovery, ContentReader and ACLProvider let non-Git sources implement only
+// the capabilities they actually provide. RepositorySource remains the
+// compatibility facade consumed by the existing index worker.
+type Discovery interface {
+	ListProjects(context.Context) ([]Project, error)
+	ListRepositories(context.Context, string) ([]Repository, error)
+}
+
+type ContentReader interface {
+	ListFiles(context.Context, RepositoryRef, string) ([]File, error)
+	GetFile(context.Context, RepositoryRef, string, string) ([]byte, error)
+}
+
+type ACLProvider interface {
+	GetPermissions(context.Context, RepositoryRef) ([]Permission, error)
+}
+
 type Project struct{ Key, Name, Description string }
 type Repository struct {
 	ID                                                 int64

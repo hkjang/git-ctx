@@ -48,6 +48,34 @@ func TestCreateAuthenticateAndRevoke(t *testing.T) {
 	}
 }
 
+func TestUpdateExistingKeyScopes(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file:scope-update?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+	_, _ = s.DB.Exec(`INSERT INTO users(id,subject,username,email) VALUES('u1','alice','alice','')`)
+	svc := New(s, strings.Repeat("p", 32))
+	key, raw, err := svc.Create(ctx, "u1", "editable", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = svc.UpdateScopes(ctx, "u1", key.ID, []string{"search-code", "query-docs"}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, scopes, err := svc.Authenticate(ctx, raw)
+	if err != nil || len(scopes) != 2 || scopes[0] != "search-code" {
+		t.Fatalf("scopes=%v err=%v", scopes, err)
+	}
+	if err = svc.UpdateScopes(ctx, "other", key.ID, []string{"query-docs"}); err == nil {
+		t.Fatal("another user changed the key scopes")
+	}
+	if err = svc.UpdateScopes(ctx, "u1", key.ID, []string{"unknown-tool"}); err == nil {
+		t.Fatal("unsupported scope was accepted")
+	}
+}
+
 func TestRestrictionsRateLimitRotationAndPause(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(ctx, "sqlite", "file::memory:?cache=shared&_foreign_keys=on")

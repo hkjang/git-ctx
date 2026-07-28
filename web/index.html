@@ -143,6 +143,9 @@
               ><input type="checkbox" name="scope" value="search-source" checked />
               search-source</label
             ><label
+              ><input type="checkbox" name="scope" value="search-code" checked />
+              search-code</label
+            ><label
               ><input type="checkbox" name="scope" value="get-repository-map" checked />
               get-repository-map</label
             ><label
@@ -215,6 +218,16 @@
         <h2>코드 지식 검색</h2>
         <p>색인된 저장소 구조와 코드 심볼을 ACL 범위 안에서 조회합니다.</p>
         <div class="grid">
+          <article>
+            <h3>Source Query Search</h3>
+            <form id="search-code-form" class="form-row">
+              <label>질의<input name="query" required placeholder="dify 소스 검색해" /></label>
+              <label>소스<select name="sourceType"><option value="">전체</option><option value="bitbucket">Bitbucket</option><option value="gitlab">GitLab</option><option value="confluence">Confluence</option><option value="jira">Jira</option></select></label>
+              <label>프로젝트 (선택)<input name="project" /></label>
+              <label>저장소 (선택)<input name="repository" /></label>
+              <button type="submit">원격 소스 검색</button>
+            </form>
+          </article>
           <article>
             <h3>Repository Map</h3>
             <form id="repository-map-form" class="form-row">
@@ -350,6 +363,8 @@
               >소스<select id="source-type">
                 <option>bitbucket</option>
                 <option>gitlab</option>
+                <option>confluence</option>
+                <option>jira</option>
               </select></label
             ><label
               >프로젝트 Key / Group ID<input
@@ -362,6 +377,8 @@
             </div>
           </div>
           <div id="discovery" class="table-wrap"></div>
+          <h3>최신성 SLO</h3>
+          <div id="freshness" class="table-wrap"></div>
           <h3>등록 저장소</h3>
           <div id="repositories" class="table-wrap"></div>
           <h3>최근 색인 작업</h3>

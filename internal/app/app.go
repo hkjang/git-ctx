@@ -34,9 +34,11 @@ import (
 	"git-ctx/internal/backup"
 	bitbucketv6 "git-ctx/internal/bitbucket/v6"
 	"git-ctx/internal/config"
+	confluencesource "git-ctx/internal/confluence"
 	"git-ctx/internal/embedding"
 	gitlabsource "git-ctx/internal/gitlab"
 	"git-ctx/internal/indexer"
+	jirasource "git-ctx/internal/jira"
 	runtimelogging "git-ctx/internal/logging"
 	"git-ctx/internal/mcp"
 	outboundnotification "git-ctx/internal/notification"
@@ -350,6 +352,7 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/me/api-keys/{id}/disable", a.authenticate(http.HandlerFunc(a.disableKey)))
 	a.mux.Handle("POST /api/v1/me/api-keys/{id}/enable", a.authenticate(http.HandlerFunc(a.enableKey)))
 	a.mux.Handle("POST /api/v1/me/api-keys/{id}/rotate", a.authenticate(http.HandlerFunc(a.rotateKey)))
+	a.mux.Handle("PUT /api/v1/me/api-keys/{id}/scopes", a.authenticate(http.HandlerFunc(a.updateKeyScopes)))
 	a.mux.Handle("DELETE /api/v1/me/api-keys/{id}", a.authenticate(http.HandlerFunc(a.revokeKey)))
 	a.mux.Handle("GET /api/v1/me/usage", a.authenticate(http.HandlerFunc(a.meUsage)))
 	a.mux.Handle("GET /api/v1/me/calls", a.authenticate(http.HandlerFunc(a.meCalls)))
@@ -357,6 +360,7 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/me/notifications/{id}/read", a.authenticate(http.HandlerFunc(a.readNotification)))
 	a.mux.Handle("POST /api/v1/tools/resolve/test", a.authenticate(http.HandlerFunc(a.testResolve)))
 	a.mux.Handle("POST /api/v1/tools/query/test", a.authenticate(http.HandlerFunc(a.testQuery)))
+	a.mux.Handle("POST /api/v1/tools/search-code/test", a.authenticate(http.HandlerFunc(a.testSearchCode)))
 	a.mux.Handle("POST /api/v1/tools/repository-map/test", a.authenticate(http.HandlerFunc(a.testRepositoryMap)))
 	a.mux.Handle("POST /api/v1/tools/symbols/test", a.authenticate(http.HandlerFunc(a.testSymbols)))
 	a.mux.Handle("POST /api/v1/tools/symbol-context/test", a.authenticate(http.HandlerFunc(a.testSymbolContext)))
@@ -384,6 +388,7 @@ func (a *App) routes() {
 	a.mux.Handle("DELETE /api/v1/admin/context-packs/{id}", a.authorize(http.HandlerFunc(a.deleteContextPack), "platform-admin", "search-admin"))
 	a.mux.Handle("GET /api/v1/admin/api-keys", a.authorize(http.HandlerFunc(a.adminAPIKeys), "security-admin"))
 	a.mux.Handle("POST /api/v1/admin/api-keys/{id}/revoke", a.authorize(http.HandlerFunc(a.adminRevokeKey), "security-admin"))
+	a.mux.Handle("PUT /api/v1/admin/api-keys/{id}/scopes", a.authorize(http.HandlerFunc(a.adminUpdateKeyScopes), "security-admin"))
 	a.mux.Handle("GET /api/v1/admin/secrets", a.authorize(http.HandlerFunc(a.listManagedSecrets), "security-admin"))
 	a.mux.Handle("POST /api/v1/admin/secrets", a.authorize(http.HandlerFunc(a.putManagedSecret), "security-admin"))
 	a.mux.Handle("POST /api/v1/admin/secrets/{name}/rotate", a.authorize(http.HandlerFunc(a.putManagedSecret), "security-admin"))
@@ -401,6 +406,7 @@ func (a *App) routes() {
 	a.mux.Handle("GET /api/v1/admin/index-jobs", a.authorize(http.HandlerFunc(a.indexJobs), "source-admin", "readonly-operator"))
 	a.mux.Handle("POST /api/v1/admin/index-jobs/{id}/retry", a.authorize(http.HandlerFunc(a.retryIndexJob), "source-admin"))
 	a.mux.Handle("GET /api/v1/admin/health", a.authorize(http.HandlerFunc(a.adminHealth), "readonly-operator"))
+	a.mux.Handle("GET /api/v1/admin/freshness", a.authorize(http.HandlerFunc(a.adminFreshness), "source-admin", "readonly-operator"))
 	a.mux.Handle("GET /api/v1/admin/database/status", a.authorize(http.HandlerFunc(a.adminDatabaseStatus), "readonly-operator"))
 	a.mux.Handle("POST /api/v1/admin/database/test", a.admin(http.HandlerFunc(a.testDatabaseTarget)))
 	a.mux.Handle("POST /api/v1/admin/database/migrate", a.admin(http.HandlerFunc(a.migrateDatabaseTarget)))
@@ -893,7 +899,7 @@ func roleAllowed(p auth.Principal, roles ...string) bool {
 }
 func settingRoleAllowed(p auth.Principal, category string) bool {
 	required := map[string][]string{
-		"bitbucket": {"source-admin"}, "gitlab": {"source-admin"}, "index": {"source-admin"},
+		"bitbucket": {"source-admin"}, "gitlab": {"source-admin"}, "confluence": {"source-admin"}, "jira": {"source-admin"}, "index": {"source-admin"},
 		"mcp": {"mcp-admin"}, "search": {"search-admin"}, "model": {"search-admin"}, "opensearch": {"search-admin"},
 		"security": {"security-admin"}, "vault": {"security-admin"},
 	}
@@ -979,20 +985,9 @@ func (a *App) createKey(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "Invalid JSON")
 		return
 	}
-	for _, scope := range in.Scopes {
-		allowed := true
-		switch scope {
-		case "get-platform-status":
-			allowed = roleAllowed(p, "readonly-operator", "source-admin", "mcp-admin", "search-admin", "security-admin", "auditor")
-		case "list-index-jobs":
-			allowed = roleAllowed(p, "source-admin", "readonly-operator")
-		case "reindex-repository":
-			allowed = roleAllowed(p, "source-admin")
-		}
-		if !allowed {
-			problem(w, http.StatusForbidden, "forbidden_scope", "The current administrator role cannot grant the requested MCP management tool")
-			return
-		}
+	if !keyScopesAllowed(p, in.Scopes) {
+		problem(w, http.StatusForbidden, "forbidden_scope", "The current administrator role cannot grant the requested MCP management tool")
+		return
 	}
 	k, plain, e := a.keys.CreateWithRestrictions(r.Context(), p.UserID, in.Name, in.Scopes, in.ExpiresAt, in.Restrictions)
 	if e != nil {
@@ -1001,6 +996,47 @@ func (a *App) createKey(w http.ResponseWriter, r *http.Request) {
 	}
 	a.audit(r, p, "api_key.create", "api_key", k.ID, "success", map[string]any{"prefix": k.Prefix})
 	jsonOut(w, 201, map[string]any{"key": k, "secret": plain, "notice": "This value is shown once and cannot be recovered."})
+}
+
+func keyScopesAllowed(p auth.Principal, scopes []string) bool {
+	for _, scope := range scopes {
+		switch scope {
+		case "get-platform-status":
+			if !roleAllowed(p, "readonly-operator", "source-admin", "mcp-admin", "search-admin", "security-admin", "auditor") {
+				return false
+			}
+		case "list-index-jobs":
+			if !roleAllowed(p, "source-admin", "readonly-operator") {
+				return false
+			}
+		case "reindex-repository":
+			if !roleAllowed(p, "source-admin") {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (a *App) updateKeyScopes(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	var in struct {
+		Scopes []string `json:"scopes"`
+	}
+	if decode(r, &in) != nil {
+		problem(w, http.StatusBadRequest, "invalid_request", "scopes are required")
+		return
+	}
+	if !keyScopesAllowed(p, in.Scopes) {
+		problem(w, http.StatusForbidden, "forbidden_scope", "The current administrator role cannot grant the requested MCP management tool")
+		return
+	}
+	if err := a.keys.UpdateScopes(r.Context(), p.UserID, r.PathValue("id"), in.Scopes); err != nil {
+		problem(w, http.StatusBadRequest, "scope_update_failed", err.Error())
+		return
+	}
+	a.audit(r, p, "api_key.scopes_update", "api_key", r.PathValue("id"), "success", map[string]any{"scopes": in.Scopes})
+	w.WriteHeader(http.StatusNoContent)
 }
 func (a *App) disableKey(w http.ResponseWriter, r *http.Request) { a.keyStatus(w, r, "disabled") }
 func (a *App) enableKey(w http.ResponseWriter, r *http.Request)  { a.keyStatus(w, r, "enabled") }
@@ -1164,6 +1200,48 @@ func (a *App) testQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOut(w, 200, map[string]any{"content": []map[string]string{{"type": "text", "text": text}}})
+}
+
+func (a *App) testSearchCode(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	if p.KeyID != "" && !stringContains(p.Scopes, "search-code") {
+		problem(w, 403, "forbidden", "API key is not allowed to call search-code")
+		return
+	}
+	var in struct {
+		Query      string `json:"query"`
+		SourceType string `json:"sourceType"`
+		Project    string `json:"project"`
+		Repository string `json:"repository"`
+		Ref        string `json:"ref"`
+		Limit      int    `json:"limit"`
+	}
+	if decode(r, &in) != nil || strings.TrimSpace(in.Query) == "" {
+		problem(w, 400, "invalid_request", "query is required")
+		return
+	}
+	result, err := a.search.SearchCode(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.Query, in.SourceType, in.Project, in.Repository, in.Ref, in.Limit)
+	if err != nil {
+		problem(w, 400, "search_failed", err.Error())
+		return
+	}
+	if p.KeyID != "" && len(p.AllowedRepositories) > 0 {
+		repositories := result.Repositories[:0]
+		for _, item := range result.Repositories {
+			if repositoryAllowed(item.LibraryID, p.AllowedRepositories) {
+				repositories = append(repositories, item)
+			}
+		}
+		result.Repositories = repositories
+		hits := result.Hits[:0]
+		for _, hit := range result.Hits {
+			if repositoryAllowed(hit.LibraryID, p.AllowedRepositories) {
+				hits = append(hits, hit)
+			}
+		}
+		result.Hits = hits
+	}
+	jsonOut(w, 200, result)
 }
 func (a *App) testRepositoryMap(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
@@ -1597,7 +1675,7 @@ func (a *App) deleteSetting(w http.ResponseWriter, r *http.Request) {
 func (a *App) testIntegrationSetting(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
 	category := r.PathValue("category")
-	allowed := map[string]bool{"keycloak": true, "bitbucket": true, "gitlab": true, "model": true, "opensearch": true, "vault": true, "observability": true, "backup": true, "notifications": true}
+	allowed := map[string]bool{"keycloak": true, "bitbucket": true, "gitlab": true, "confluence": true, "jira": true, "model": true, "opensearch": true, "vault": true, "observability": true, "backup": true, "notifications": true}
 	if !allowed[category] {
 		problem(w, 400, "setting_test_unsupported", "This setting category has no external or storage connection test")
 		return
@@ -1831,6 +1909,16 @@ func sourceAdapterFromMap(sourceType string, settings map[string]any) (source.Re
 		return bitbucketv6.New(bitbucketv6.Config{BaseURL: baseURL, APIPrefix: apiPrefix, Token: token, Username: username, Password: password, Timeout: timeout, TLSVerify: tlsVerify, CACertificate: caCertificate, ProxyURL: proxyURL})
 	case "gitlab":
 		return gitlabsource.New(gitlabsource.Config{BaseURL: baseURL, Token: token, Timeout: timeout, TLSVerify: tlsVerify, CACertificate: caCertificate, ProxyURL: proxyURL})
+	case "confluence":
+		authType, _ := settings["authType"].(string)
+		username, _ := settings["username"].(string)
+		password, _ := settings["password"].(string)
+		return confluencesource.New(confluencesource.Config{BaseURL: baseURL, AuthType: authType, Token: token, Username: username, Password: password, Timeout: timeout, TLSVerify: tlsVerify, CACertificate: caCertificate, ProxyURL: proxyURL, AllowedPrincipals: stringArrayValue(settings["allowedPrincipals"])})
+	case "jira":
+		authType, _ := settings["authType"].(string)
+		username, _ := settings["username"].(string)
+		password, _ := settings["password"].(string)
+		return jirasource.New(jirasource.Config{BaseURL: baseURL, AuthType: authType, Token: token, Username: username, Password: password, Timeout: timeout, TLSVerify: tlsVerify, CACertificate: caCertificate, ProxyURL: proxyURL, AllowedPrincipals: stringArrayValue(settings["allowedPrincipals"])})
 	default:
 		return nil, errors.New("unsupported source type")
 	}
@@ -1883,7 +1971,7 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 		}
 		_, err := auth.OAuthConfig(ctx, cfg)
 		return err
-	case "bitbucket", "gitlab":
+	case "bitbucket", "gitlab", "confluence", "jira":
 		adapter, err := sourceAdapterFromMap(category, value)
 		if err != nil {
 			return err
@@ -2624,7 +2712,7 @@ func embeddingProviderFromMap(settings map[string]any) (embedding.Provider, erro
 }
 func settingCategories() map[string]bool {
 	return map[string]bool{
-		"keycloak": true, "bitbucket": true, "gitlab": true, "mcp": true,
+		"keycloak": true, "bitbucket": true, "gitlab": true, "confluence": true, "jira": true, "mcp": true,
 		"search": true, "model": true, "opensearch": true, "index": true,
 		"security": true, "notifications": true, "logging": true,
 		"operations": true, "ui": true,
@@ -3079,6 +3167,27 @@ func (a *App) adminRevokeKey(w http.ResponseWriter, r *http.Request) {
 	a.audit(r, p, "api_key.admin_revoke", "api_key", r.PathValue("id"), "success", nil)
 	w.WriteHeader(http.StatusNoContent)
 }
+
+func (a *App) adminUpdateKeyScopes(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	var in struct {
+		Scopes []string `json:"scopes"`
+	}
+	if decode(r, &in) != nil {
+		problem(w, http.StatusBadRequest, "invalid_request", "scopes are required")
+		return
+	}
+	if !keyScopesAllowed(p, in.Scopes) {
+		problem(w, http.StatusForbidden, "forbidden_scope", "The current administrator role cannot grant the requested MCP management tool")
+		return
+	}
+	if err := a.keys.UpdateScopesAdmin(r.Context(), r.PathValue("id"), in.Scopes); err != nil {
+		problem(w, http.StatusBadRequest, "scope_update_failed", err.Error())
+		return
+	}
+	a.audit(r, p, "api_key.admin_scopes_update", "api_key", r.PathValue("id"), "success", map[string]any{"scopes": in.Scopes})
+	w.WriteHeader(http.StatusNoContent)
+}
 func (a *App) listManagedSecrets(w http.ResponseWriter, r *http.Request) {
 	items, err := a.secrets.List(r.Context())
 	if err != nil {
@@ -3247,7 +3356,7 @@ func (a *App) registerRepository(w http.ResponseWriter, r *http.Request) {
 		Repository source.Repository `json:"repository"`
 		RefName    string            `json:"refName"`
 	}
-	if decode(r, &in) != nil || (in.SourceType != "bitbucket" && in.SourceType != "gitlab") || in.Repository.ID == 0 || in.Repository.ProjectKey == "" || in.Repository.Slug == "" {
+	if decode(r, &in) != nil || !supportedSourceType(in.SourceType) || in.Repository.ID == 0 || in.Repository.ProjectKey == "" || in.Repository.Slug == "" {
 		problem(w, 400, "invalid_request", "sourceType and a discovered repository are required")
 		return
 	}
@@ -3258,7 +3367,7 @@ func (a *App) registerRepository(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "source_not_configured", "Source setting is required before repository registration")
 		return
 	}
-	autoWebhook := true
+	autoWebhook := in.SourceType == "bitbucket" || in.SourceType == "gitlab"
 	if configured, ok := settings["autoRegisterWebhook"].(bool); ok {
 		autoWebhook = configured
 	}
@@ -3504,6 +3613,32 @@ func stringContains(values []string, want string) bool {
 	}
 	return false
 }
+func supportedSourceType(value string) bool {
+	switch value {
+	case "bitbucket", "gitlab", "confluence", "jira":
+		return true
+	default:
+		return false
+	}
+}
+func stringArrayValue(value any) []string {
+	switch typed := value.(type) {
+	case []string:
+		return append([]string(nil), typed...)
+	case []any:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
+				out = append(out, strings.TrimSpace(text))
+			}
+		}
+		return out
+	case string:
+		return splitCSV(typed)
+	default:
+		return nil
+	}
+}
 func splitCSV(value string) []string {
 	if value == "" {
 		return nil
@@ -3713,6 +3848,54 @@ func (a *App) adminHealth(w http.ResponseWriter, r *http.Request) {
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
 	jsonOut(w, 200, map[string]any{"status": "ok", "version": version.Version, "database": "ok", "repositories": repositories, "chunks": chunks, "indexJobs": map[string]int64{"pending": pending, "failed": failed}, "notificationDeliveries": map[string]int64{"pending": notificationPending, "failed": notificationFailed, "dead": notificationDead}, "activeApiKeys": activeKeys, "activeManagedSecrets": activeSecrets, "observability": map[string]bool{"tracingEnabled": a.traces.Enabled()}, "go": map[string]any{"goroutines": runtime.NumGoroutine(), "allocatedBytes": memory.Alloc}})
+}
+func (a *App) adminFreshness(w http.ResponseWriter, r *http.Request) {
+	sloMinutes := 60
+	if settings, err := a.loadSettingMap(r.Context(), "index"); err == nil {
+		if value, ok := settings["freshnessSloMinutes"].(float64); ok && value >= 5 && value <= 10080 {
+			sloMinutes = int(value)
+		}
+	}
+	rows, err := a.store.DB.QueryContext(r.Context(), `SELECT r.id,r.source_type,r.library_id,r.default_branch,r.indexed_at,
+COALESCE(s.commit_id,''),s.indexed_at
+FROM repositories r LEFT JOIN repository_ref_states s ON s.repository_id=r.id AND s.ref_name=r.default_branch
+WHERE r.enabled=1 ORDER BY r.source_type,r.library_id`)
+	if err != nil {
+		problem(w, 500, "freshness_failed", err.Error())
+		return
+	}
+	defer rows.Close()
+	now := time.Now().UTC()
+	var items []map[string]any
+	var stale int
+	sourceCounts := map[string]int{}
+	for rows.Next() {
+		var id, sourceType, libraryID, defaultRef, commit string
+		var repositoryIndexed, refIndexed sql.NullTime
+		if err = rows.Scan(&id, &sourceType, &libraryID, &defaultRef, &repositoryIndexed, &commit, &refIndexed); err != nil {
+			problem(w, 500, "freshness_failed", err.Error())
+			return
+		}
+		sourceCounts[sourceType]++
+		indexedAt := repositoryIndexed
+		if refIndexed.Valid {
+			indexedAt = refIndexed
+		}
+		ageMinutes := -1
+		status := "never-indexed"
+		if indexedAt.Valid {
+			ageMinutes = int(now.Sub(indexedAt.Time).Minutes())
+			status = "fresh"
+			if ageMinutes > sloMinutes {
+				status = "stale"
+			}
+		}
+		if status != "fresh" {
+			stale++
+		}
+		items = append(items, map[string]any{"repositoryId": id, "sourceType": sourceType, "libraryId": libraryID, "ref": defaultRef, "commitId": commit, "indexedAt": indexedAt, "ageMinutes": ageMinutes, "status": status})
+	}
+	jsonOut(w, 200, map[string]any{"checkedAt": now, "sloMinutes": sloMinutes, "repositoryCount": len(items), "staleCount": stale, "sourceCounts": sourceCounts, "repositories": items})
 }
 func (a *App) listBackups(w http.ResponseWriter, r *http.Request) {
 	records, err := a.backup.List(r.Context())

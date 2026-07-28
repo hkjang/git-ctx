@@ -237,7 +237,7 @@ func (s *Service) Results(ctx context.Context, runID string) ([]Result, error) {
 	return out, rows.Err()
 }
 
-var sourcePattern = regexp.MustCompile("(?m)Source: `(?:bitbucket|gitlab)://[^@`]+@[^/`]+/([^#`]+)#L[0-9]+-L[0-9]+`")
+var sourcePattern = regexp.MustCompile("(?m)Source: `(?:bitbucket|gitlab|confluence|jira)://[^@`]+@[^/`]+/([^#`]+)#L[0-9]+-L[0-9]+`")
 
 func extractSources(text string, topK int) []string {
 	matches := sourcePattern.FindAllStringSubmatch(text, topK)

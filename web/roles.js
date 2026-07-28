@@ -6,6 +6,8 @@
   const categoryRoles = {
     bitbucket: "source-admin",
     gitlab: "source-admin",
+    confluence: "source-admin",
+    jira: "source-admin",
     index: "source-admin",
     mcp: "mcp-admin",
     search: "search-admin",

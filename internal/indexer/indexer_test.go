@@ -83,6 +83,22 @@ func TestSanitizeBlocksPrivateKeysAndRedactsCredentials(t *testing.T) {
 	}
 }
 
+func TestSanitizeKnownTokensDSNAndEntropyWithoutMaskingCommitHashes(t *testing.T) {
+	content := strings.Join([]string{
+		"token glpat-1234567890abcdefghijklmnop",
+		"dsn postgresql://alice:secret@db.internal/gitctx",
+		"opaque aZ9xY8wV7uT6sR5qP4oN3mL2kJ1hG0fE9dC8bA7",
+		"commit 0123456789abcdef0123456789abcdef01234567",
+	}, "\n")
+	safe, finding := sanitize(content)
+	if finding == "" || strings.Contains(safe, "glpat-") || strings.Contains(safe, "alice:secret") || strings.Contains(safe, "aZ9xY8") {
+		t.Fatalf("secrets were not redacted: finding=%s content=%s", finding, safe)
+	}
+	if !strings.Contains(safe, "0123456789abcdef0123456789abcdef01234567") {
+		t.Fatalf("commit hash was incorrectly redacted: %s", safe)
+	}
+}
+
 func TestReadableIncludesInheritedBitbucketPermissionLevels(t *testing.T) {
 	for _, permission := range []string{"READ", "WRITE", "ADMIN", "REPO_ADMIN", "PROJECT_WRITE", "SYS_ADMIN"} {
 		if !readable(permission) {
