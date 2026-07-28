@@ -681,6 +681,33 @@ function setupKnowledgeSearch() {
       reportError(error, "코드 검색");
     }
   };
+  $("#find-file-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.currentTarget));
+    output.textContent = "파일을 찾는 중…";
+    try {
+      const result = await api("/api/v1/tools/find-file/test", {
+        method: "POST",
+        body: JSON.stringify({ ...data, limit: 100 }),
+      });
+      const files = rows(result.Files);
+      const lines = [`패턴: ${result.Pattern}`, `${files.length}건`, ""];
+      let current = "";
+      for (const file of files) {
+        if (file.LibraryID !== current) {
+          current = file.LibraryID;
+          lines.push(`── ${file.LibraryID} (${file.SourceType}, ${file.Ref}) ──`);
+        }
+        lines.push(`  ${file.Path}  ${file.SizeBytes ? `${file.SizeBytes}B` : ""} ${file.ContentIndexed ? "[본문 색인됨]" : "[본문 미색인]"}`);
+      }
+      if (!files.length) lines.push("일치하는 파일이 없습니다. *.확장자 또는 경로 조각으로 다시 시도해 보세요.");
+      for (const diagnostic of rows(result.Diagnostics)) lines.push(`· ${diagnostic}`);
+      output.textContent = lines.join("\n");
+    } catch (error) {
+      output.textContent = error.message;
+      reportError(error, "파일 검색");
+    }
+  };
   $("#repository-map-form").onsubmit = async (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.currentTarget));
@@ -750,7 +777,7 @@ let currentRoleSet = new Set();
 let activeScopeEditor = null;
 const userMCPScopes = [
   "resolve-library-id", "query-docs", "search-repositories", "search-source",
-  "search-code", "get-repository-map", "find-symbol", "get-symbol-context",
+  "search-code", "find-file", "get-repository-map", "find-symbol", "get-symbol-context",
   "trace-dependencies", "compare-refs", "get-change-impact", "get-context-pack",
   "find-runbook", "export-context", "explain-search-result",
 ];

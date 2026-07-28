@@ -112,6 +112,8 @@
                   <dd>Bitbucket·GitLab Query API 기반 소스 검색</dd>
                   <dt>search-code</dt>
                   <dd>저장소 이름과 코드 본문을 한 번에 검색</dd>
+                  <dt>find-file</dt>
+                  <dd>파일명·경로 패턴으로 파일 위치 검색 (glob 지원)</dd>
                   <dt>get-repository-map</dt>
                   <dd>저장소 언어·구조·진입점과 주요 설정 파일 조회</dd>
                   <dt>find-symbol / get-symbol-context</dt>
@@ -148,6 +150,7 @@
                   <label><input type="checkbox" name="scope" value="search-repositories" checked /> search-repositories</label>
                   <label><input type="checkbox" name="scope" value="search-source" checked /> search-source</label>
                   <label><input type="checkbox" name="scope" value="search-code" checked /> search-code</label>
+                  <label><input type="checkbox" name="scope" value="find-file" checked /> find-file</label>
                   <label><input type="checkbox" name="scope" value="get-repository-map" checked /> get-repository-map</label>
                   <label><input type="checkbox" name="scope" value="find-symbol" checked /> find-symbol</label>
                   <label><input type="checkbox" name="scope" value="get-symbol-context" checked /> get-symbol-context</label>
@@ -196,6 +199,15 @@
                   <label>저장소 (선택)<input name="repository" /></label>
                   <label>Ref (선택)<input name="ref" placeholder="main" /></label>
                   <div class="wide button-row"><button type="submit">원격 소스 검색</button></div>
+                </form>
+              </article>
+              <article class="card">
+                <h3>File Search</h3>
+                <form id="find-file-form" class="form-row">
+                  <label class="wide">파일명 또는 경로 패턴<input name="pattern" required placeholder="Dockerfile, *.tf, **/migrations/*.sql" /></label>
+                  <label>Library ID (선택)<input name="libraryId" placeholder="/kcb/clustara" /></label>
+                  <label>Ref (선택)<input name="ref" placeholder="main" /></label>
+                  <div class="wide button-row"><button type="submit">파일 찾기</button></div>
                 </form>
               </article>
               <article class="card">

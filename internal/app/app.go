@@ -401,6 +401,7 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/tools/resolve/test", a.authenticate(http.HandlerFunc(a.testResolve)))
 	a.mux.Handle("POST /api/v1/tools/query/test", a.authenticate(http.HandlerFunc(a.testQuery)))
 	a.mux.Handle("POST /api/v1/tools/search-code/test", a.authenticate(http.HandlerFunc(a.testSearchCode)))
+	a.mux.Handle("POST /api/v1/tools/find-file/test", a.authenticate(http.HandlerFunc(a.testFindFile)))
 	a.mux.Handle("POST /api/v1/tools/repository-map/test", a.authenticate(http.HandlerFunc(a.testRepositoryMap)))
 	a.mux.Handle("POST /api/v1/tools/symbols/test", a.authenticate(http.HandlerFunc(a.testSymbols)))
 	a.mux.Handle("POST /api/v1/tools/symbol-context/test", a.authenticate(http.HandlerFunc(a.testSymbolContext)))
@@ -1428,6 +1429,42 @@ func (a *App) testSearchCode(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonOut(w, 200, result)
 }
+func (a *App) testFindFile(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	if p.KeyID != "" && !stringContains(p.Scopes, "find-file") {
+		problem(w, http.StatusForbidden, "forbidden", "API key is not allowed to call find-file")
+		return
+	}
+	var in struct {
+		Pattern    string `json:"pattern"`
+		LibraryID  string `json:"libraryId"`
+		SourceType string `json:"sourceType"`
+		Project    string `json:"project"`
+		Repository string `json:"repository"`
+		Ref        string `json:"ref"`
+		Limit      int    `json:"limit"`
+	}
+	if decode(r, &in) != nil || strings.TrimSpace(in.Pattern) == "" {
+		problem(w, http.StatusBadRequest, "invalid_request", "pattern is required")
+		return
+	}
+	result, err := a.search.FindFiles(r.Context(), searchPrincipals(p), in.Pattern, in.LibraryID, in.SourceType, in.Project, in.Repository, in.Ref, in.Limit)
+	if err != nil {
+		problem(w, http.StatusBadRequest, "search_failed", err.Error())
+		return
+	}
+	if p.KeyID != "" && len(p.AllowedRepositories) > 0 {
+		files := result.Files[:0]
+		for _, item := range result.Files {
+			if repositoryAllowed(item.LibraryID, p.AllowedRepositories) {
+				files = append(files, item)
+			}
+		}
+		result.Files = files
+	}
+	jsonOut(w, http.StatusOK, result)
+}
+
 func (a *App) testRepositoryMap(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
 	if p.KeyID != "" && !stringContains(p.Scopes, "get-repository-map") {

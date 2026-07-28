@@ -290,6 +290,15 @@ func Catalog() []map[string]any {
 				"repository": map[string]string{"type": "string", "description": "Optional repository slug or /library/id to search inside one repository"},
 				"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"},
 				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 50}}}},
+		{"name": "find-file", "description": "Finds files by name or path across accessible repositories. Use it for questions like where a Dockerfile, migration, config or module lives. Supports plain names (README), globs (*.tf, auth*.py) and path patterns (**/migrations/*.sql, internal/**/service.go).",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"pattern"}, "properties": map[string]any{
+				"pattern":    map[string]string{"type": "string", "description": "File name, glob or path pattern. Without a slash it matches the file name, with a slash the whole path."},
+				"libraryId":  map[string]string{"type": "string", "description": "Optional Context7 library ID scope"},
+				"sourceType": map[string]any{"type": "string", "enum": []string{"bitbucket", "gitlab", "confluence", "jira"}},
+				"project":    map[string]string{"type": "string", "description": "Optional project key or namespace"},
+				"repository": map[string]string{"type": "string", "description": "Optional repository slug or library ID"},
+				"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"},
+				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 200}}}},
 		{"name": "get-repository-map", "description": "Returns the indexed languages, directories, key files, and entry points for a repository.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId"}, "properties": map[string]any{
 				"libraryId": map[string]string{"type": "string", "description": "Context7-compatible library ID"},
@@ -462,6 +471,23 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 				result.Hits = hits
 			}
 			text = formatCodeSearch(result)
+		}
+	case "find-file":
+		var files search.FileSearchResult
+		files, err = s.search.FindFiles(r.Context(), principalACLs(p), stringArg(params.Arguments, "pattern"), stringArg(params.Arguments, "libraryId"),
+			stringArg(params.Arguments, "sourceType"), stringArg(params.Arguments, "project"), stringArg(params.Arguments, "repository"),
+			stringArg(params.Arguments, "ref"), intArg(params.Arguments, "limit", 50))
+		if err == nil {
+			if len(p.AllowedRepositories) > 0 {
+				allowed := files.Files[:0]
+				for _, item := range files.Files {
+					if libraryAllowed(item.LibraryID, p.AllowedRepositories) {
+						allowed = append(allowed, item)
+					}
+				}
+				files.Files = allowed
+			}
+			text = formatFileResults(files)
 		}
 	case "get-repository-map":
 		if p.KeyID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
@@ -914,6 +940,42 @@ func formatCodeSearch(result search.CodeSearchResult) string {
 	// Diagnostics always ship: an agent that knows the search ran a name-only
 	// path, hit a timeout or was ACL-filtered can pick a better next call
 	// instead of telling the user the code is missing.
+	if len(result.Diagnostics) > 0 {
+		b.WriteString("\n### Notes\n")
+		for _, diagnostic := range result.Diagnostics {
+			fmt.Fprintf(&b, "- %s\n", diagnostic)
+		}
+	}
+	return b.String()
+}
+
+// formatFileResults groups paths by repository and states what can be read next
+// for each hit, so an agent can chain straight into content tools.
+func formatFileResults(result search.FileSearchResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "## File Search\n\nPattern: `%s`\nMatches: %d\n", result.Pattern, len(result.Files))
+	if len(result.Files) == 0 {
+		b.WriteString("\nNo file name matched. Try a wildcard such as `*.sql`, a path fragment such as `migrations/`, or `search-code` for file contents.\n")
+	} else {
+		current := ""
+		for _, item := range result.Files {
+			if item.LibraryID != current {
+				current = item.LibraryID
+				fmt.Fprintf(&b, "\n### %s (%s, ref `%s`)\n", item.LibraryID, item.SourceType, item.Ref)
+			}
+			readable := "content not indexed; use search-code or the source UI"
+			if item.ContentIndexed {
+				readable = "content indexed; query-docs and get-symbol-context can read it"
+			}
+			// Bitbucket reports file sizes, GitLab tree listings do not; only print
+			// a size when the source actually gave one.
+			size := ""
+			if item.SizeBytes > 0 {
+				size = fmt.Sprintf("%d bytes, ", item.SizeBytes)
+			}
+			fmt.Fprintf(&b, "- `%s` (%s%s)\n", item.Path, size, readable)
+		}
+	}
 	if len(result.Diagnostics) > 0 {
 		b.WriteString("\n### Notes\n")
 		for _, diagnostic := range result.Diagnostics {

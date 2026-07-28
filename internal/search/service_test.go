@@ -446,6 +446,131 @@ func TestAdministratorRolesSearchWithoutRepositoryACL(t *testing.T) {
 	}
 }
 
+// treeSource returns a full file listing the way a source server does for a
+// repository that has been registered but not indexed yet.
+type treeSource struct {
+	querySource
+	files []string
+	calls int
+}
+
+func (t *treeSource) ListFiles(context.Context, source.RepositoryRef, string) ([]source.File, error) {
+	t.calls++
+	out := make([]source.File, 0, len(t.files))
+	for _, path := range t.files {
+		out = append(out, source.File{Path: path, Size: 100})
+	}
+	return out, nil
+}
+
+func TestFindFilesMatchesNamesGlobsAndPaths(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:find-files?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r','core','demo','Demo','gitlab','1','/core/demo','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r','alice','read')`)
+	for _, file := range []struct {
+		path    string
+		indexed int
+	}{
+		{"Dockerfile", 1},
+		{"deploy/Dockerfile.build", 0},
+		{"api/core/auth.py", 1},
+		{"api/core/authz.py", 1},
+		{"db/migrations/001_initial.sql", 1},
+		{"db/migrations/002_users.sql", 1},
+		{"infra/main.tf", 1},
+		{"web/logo.png", 0},
+	} {
+		base := file.path
+		if index := strings.LastIndex(base, "/"); index >= 0 {
+			base = base[index+1:]
+		}
+		if _, err = db.DB.Exec(`INSERT INTO repository_files(repository_id,ref_name,path,base_name,size_bytes,content_indexed,commit_id) VALUES('r','main',?,?,?,?,'abc')`,
+			file.path, strings.ToLower(base), 120, file.indexed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service := New(db)
+	find := func(pattern string) []string {
+		t.Helper()
+		result, findErr := service.FindFiles(ctx, []string{"alice"}, pattern, "", "", "", "", "", 50)
+		if findErr != nil {
+			t.Fatalf("%s: %v", pattern, findErr)
+		}
+		paths := make([]string, 0, len(result.Files))
+		for _, item := range result.Files {
+			paths = append(paths, item.Path)
+		}
+		return paths
+	}
+	if got := find("Dockerfile"); len(got) != 2 || got[0] != "Dockerfile" {
+		t.Fatalf("exact base name must rank first: %v", got)
+	}
+	if got := find("*.tf"); len(got) != 1 || got[0] != "infra/main.tf" {
+		t.Fatalf("glob=%v", got)
+	}
+	if got := find("auth*.py"); len(got) != 2 {
+		t.Fatalf("prefix glob=%v", got)
+	}
+	if got := find("**/migrations/*.sql"); len(got) != 2 {
+		t.Fatalf("recursive glob=%v", got)
+	}
+	if got := find("db/migrations/"); len(got) != 2 {
+		t.Fatalf("path fragment=%v", got)
+	}
+	if got := find("logo"); len(got) != 1 || got[0] != "web/logo.png" {
+		t.Fatalf("a file with no indexed content must still be findable: %v", got)
+	}
+	// The result says whether the content can be read, so an agent picks the
+	// right follow-up tool.
+	result, err := service.FindFiles(ctx, []string{"alice"}, "logo.png", "", "", "", "", "", 10)
+	if err != nil || len(result.Files) != 1 || result.Files[0].ContentIndexed {
+		t.Fatalf("result=%#v err=%v", result.Files, err)
+	}
+	if hidden, _ := service.FindFiles(ctx, []string{"mallory"}, "Dockerfile", "", "", "", "", "", 10); len(hidden.Files) != 0 {
+		t.Fatalf("ACL leak: %#v", hidden.Files)
+	}
+}
+
+// A repository registered a minute ago has no stored listing. Filename search
+// must still answer by reading the tree once.
+func TestFindFilesFallsBackToRemoteTreeListing(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:find-files-remote?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r','core','fresh','Fresh','gitlab','1','/core/fresh','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r','alice','read')`)
+	remote := &treeSource{files: []string{"README.md", "charts/values.yaml", "Dockerfile"}}
+	service := New(db)
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) { return remote, nil })
+	result, err := service.FindFiles(ctx, []string{"alice"}, "values.yaml", "", "", "", "", "", 10)
+	if err != nil || len(result.Files) != 1 || result.Files[0].Path != "charts/values.yaml" {
+		t.Fatalf("result=%#v err=%v", result.Files, err)
+	}
+	if result.Files[0].Origin != "remote" {
+		t.Fatalf("origin=%s", result.Files[0].Origin)
+	}
+	if remote.calls != 1 {
+		t.Fatalf("the tree must be listed once, calls=%d", remote.calls)
+	}
+	found := false
+	for _, diagnostic := range result.Diagnostics {
+		if strings.Contains(diagnostic, "no stored file listing") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the live listing must be stated: %v", result.Diagnostics)
+	}
+}
+
 // A registered repository that is still being embedded has no chunks yet.
 // query-docs must fail over to the source code search API instead of answering
 // "not indexed", which is useless to a coding agent.

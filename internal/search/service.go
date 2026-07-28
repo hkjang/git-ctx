@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"path"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -876,6 +879,370 @@ WHERE r.enabled=1 AND ` + predicate
 		return nil, lastErr
 	}
 	return out, nil
+}
+
+// FileResult is one path returned by filename search.
+type FileResult struct {
+	LibraryID, SourceType, ProjectKey, RepositorySlug, Ref, Path, BaseName string
+	SizeBytes                                                              int64
+	ContentIndexed                                                         bool
+	// Origin is "index" for the stored listing and "remote" when the tree was
+	// read live because the repository has no listing yet.
+	Origin string
+	score  int
+}
+
+type FileSearchResult struct {
+	Pattern     string
+	Files       []FileResult
+	Diagnostics []string
+}
+
+// maxRemoteFileListings bounds how many repository trees are downloaded live in
+// one filename search. Listing a tree is one API call per repository, so an
+// unbounded fallback would be slower than the question is worth.
+const maxRemoteFileListings = 5
+
+// FindFiles answers "where is this file" across accessible repositories.
+//
+// The pattern is matched the way a developer expects: without a slash it
+// matches the file name, with a slash it matches the whole path, `*`, `?` and
+// `**` behave like a shell glob, and a pattern without wildcards is a
+// case-insensitive substring. Repositories whose listing is not stored yet fall
+// back to a live tree read so a freshly registered repository still answers.
+func (s *Service) FindFiles(ctx context.Context, principals []string, pattern, libraryID, sourceType, project, repository, ref string, limit int) (FileSearchResult, error) {
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return FileSearchResult{}, errors.New("pattern is required")
+	}
+	if limit < 1 || limit > 200 {
+		limit = 50
+	}
+	result := FileSearchResult{Pattern: pattern, Files: []FileResult{}}
+	if len(principals) == 0 {
+		result.Diagnostics = append(result.Diagnostics, "acl: the Keycloak identity has no bitbucket_user_slug or gitlab_user_id claim, so no repository can be authorized.")
+		return result, nil
+	}
+	matcher := newPathMatcher(pattern)
+	join, predicate, args := repositoryACL(principals)
+	statement := `SELECT DISTINCT r.library_id,r.source_type,r.project_key,r.slug,f.ref_name,f.path,f.base_name,f.size_bytes,f.content_indexed
+FROM repository_files f JOIN repositories r ON r.id=f.repository_id ` + join + `
+WHERE r.enabled=1 AND ` + predicate
+	if libraryID != "" {
+		base, _, ok := splitLibraryID(libraryID)
+		if !ok {
+			return FileSearchResult{}, errors.New("libraryId must use /organization/project[/version]")
+		}
+		statement += ` AND r.library_id=?`
+		args = append(args, base)
+	}
+	if sourceType != "" {
+		statement += ` AND r.source_type=?`
+		args = append(args, sourceType)
+	}
+	if project != "" {
+		statement += ` AND LOWER(r.project_key)=LOWER(?)`
+		args = append(args, project)
+	}
+	if repository != "" {
+		statement += ` AND (LOWER(r.slug)=LOWER(?) OR LOWER(r.library_id)=LOWER(?))`
+		args = append(args, repository, repository)
+	}
+	if ref != "" {
+		statement += ` AND f.ref_name=?`
+		args = append(args, ref)
+	}
+	// A coarse SQL filter keeps the scan small; the precise glob runs in Go.
+	if like := matcher.sqlLike(); like != "" {
+		statement += ` AND LOWER(f.path) LIKE ?`
+		args = append(args, like)
+	}
+	statement += ` LIMIT 2000`
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
+	if err != nil {
+		return FileSearchResult{}, err
+	}
+	defer rows.Close()
+	seenRepositories := map[string]bool{}
+	for rows.Next() {
+		var item FileResult
+		var indexed int
+		if err = rows.Scan(&item.LibraryID, &item.SourceType, &item.ProjectKey, &item.RepositorySlug, &item.Ref, &item.Path, &item.BaseName, &item.SizeBytes, &indexed); err != nil {
+			return FileSearchResult{}, err
+		}
+		seenRepositories[item.LibraryID] = true
+		score, ok := matcher.match(item.Path)
+		if !ok {
+			continue
+		}
+		item.ContentIndexed, item.Origin, item.score = indexed == 1, "index", score
+		result.Files = append(result.Files, item)
+	}
+	if err = rows.Err(); err != nil {
+		return FileSearchResult{}, err
+	}
+	result.Diagnostics = append(result.Diagnostics, fmt.Sprintf("index: matched %d stored paths across %d repositories.", len(result.Files), len(seenRepositories)))
+	if remote := s.remoteFileListings(ctx, principals, matcher, libraryID, sourceType, project, repository, ref, seenRepositories, limit); len(remote.files) > 0 || remote.diagnostic != "" {
+		result.Files = append(result.Files, remote.files...)
+		if remote.diagnostic != "" {
+			result.Diagnostics = append(result.Diagnostics, remote.diagnostic)
+		}
+	}
+	sort.SliceStable(result.Files, func(i, j int) bool {
+		if result.Files[i].score != result.Files[j].score {
+			return result.Files[i].score > result.Files[j].score
+		}
+		if len(result.Files[i].Path) != len(result.Files[j].Path) {
+			return len(result.Files[i].Path) < len(result.Files[j].Path)
+		}
+		return result.Files[i].LibraryID < result.Files[j].LibraryID
+	})
+	if len(result.Files) > limit {
+		result.Files = result.Files[:limit]
+	}
+	return result, nil
+}
+
+type remoteFileListing struct {
+	files      []FileResult
+	diagnostic string
+}
+
+// remoteFileListings reads the tree of registered repositories that have no
+// stored listing yet, which is the normal state right after registration.
+func (s *Service) remoteFileListings(ctx context.Context, principals []string, matcher pathMatcher, libraryID, sourceType, project, repository, ref string, indexed map[string]bool, limit int) remoteFileListing {
+	if s.sources == nil {
+		return remoteFileListing{}
+	}
+	join, predicate, args := repositoryACL(principals)
+	statement := `SELECT DISTINCT r.id,r.library_id,r.source_type,r.project_key,r.slug,r.default_branch
+FROM repositories r ` + join + `
+WHERE r.enabled=1 AND ` + predicate + `
+AND NOT EXISTS (SELECT 1 FROM repository_files f WHERE f.repository_id=r.id)`
+	if libraryID != "" {
+		if base, _, ok := splitLibraryID(libraryID); ok {
+			statement += ` AND r.library_id=?`
+			args = append(args, base)
+		}
+	}
+	if sourceType != "" {
+		statement += ` AND r.source_type=?`
+		args = append(args, sourceType)
+	}
+	if project != "" {
+		statement += ` AND LOWER(r.project_key)=LOWER(?)`
+		args = append(args, project)
+	}
+	if repository != "" {
+		statement += ` AND (LOWER(r.slug)=LOWER(?) OR LOWER(r.library_id)=LOWER(?))`
+		args = append(args, repository, repository)
+	}
+	statement += ` ORDER BY r.library_id LIMIT ` + fmt.Sprint(maxRemoteFileListings)
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
+	if err != nil {
+		return remoteFileListing{}
+	}
+	type target struct{ id, libraryID, sourceType, project, slug, defaultRef string }
+	var targets []target
+	for rows.Next() {
+		var item target
+		if rows.Scan(&item.id, &item.libraryID, &item.sourceType, &item.project, &item.slug, &item.defaultRef) == nil && !indexed[item.libraryID] {
+			targets = append(targets, item)
+		}
+	}
+	rows.Close()
+	if len(targets) == 0 {
+		return remoteFileListing{}
+	}
+	var out []FileResult
+	listed := 0
+	for _, item := range targets {
+		adapter, adapterErr := s.sources(ctx, item.sourceType)
+		if adapterErr != nil {
+			continue
+		}
+		selectedRef := ref
+		if selectedRef == "" {
+			selectedRef = item.defaultRef
+		}
+		if selectedRef == "" {
+			selectedRef = "main"
+		}
+		files, listErr := adapter.ListFiles(ctx, source.RepositoryRef{ProjectKey: item.project, Slug: item.slug}, selectedRef)
+		if listErr != nil {
+			continue
+		}
+		listed++
+		for _, file := range files {
+			score, ok := matcher.match(file.Path)
+			if !ok {
+				continue
+			}
+			out = append(out, FileResult{
+				LibraryID: item.libraryID, SourceType: item.sourceType, ProjectKey: item.project, RepositorySlug: item.slug,
+				Ref: selectedRef, Path: file.Path, BaseName: strings.ToLower(path.Base(file.Path)), SizeBytes: file.Size,
+				ContentIndexed: false, Origin: "remote", score: score,
+			})
+			if len(out) >= limit {
+				break
+			}
+		}
+		if len(out) >= limit {
+			break
+		}
+	}
+	if listed == 0 {
+		return remoteFileListing{}
+	}
+	return remoteFileListing{files: out, diagnostic: fmt.Sprintf("remote: listed %d repository tree(s) that have no stored file listing yet.", listed)}
+}
+
+// pathMatcher implements the filename matching rules in one place so the SQL
+// prefilter and the precise match cannot drift apart.
+//
+// Rules, chosen to match what a developer types:
+//   - no slash        -> match the file name (README, *.tf)
+//   - slash           -> match the whole path (db/migrations/, internal/**/x.go)
+//   - * ? [ ]         -> shell glob, * never crosses a directory boundary
+//   - **              -> any depth, including none
+//   - no wildcard     -> case-insensitive substring, exact names ranked first
+type pathMatcher struct {
+	raw        string
+	lower      string
+	glob       bool
+	fullPath   bool
+	literalRun string
+	expression *regexp.Regexp
+}
+
+func newPathMatcher(pattern string) pathMatcher {
+	lower := strings.ToLower(strings.TrimPrefix(pattern, "./"))
+	m := pathMatcher{
+		raw: pattern, lower: lower,
+		glob:     strings.ContainsAny(lower, "*?["),
+		fullPath: strings.Contains(strings.TrimSuffix(lower, "/"), "/"),
+	}
+	m.literalRun = longestLiteralRun(lower)
+	if m.glob {
+		m.expression = globExpression(lower)
+	}
+	return m
+}
+
+// globExpression compiles a glob into an anchored regular expression. path.Match
+// cannot express `**`, which is the pattern developers reach for most.
+func globExpression(pattern string) *regexp.Regexp {
+	var b strings.Builder
+	b.WriteString("^")
+	for index := 0; index < len(pattern); index++ {
+		switch char := pattern[index]; char {
+		case '*':
+			if index+1 < len(pattern) && pattern[index+1] == '*' {
+				index++
+				if index+1 < len(pattern) && pattern[index+1] == '/' {
+					index++
+					b.WriteString("(?:[^/]*/)*") // any number of directories
+					continue
+				}
+				b.WriteString(".*")
+				continue
+			}
+			b.WriteString("[^/]*")
+		case '?':
+			b.WriteString("[^/]")
+		case '[':
+			end := strings.IndexByte(pattern[index:], ']')
+			if end < 0 {
+				b.WriteString(regexp.QuoteMeta(string(char)))
+				continue
+			}
+			b.WriteString(pattern[index : index+end+1])
+			index += end
+		default:
+			b.WriteString(regexp.QuoteMeta(string(char)))
+		}
+	}
+	b.WriteString("$")
+	expression, err := regexp.Compile(b.String())
+	if err != nil {
+		return nil
+	}
+	return expression
+}
+
+// sqlLike narrows the scan with the longest wildcard-free part of the pattern.
+func (m pathMatcher) sqlLike() string {
+	if m.literalRun == "" {
+		return ""
+	}
+	escaped := strings.NewReplacer("%", "", "_", "").Replace(m.literalRun)
+	if escaped == "" {
+		return ""
+	}
+	return "%" + escaped + "%"
+}
+
+// match reports whether the path matches and how strong the match is, so exact
+// file names outrank incidental path substrings.
+func (m pathMatcher) match(candidate string) (int, bool) {
+	value := strings.ToLower(strings.TrimPrefix(filepath.ToSlash(candidate), "./"))
+	base := path.Base(value)
+	if m.glob {
+		if m.expression == nil {
+			return 0, false
+		}
+		if m.fullPath {
+			if m.expression.MatchString(value) {
+				return 90, true
+			}
+			// `migrations/*.sql` should also find `db/migrations/001.sql`.
+			if segments := strings.Split(value, "/"); len(segments) > 1 {
+				for index := 1; index < len(segments); index++ {
+					if m.expression.MatchString(strings.Join(segments[index:], "/")) {
+						return 70, true
+					}
+				}
+			}
+			return 0, false
+		}
+		if m.expression.MatchString(base) {
+			return 90, true
+		}
+		return 0, false
+	}
+	switch {
+	case base == m.lower:
+		return 100, true
+	case strings.HasPrefix(base, m.lower):
+		return 80, true
+	case m.fullPath && strings.Contains(value, m.lower):
+		return 60, true
+	case strings.Contains(base, m.lower):
+		return 40, true
+	case strings.Contains(value, m.lower):
+		return 20, true
+	}
+	return 0, false
+}
+
+// longestLiteralRun returns the longest wildcard-free segment of the pattern.
+func longestLiteralRun(pattern string) string {
+	longest := ""
+	current := strings.Builder{}
+	for _, char := range pattern {
+		if strings.ContainsRune("*?[]", char) {
+			if current.Len() > len(longest) {
+				longest = current.String()
+			}
+			current.Reset()
+			continue
+		}
+		current.WriteRune(char)
+	}
+	if current.Len() > len(longest) {
+		longest = current.String()
+	}
+	return strings.Trim(longest, "/")
 }
 
 // SearchCode combines repository discovery with source query APIs so callers

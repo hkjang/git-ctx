@@ -445,6 +445,13 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 			return fail(err)
 		}
 	}
+	// The file listing is stored for every path in the ref, not only the ones the
+	// index policy accepted, so filename search can answer for lockfiles, images
+	// and excluded sources too.
+	if err = i.recordFiles(ctx, tx, repoID, ref, files, incremental, removedPaths); err != nil {
+		_ = tx.Rollback()
+		return fail(err)
+	}
 	if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding,indexed_at,embedding_provider,embedding_model,embedding_dimensions,embedding_revision)
 SELECT id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding,indexed_at,embedding_provider,embedding_model,embedding_dimensions,embedding_revision
 FROM document_chunks_staging WHERE generation_id=?`), generationID); err != nil {
@@ -618,6 +625,40 @@ func isKeyFile(path string) bool {
 		return false
 	}
 }
+
+// recordFiles refreshes the searchable file listing of a ref. A full sync
+// replaces the ref, an incremental sync applies only the changed paths.
+func (i *Indexer) recordFiles(ctx context.Context, tx *sql.Tx, repoID string, ref source.Reference, files []source.File, incremental bool, removed map[string]bool) error {
+	if !incremental {
+		if _, err := tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM repository_files WHERE repository_id=? AND ref_name=?`), repoID, ref.Name); err != nil {
+			return err
+		}
+	} else {
+		for path := range removed {
+			if _, err := tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM repository_files WHERE repository_id=? AND ref_name=? AND path=?`), repoID, ref.Name, path); err != nil {
+				return err
+			}
+		}
+	}
+	now := time.Now().UTC()
+	for _, file := range files {
+		path := filepath.ToSlash(strings.TrimPrefix(file.Path, "./"))
+		if path == "" {
+			continue
+		}
+		indexed := 0
+		if i.allowed(file) {
+			indexed = 1
+		}
+		if _, err := tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_files(repository_id,ref_name,path,base_name,size_bytes,content_indexed,commit_id,updated_at) VALUES(?,?,?,?,?,?,?,?)
+ON CONFLICT(repository_id,ref_name,path) DO UPDATE SET base_name=excluded.base_name,size_bytes=excluded.size_bytes,content_indexed=excluded.content_indexed,commit_id=excluded.commit_id,updated_at=excluded.updated_at`),
+			repoID, ref.Name, path, strings.ToLower(filepath.Base(path)), file.Size, indexed, ref.LatestCommit, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (i *Indexer) allowed(f source.File) bool {
 	p := strings.TrimPrefix(filepath.ToSlash(f.Path), "./")
 	for _, x := range i.policy.ExcludePrefixes {
