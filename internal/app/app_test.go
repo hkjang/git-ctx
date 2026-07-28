@@ -1657,3 +1657,106 @@ VALUES(?,?,'u1','KEY123',?,'',?,120,'10.0.0.1',900,0,'sessAAAAAAAA','req-1','cla
 		t.Fatalf("another user's call must not be readable: %d %s", ownRecorder.Code, ownRecorder.Body.String())
 	}
 }
+
+// A conversation is the unit that succeeds or fails, not a single call, and the
+// self-check has to exercise the real retrieval path rather than the settings.
+func TestMCPSessionsAndSelfCheck(t *testing.T) {
+	a, err := New(context.Background(), config.Config{DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "mcp-sessions.db") + "?_foreign_keys=on", KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(t.TempDir(), "backups")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	now := time.Now().UTC()
+	insert := func(id, session, tool, outcome string, age time.Duration) {
+		t.Helper()
+		if _, err := a.store.DB.Exec(`INSERT INTO mcp_calls(id,occurred_at,user_id,tool,outcome,duration_ms,client_ip,response_bytes,session_id,client_name,client_version,arguments_preview,result_count)
+VALUES(?,?,'u1',?,?,40,'10.0.0.1',800,?,'claude-code','2.1','query=결제 재시도',1)`, id, now.Add(-age), tool, outcome, session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// One conversation that found its answer, one that gave up.
+	insert("s1-a", "resolved0001", "search-code", "empty", 10*time.Minute)
+	insert("s1-b", "resolved0001", "search-semantic", "success", 9*time.Minute)
+	insert("s2-a", "givenup00001", "search-code", "empty", 5*time.Minute)
+	insert("s2-b", "givenup00001", "find-file", "empty", 4*time.Minute)
+
+	get := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer bootstrap")
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	response := get(http.MethodGet, "/api/v1/admin/mcp/sessions?window=24h", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("sessions=%d body=%s", response.Code, response.Body.String())
+	}
+	var sessions struct {
+		Sessions []struct {
+			SessionID, Client, LastOutcome, LastCallID string
+			ToolChain                                  []string
+			Calls, Empty                               int64
+			Unresolved                                 bool
+		}
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &sessions); err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions.Sessions) != 2 {
+		t.Fatalf("sessions=%#v", sessions.Sessions)
+	}
+	// The conversation that ended without an answer is ranked first.
+	first := sessions.Sessions[0]
+	if first.SessionID != "givenup00001" || !first.Unresolved || first.LastCallID != "s2-b" {
+		t.Fatalf("unresolved sessions must rank first: %#v", sessions.Sessions)
+	}
+	if strings.Join(first.ToolChain, "→") != "search-code→find-file" {
+		t.Fatalf("tool chain=%v", first.ToolChain)
+	}
+	if sessions.Sessions[1].Unresolved {
+		t.Fatalf("the resolved conversation must not be flagged: %#v", sessions.Sessions[1])
+	}
+
+	check := get(http.MethodPost, "/api/v1/admin/mcp/selfcheck", `{"query":"결제 재시도"}`)
+	if check.Code != http.StatusOK {
+		t.Fatalf("selfcheck=%d body=%s", check.Code, check.Body.String())
+	}
+	var result struct {
+		Verdict string
+		Checks  []struct {
+			Name, Status, Detail, Action string
+			Steps                        []struct{ Stage, Status string }
+		}
+	}
+	if err := json.Unmarshal(check.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	// An empty deployment must fail loudly with an action, not report success.
+	if result.Verdict != "fail" {
+		t.Fatalf("verdict=%s checks=%#v", result.Verdict, result.Checks)
+	}
+	names := map[string]string{}
+	for _, item := range result.Checks {
+		names[item.Name] = item.Status
+	}
+	for _, expected := range []string{"저장소 카탈로그", "ACL 주체", "코드 검색 (search-code)", "파일명 검색 (find-file)", "의미 검색 (search-semantic)"} {
+		if _, ok := names[expected]; !ok {
+			t.Fatalf("check %q missing: %#v", expected, names)
+		}
+	}
+	var traced bool
+	for _, item := range result.Checks {
+		if len(item.Steps) > 0 {
+			traced = true
+		}
+		if item.Status != "ok" && item.Action == "" {
+			t.Fatalf("a failing check must say what to do: %#v", item)
+		}
+	}
+	if !traced {
+		t.Fatal("the self-check must return the stage trace of the retrieval it ran")
+	}
+}

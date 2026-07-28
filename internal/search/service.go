@@ -881,7 +881,7 @@ WHERE r.enabled=1 AND ` + predicate
 	if err = rows.Close(); err != nil {
 		return nil, err
 	}
-	calltrace.From(ctx).Note("acl-candidates", sourceType, statusFor(len(candidates)), fmt.Sprintf("%d repositories visible to this caller", len(candidates)))
+	calltrace.From(ctx).Count("acl-candidates", sourceType, statusFor(len(candidates)), len(candidates), len(candidates), "repositories visible to this caller")
 	// Query every candidate repository in parallel. One remote round trip per
 	// repository in sequence regularly exceeded the MCP tool timeout, and a
 	// deadline in the middle of the loop dropped all code hits while the cheap
@@ -1049,8 +1049,8 @@ WHERE r.enabled=1 AND ` + predicate
 	if err = rows.Err(); err != nil {
 		return FileSearchResult{}, err
 	}
-	calltrace.From(ctx).Note("index-files", "", statusFor(len(result.Files)),
-		fmt.Sprintf("%d stored paths across %d repositories", len(result.Files), len(seenRepositories)))
+	calltrace.From(ctx).Count("index-files", "", statusFor(len(result.Files)), len(result.Files), len(result.Files),
+		fmt.Sprintf("stored paths across %d repositories", len(seenRepositories)))
 	result.Diagnostics = append(result.Diagnostics, fmt.Sprintf("index: matched %d stored paths across %d repositories.", len(result.Files), len(seenRepositories)))
 	if remote := s.remoteFileListings(ctx, principals, matcher, libraryID, sourceType, project, repository, ref, seenRepositories, limit); len(remote.files) > 0 || remote.diagnostic != "" {
 		result.Files = append(result.Files, remote.files...)
@@ -1605,13 +1605,13 @@ WHERE r.enabled=1 AND c.embedding IS NOT NULL AND ` + predicate
 			args = append(args, ids...)
 			args = append(args, scopeArgs...)
 			result.Mode = "vector database ANN"
-			hits, err := s.collectSemanticHits(ctx, statement, args, queryVector, scores, limit)
+			hits, _, err := s.collectSemanticHits(ctx, statement, args, queryVector, scores, limit)
 			if err != nil {
 				return SemanticSearch{}, err
 			}
 			result.Hits = hits
-			calltrace.From(ctx).Note("acl-filter", "vector candidates", statusFor(len(hits)),
-				fmt.Sprintf("%d neighbours, %d visible after ACL and scope", len(ids), len(hits)))
+			calltrace.From(ctx).Count("acl-filter", "vector candidates", statusFor(len(hits)), len(ids), len(hits),
+				"nearest neighbours visible after the ACL and scope filters")
 			result.Diagnostics = append(result.Diagnostics,
 				fmt.Sprintf("vector database: %d nearest neighbours, %d visible after the repository ACL and scope filters.", len(ids), len(hits)))
 			return result, nil
@@ -1621,24 +1621,35 @@ WHERE r.enabled=1 AND c.embedding IS NOT NULL AND ` + predicate
 	args = append(args, aclArgs...)
 	args = append(args, scopeArgs...)
 	scanSpan := calltrace.Start(ctx, "embedding-scan", "")
-	hits, err := s.collectSemanticHits(ctx, statement, args, queryVector, nil, limit)
+	hits, scanned, err := s.collectSemanticHits(ctx, statement, args, queryVector, nil, limit)
 	if err != nil {
 		scanSpan.Fail(err)
 		return SemanticSearch{}, err
 	}
-	scanSpan.End(statusFor(len(hits)), semanticScanLimit, len(hits), "bounded scan of stored embeddings")
+	detail := fmt.Sprintf("scored %d stored embeddings", scanned)
+	if scanned >= semanticScanLimit {
+		detail += fmt.Sprintf("; the %d chunk scan limit was reached, so the corpus was not covered completely", semanticScanLimit)
+	}
+	scanSpan.End(statusFor(len(hits)), scanned, len(hits), detail)
 	result.Hits = hits
-	result.Diagnostics = append(result.Diagnostics,
-		fmt.Sprintf("in-database scan: scored up to %d stored embeddings. Configure a vector database for exhaustive coverage on a large corpus.", semanticScanLimit))
+	scanDiagnostic := fmt.Sprintf("in-database scan: scored %d stored embeddings.", scanned)
+	if scanned >= semanticScanLimit {
+		scanDiagnostic += fmt.Sprintf(" The %d chunk limit was reached, so some repositories were not scored; configure a vector database for exhaustive coverage.", semanticScanLimit)
+	}
+	result.Diagnostics = append(result.Diagnostics, scanDiagnostic)
 	return result, nil
 }
 
 // collectSemanticHits scores candidate rows and keeps the best ones. External
 // scores win when present because they come from the same vectors.
-func (s *Service) collectSemanticHits(ctx context.Context, statement string, args []any, queryVector []float32, external map[string]float64, limit int) ([]SemanticHit, error) {
+// collectSemanticHits also reports how many chunks it actually scored. The scan
+// limit is a cap, not a measurement: reporting the cap made a corpus of eight
+// chunks look like twenty thousand rejected candidates in the trace.
+func (s *Service) collectSemanticHits(ctx context.Context, statement string, args []any, queryVector []float32, external map[string]float64, limit int) ([]SemanticHit, int, error) {
+	scanned := 0
 	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
 	if err != nil {
-		return nil, err
+		return nil, scanned, err
 	}
 	defer rows.Close()
 	var hits []SemanticHit
@@ -1647,8 +1658,9 @@ func (s *Service) collectSemanticHits(ctx context.Context, statement string, arg
 		var raw []byte
 		var hit SemanticHit
 		if err = rows.Scan(&id, &hit.LibraryID, &hit.SourceType, &hit.Ref, &hit.CommitID, &hit.FilePath, &hit.Heading, &hit.Content, &hit.LineStart, &hit.LineEnd, &raw); err != nil {
-			return nil, err
+			return nil, scanned, err
 		}
+		scanned++
 		if score, ok := external[id]; ok {
 			hit.Score = score
 		} else {
@@ -1661,13 +1673,13 @@ func (s *Service) collectSemanticHits(ctx context.Context, statement string, arg
 		hits = append(hits, hit)
 	}
 	if err = rows.Err(); err != nil {
-		return nil, err
+		return nil, scanned, err
 	}
 	sort.SliceStable(hits, func(i, j int) bool { return hits[i].Score > hits[j].Score })
 	if len(hits) > limit {
 		hits = hits[:limit]
 	}
-	return hits, nil
+	return hits, scanned, nil
 }
 
 // DependentResult is one place, in any accessible repository, that uses a
@@ -2156,11 +2168,11 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 		}
 	}
 	if len(result.Repositories) > limit {
-		calltrace.From(ctx).Note("limit", "repositories", calltrace.StatusOK, fmt.Sprintf("%d of %d kept", limit, len(result.Repositories)))
+		calltrace.From(ctx).Count("limit", "repositories", calltrace.StatusOK, len(result.Repositories), limit, "trimmed to the requested limit")
 		result.Repositories = result.Repositories[:limit]
 	}
 	if len(result.Hits) > limit {
-		calltrace.From(ctx).Note("limit", "hits", calltrace.StatusOK, fmt.Sprintf("%d of %d kept", limit, len(result.Hits)))
+		calltrace.From(ctx).Count("limit", "hits", calltrace.StatusOK, len(result.Hits), limit, "trimmed to the requested limit")
 		result.Hits = result.Hits[:limit]
 	}
 	if repoErr != nil && sourceErr != nil {

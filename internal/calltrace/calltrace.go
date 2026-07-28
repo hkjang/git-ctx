@@ -128,6 +128,17 @@ func (r *Recorder) Note(stage, target, status, detail string) {
 		OffsetMS: time.Since(r.start).Milliseconds()})
 }
 
+// Count records a decision that did move a number of results, such as an ACL
+// filter or a limit. Without the counts such a step reads as "0 → 0" in the
+// waterfall, which looks like the stage lost everything when it did not.
+func (r *Recorder) Count(stage, target, status string, candidates, results int, detail string) {
+	if r == nil {
+		return
+	}
+	r.add(Step{Stage: stage, Target: target, Status: status, Detail: detail,
+		Candidates: candidates, Results: results, OffsetMS: time.Since(r.start).Milliseconds()})
+}
+
 func (r *Recorder) add(step Step) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -169,15 +180,21 @@ func (r *Recorder) Summary() string {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	label := func(step Step) string {
+		if step.Target == "" {
+			return step.Stage
+		}
+		return step.Stage + " " + step.Target
+	}
 	for _, step := range r.steps {
 		switch step.Status {
 		case StatusError, StatusTimeout:
-			return step.Stage + " " + step.Target + ": " + step.Status
+			return label(step) + ": " + step.Status
 		}
 	}
 	for _, step := range r.steps {
 		if step.Candidates > 0 && step.Results == 0 {
-			return step.Stage + " " + step.Target + ": " + itoa(step.Candidates) + " candidates, none passed"
+			return label(step) + ": " + itoa(step.Candidates) + " candidates, none passed"
 		}
 	}
 	// Nothing was dropped because nothing arrived. Naming the first stage that
@@ -185,11 +202,7 @@ func (r *Recorder) Summary() string {
 	// a permission problem, an index stage with none is an indexing one.
 	for _, step := range r.steps {
 		if step.Status == StatusEmpty {
-			target := step.Target
-			if target != "" {
-				target = " " + target
-			}
-			return step.Stage + target + ": nothing to work with from here on"
+			return label(step) + ": nothing to work with from here on"
 		}
 	}
 	return ""

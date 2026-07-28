@@ -32,6 +32,9 @@
       sourceWrite: has("source-admin"),
       mcp: has("mcp-admin") || roles.has("readonly-operator"),
       mcpWrite: has("mcp-admin"),
+      // The call log carries user identifiers and the text of every question,
+      // so an operations viewer sees the aggregate screen but not the log.
+      mcpAudit: has("mcp-admin") || roles.has("auditor") || roles.has("security-admin"),
       status: has("readonly-operator"),
       security: has("security-admin"),
       securityEvents: has("security-admin") || roles.has("readonly-operator"),

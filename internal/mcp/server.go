@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"git-ctx/internal/auth"
 	"git-ctx/internal/calltrace"
@@ -929,12 +930,30 @@ func errorCode(err error) string {
 	}
 }
 
+// runeSafeCut returns the largest prefix of value that fits in limit bytes and
+// still ends on a rune boundary. A plain byte slice splits multi-byte text —
+// every Korean character is three bytes — and stores invalid UTF-8 that later
+// renders as replacement characters.
+func runeSafeCut(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if len(value) <= limit {
+		return value
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut]
+}
+
 func clip(value string, limit int) string {
 	value = strings.TrimSpace(value)
 	if len(value) <= limit {
 		return value
 	}
-	return value[:limit] + "…"
+	return strings.TrimSpace(runeSafeCut(value, limit)) + "…"
 }
 
 func catalogContains(name string) bool {
@@ -1106,7 +1125,7 @@ func cutAtBoundary(text string, limit int) string {
 	if best != "" {
 		return best
 	}
-	return window
+	return runeSafeCut(window, len(window))
 }
 
 // thousands formats a byte count the way the notice reads best.
@@ -1315,9 +1334,17 @@ func (s *Server) finishCall(w http.ResponseWriter, r *http.Request, req request,
 	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`INSERT INTO mcp_calls(id,user_id,api_key_prefix,tool,library_id,outcome,duration_ms,client_ip,response_bytes,truncated,session_id,request_id,client_name,client_version,arguments_preview,arguments_hash,result_count,cache_hit,error_code,retrieval_mode,trace_summary) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
 		callID, p.UserID, p.KeyPrefix, tool, libraryID, outcome, time.Since(start).Milliseconds(), clientIP(r), len(text), boolInt(truncated),
 		audit.sessionID, audit.requestID, audit.clientName, audit.clientVersion, audit.preview, audit.hash, results, boolInt(audit.cacheHit), errorCode(err), mode, summary)
-	for _, step := range audit.trace.Steps() {
-		_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`INSERT INTO mcp_call_steps(call_id,sequence,stage,target,status,detail,candidates,results,duration_ms,offset_ms) VALUES(?,?,?,?,?,?,?,?,?,?)`),
-			callID, step.Sequence, step.Stage, clip(step.Target, 200), step.Status, clip(step.Detail, 300), step.Candidates, step.Results, step.DurationMS, step.OffsetMS)
+	// One statement for the whole trace. A row per stage would put up to sixty
+	// round trips on the response path of every call.
+	if steps := audit.trace.Steps(); len(steps) > 0 {
+		values := make([]string, 0, len(steps))
+		args := make([]any, 0, len(steps)*10)
+		for _, step := range steps {
+			values = append(values, "(?,?,?,?,?,?,?,?,?,?)")
+			args = append(args, callID, step.Sequence, step.Stage, clip(step.Target, 200), step.Status,
+				clip(step.Detail, 300), step.Candidates, step.Results, step.DurationMS, step.OffsetMS)
+		}
+		_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`INSERT INTO mcp_call_steps(call_id,sequence,stage,target,status,detail,candidates,results,duration_ms,offset_ms) VALUES `+strings.Join(values, ",")), args...)
 	}
 	write(w, response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"content": []map[string]string{{"type": "text", "text": text}}, "isError": err != nil}})
 }
@@ -1766,7 +1793,7 @@ func truncate(value string, limit int) string {
 	if len(value) <= limit {
 		return value
 	}
-	return value[:limit] + "…"
+	return runeSafeCut(value, limit) + "…"
 }
 func write(w http.ResponseWriter, v response) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

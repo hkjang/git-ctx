@@ -24,16 +24,19 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"git-ctx/internal/apikey"
 	"git-ctx/internal/auth"
 	"git-ctx/internal/backup"
 	bitbucketv6 "git-ctx/internal/bitbucket/v6"
+	"git-ctx/internal/calltrace"
 	"git-ctx/internal/config"
 	confluencesource "git-ctx/internal/confluence"
 	"git-ctx/internal/embedding"
@@ -489,6 +492,8 @@ func (a *App) routes() {
 	// roles that already see audit data.
 	a.mux.Handle("GET /api/v1/admin/mcp/calls", a.authorize(http.HandlerFunc(a.mcpCalls), "mcp-admin", "auditor", "security-admin"))
 	a.mux.Handle("GET /api/v1/admin/mcp/calls/{id}", a.authorize(http.HandlerFunc(a.mcpCallTrace), "mcp-admin", "auditor", "security-admin"))
+	a.mux.Handle("GET /api/v1/admin/mcp/sessions", a.authorize(http.HandlerFunc(a.mcpSessions), "mcp-admin", "auditor", "security-admin"))
+	a.mux.Handle("POST /api/v1/admin/mcp/selfcheck", a.authorize(http.HandlerFunc(a.mcpSelfCheck), "mcp-admin", "source-admin", "search-admin"))
 	// A developer debugging their own agent needs the same X-ray for their own
 	// calls, without an administrator role.
 	a.mux.Handle("GET /api/v1/me/calls/{id}", a.authenticate(http.HandlerFunc(a.mcpCallTrace)))
@@ -4456,12 +4461,15 @@ FROM mcp_calls WHERE occurred_at>=? GROUP BY tool ORDER BY COUNT(*) DESC`), from
 	for index := range tools {
 		tools[index].P50LatencyMS = a.latencyPercentile(r.Context(), tools[index].Tool, from, tools[index].Calls, 0.50)
 		tools[index].P95LatencyMS = a.latencyPercentile(r.Context(), tools[index].Tool, from, tools[index].Calls, 0.95)
+		// A tool that is no longer in the catalog still has calls in the window, so
+		// the effective defaults are filled in before the lookup rather than left
+		// at zero, which would produce a "raise the budget to 0" recommendation.
+		tools[index].TimeoutMS, tools[index].BudgetBytes = 30000, mcp.DefaultResponseBytes
 		var timeout, cache, budget int
 		if err := a.store.DB.QueryRowContext(r.Context(), a.store.Rebind(`SELECT timeout_ms,cache_seconds,max_response_bytes FROM mcp_tools WHERE name=?`), tools[index].Tool).Scan(&timeout, &cache, &budget); err == nil {
 			tools[index].TimeoutMS, tools[index].CacheSeconds = timeout, cache
-			tools[index].BudgetBytes = budget
-			if budget <= 0 {
-				tools[index].BudgetBytes = mcp.DefaultResponseBytes
+			if budget > 0 {
+				tools[index].BudgetBytes = budget
 			}
 		}
 	}
@@ -4599,13 +4607,16 @@ func (a *App) mcpCalls(w http.ResponseWriter, r *http.Request) {
 	from := time.Now().UTC().Add(-duration)
 	where := []string{"occurred_at>=?"}
 	args := []any{from}
-	for column, value := range map[string]string{
-		"tool": query.Get("tool"), "outcome": query.Get("outcome"), "user_id": query.Get("user"),
-		"api_key_prefix": query.Get("keyPrefix"), "session_id": query.Get("session"), "error_code": query.Get("errorCode"),
+	// Fixed order: a map would build a differently ordered statement on every
+	// request, which defeats the driver's prepared-statement cache and makes the
+	// slow query log unreadable.
+	for _, filter := range []struct{ column, value string }{
+		{"tool", query.Get("tool")}, {"outcome", query.Get("outcome")}, {"user_id", query.Get("user")},
+		{"api_key_prefix", query.Get("keyPrefix")}, {"session_id", query.Get("session")}, {"error_code", query.Get("errorCode")},
 	} {
-		if value != "" {
-			where = append(where, column+"=?")
-			args = append(args, value)
+		if filter.value != "" {
+			where = append(where, filter.column+"=?")
+			args = append(args, filter.value)
 		}
 	}
 	if search := strings.TrimSpace(query.Get("q")); search != "" {
@@ -4762,17 +4773,241 @@ func (a *App) mcpCallTrace(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, 200, map[string]any{"call": call, "steps": steps, "sessionSequence": sequence})
 }
 
+// mcpSessions groups the calls of one agent conversation. A single call rarely
+// tells the whole story: an agent that searched, got nothing, searched again
+// with different words and gave up looks fine call by call and is a failure as
+// a conversation. Sessions that ended without an answer are ranked first
+// because they are the ones worth reading.
+func (a *App) mcpSessions(w http.ResponseWriter, r *http.Request) {
+	duration, window, _ := mcpWindow(r.URL.Query().Get("window"))
+	from := time.Now().UTC().Add(-duration)
+	rows, err := a.store.DB.QueryContext(r.Context(), a.store.Rebind(`SELECT session_id,
+MIN(occurred_at), MAX(occurred_at), COUNT(*),
+COALESCE(SUM(CASE WHEN outcome='success' THEN 1 ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN outcome='empty' THEN 1 ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN outcome='error' THEN 1 ELSE 0 END),0),
+COALESCE(SUM(duration_ms),0), COALESCE(SUM(response_bytes),0),
+MIN(user_id), MIN(client_name), MIN(client_version)
+FROM mcp_calls WHERE occurred_at>=? AND session_id<>'' GROUP BY session_id ORDER BY MAX(occurred_at) DESC LIMIT 100`), from)
+	if err != nil {
+		problem(w, 500, "internal_error", err.Error())
+		return
+	}
+	defer rows.Close()
+	type sessionRow struct {
+		id, user, client                  string
+		first, last                       time.Time
+		calls, success, empty, errorCount int64
+		durationMS, bytes                 int64
+	}
+	var sessions []sessionRow
+	for rows.Next() {
+		var item sessionRow
+		var clientName, clientVersion string
+		// MIN and MAX over a timestamp lose the column type that lets the SQLite
+		// driver hand back a time.Time, so both are scanned loosely and converted.
+		var first, last any
+		if err = rows.Scan(&item.id, &first, &last, &item.calls, &item.success, &item.empty, &item.errorCount,
+			&item.durationMS, &item.bytes, &item.user, &clientName, &clientVersion); err != nil {
+			problem(w, 500, "internal_error", err.Error())
+			return
+		}
+		item.first, item.last = scanTime(first), scanTime(last)
+		item.client = strings.TrimSpace(clientName + " " + clientVersion)
+		sessions = append(sessions, item)
+	}
+	if err = rows.Err(); err != nil {
+		problem(w, 500, "internal_error", err.Error())
+		return
+	}
+	out := make([]map[string]any, 0, len(sessions))
+	for _, item := range sessions {
+		// The tool chain is what the conversation actually did, and the outcome of
+		// the last call is how it ended.
+		chainRows, chainErr := a.store.DB.QueryContext(r.Context(), a.store.Rebind(
+			`SELECT id,tool,outcome FROM mcp_calls WHERE session_id=? AND occurred_at>=? ORDER BY occurred_at LIMIT 50`), item.id, from)
+		chain := []string{}
+		lastOutcome, lastCallID := "", ""
+		if chainErr == nil {
+			for chainRows.Next() {
+				var callID, tool, outcome string
+				if chainRows.Scan(&callID, &tool, &outcome) == nil {
+					chain = append(chain, tool)
+					lastOutcome, lastCallID = outcome, callID
+				}
+			}
+			chainRows.Close()
+		}
+		out = append(out, map[string]any{
+			"sessionId": item.id, "userId": item.user, "client": item.client,
+			"firstCallAt": item.first, "lastCallAt": item.last, "calls": item.calls,
+			"success": item.success, "empty": item.empty, "errors": item.errorCount,
+			"durationMs": item.durationMS, "responseBytes": item.bytes,
+			"toolChain": chain, "lastOutcome": lastOutcome, "lastCallId": lastCallID,
+			// A conversation that ended on an empty or failed call is one where the
+			// agent walked away without an answer.
+			"unresolved": lastOutcome == "empty" || lastOutcome == "error",
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		left, right := out[i]["unresolved"].(bool), out[j]["unresolved"].(bool)
+		if left != right {
+			return left
+		}
+		return out[i]["lastCallAt"].(time.Time).After(out[j]["lastCallAt"].(time.Time))
+	})
+	jsonOut(w, 200, map[string]any{"window": window, "sessions": out})
+}
+
+// mcpSelfCheck runs the retrieval path end to end as the calling administrator
+// and returns the same stage trace an MCP call would produce.
+//
+// "설정은 저장됐는데 검색이 되는가"는 설정 화면에서 답할 수 없던 질문이었습니다.
+// This runs the real service with the caller's own principals, so it proves the
+// ACL mapping, the index, the source connectors and the embedding path together
+// rather than testing each one in isolation.
+func (a *App) mcpSelfCheck(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	principals := searchPrincipals(p)
+	var in struct {
+		Query   string `json:"query"`
+		Pattern string `json:"pattern"`
+	}
+	_ = decode(r, &in)
+	if strings.TrimSpace(in.Query) == "" {
+		in.Query = "README"
+	}
+	if strings.TrimSpace(in.Pattern) == "" {
+		in.Pattern = "README*"
+	}
+	started := time.Now()
+	type check struct {
+		Name    string            `json:"name"`
+		Status  string            `json:"status"`
+		Detail  string            `json:"detail"`
+		Action  string            `json:"action"`
+		Steps   []calltrace.Step  `json:"steps"`
+		Elapsed int64             `json:"durationMs"`
+		Extra   map[string]string `json:"extra,omitempty"`
+	}
+	checks := []check{}
+	// A check runs one retrieval call under its own recorder, so the caller sees
+	// the same stage breakdown the MCP X-ray shows.
+	run := func(name string, fn func(ctx context.Context) (int, error)) {
+		ctx, recorder := calltrace.New(r.Context())
+		at := time.Now()
+		found, err := fn(ctx)
+		item := check{Name: name, Steps: recorder.Steps(), Elapsed: time.Since(at).Milliseconds()}
+		switch {
+		case err != nil:
+			item.Status, item.Detail = "fail", err.Error()
+			item.Action = "오류 메시지의 단계를 X-ray에서 확인하고 해당 연동 설정을 점검하세요."
+		case found == 0:
+			item.Status = "warn"
+			item.Detail = "결과가 없습니다."
+			if summary := recorder.Summary(); summary != "" {
+				item.Detail += " " + summary
+			}
+			item.Action = "색인 진단과 저장소 ACL을 확인하세요. 단계별 후보 수가 0이면 권한, 후보는 있는데 통과가 0이면 색인 내용 문제입니다."
+		default:
+			item.Status, item.Detail = "ok", fmt.Sprintf("%d건", found)
+		}
+		checks = append(checks, item)
+	}
+
+	var accessible int
+	if err := a.store.DB.QueryRowContext(r.Context(), a.store.Rebind(`SELECT COUNT(*) FROM repositories WHERE enabled=1`)).Scan(&accessible); err == nil {
+		status, detail, action := "ok", fmt.Sprintf("등록 저장소 %d개", accessible), ""
+		if accessible == 0 {
+			status, detail = "fail", "등록된 저장소가 없습니다."
+			action = "소스·색인 화면에서 저장소를 탐색·등록하세요."
+		}
+		checks = append(checks, check{Name: "저장소 카탈로그", Status: status, Detail: detail, Action: action})
+	}
+	if len(principals) == 0 {
+		checks = append(checks, check{Name: "ACL 주체", Status: "fail",
+			Detail: "이 계정에 매핑된 소스 주체가 없습니다.",
+			Action: "Keycloak 매핑에서 bitbucket_user_slug 또는 gitlab_user_id 클레임을 연결하세요."})
+	} else {
+		scope := strings.Join(principals, ", ")
+		if search.Unrestricted(principals) {
+			scope = "관리자 역할 - ACL 우회"
+		}
+		checks = append(checks, check{Name: "ACL 주체", Status: "ok", Detail: scope})
+	}
+
+	run("코드 검색 (search-code)", func(ctx context.Context) (int, error) {
+		result, err := a.search.SearchCode(ctx, principals, in.Query, "", "", "", "", 5)
+		return len(result.Repositories) + len(result.Hits), err
+	})
+	run("파일명 검색 (find-file)", func(ctx context.Context) (int, error) {
+		result, err := a.search.FindFiles(ctx, principals, in.Pattern, "", "", "", "", "", 5)
+		return len(result.Files), err
+	})
+	run("의미 검색 (search-semantic)", func(ctx context.Context) (int, error) {
+		result, err := a.search.SemanticSearch(ctx, principals, in.Query, "", "", 5)
+		return len(result.Hits), err
+	})
+
+	verdict := "ok"
+	for _, item := range checks {
+		if item.Status == "fail" {
+			verdict = "fail"
+			break
+		}
+		if item.Status == "warn" {
+			verdict = "warn"
+		}
+	}
+	a.audit(r, p, "mcp.selfcheck", "mcp", verdict, "success", map[string]any{"query": in.Query})
+	jsonOut(w, 200, map[string]any{"verdict": verdict, "durationMs": time.Since(started).Milliseconds(),
+		"query": in.Query, "pattern": in.Pattern, "checks": checks})
+}
+
+// scanTime converts a loosely scanned timestamp. An aggregate such as
+// MIN(occurred_at) comes back as a string from SQLite and as a time.Time from
+// PostgreSQL, and the layouts differ between drivers, so every form the two
+// produce is accepted rather than failing the whole query on one of them.
+func scanTime(value any) time.Time {
+	switch typed := value.(type) {
+	case time.Time:
+		return typed.UTC()
+	case []byte:
+		return parseTimestamp(string(typed))
+	case string:
+		return parseTimestamp(typed)
+	default:
+		return time.Time{}
+	}
+}
+
+func parseTimestamp(value string) time.Time {
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05.999999999-07:00", "2006-01-02 15:04:05.999999999Z07:00", "2006-01-02 15:04:05"} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed.UTC()
+		}
+	}
+	return time.Time{}
+}
+
 func boolInt(value bool) int {
 	if value {
 		return 1
 	}
 	return 0
 }
+
+// truncateText cuts on a rune boundary; a byte cut would corrupt Korean text,
+// which is most of what this platform stores.
 func truncateText(value string, limit int) string {
-	if len(value) > limit {
-		return value[:limit]
+	if len(value) <= limit {
+		return value
 	}
-	return value
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut]
 }
 func stringValue(values map[string]any, key string) string {
 	value, _ := values[key].(string)

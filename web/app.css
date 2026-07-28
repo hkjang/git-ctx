@@ -834,9 +834,17 @@ dd {
   background: var(--danger-soft);
   color: var(--danger);
 }
-.state.ok {
+.state.ok,
+.state.success {
   background: var(--success-soft);
   color: var(--success);
+}
+/* 빈 응답과 건너뛴 단계는 실패가 아니지만 주의 대상입니다. */
+.state.empty,
+.state.skipped,
+.state.timeout {
+  background: var(--warning-soft);
+  color: var(--warning);
 }
 .state.warn {
   background: var(--warning-soft);
@@ -1187,6 +1195,9 @@ td small {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+#mcp-trace-summary {
+  white-space: pre-line;
 }
 .advice {
   display: flex;

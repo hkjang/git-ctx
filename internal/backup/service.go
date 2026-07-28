@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"git-ctx/internal/store"
 )
@@ -624,8 +625,13 @@ func newID() (string, error) {
 }
 
 func truncate(text string, limit int) string {
-	if len(text) > limit {
-		return text[:limit]
+	if len(text) <= limit {
+		return text
 	}
-	return text
+	// Cut on a rune boundary so a truncated message stays valid UTF-8.
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut]
 }

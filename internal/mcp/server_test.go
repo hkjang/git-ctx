@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"git-ctx/internal/auth"
 	"git-ctx/internal/search"
@@ -548,5 +549,37 @@ func TestCallTraceRecordsEveryStage(t *testing.T) {
 	var traces int
 	if err := s.store.DB.QueryRow(`SELECT COUNT(DISTINCT call_id) FROM mcp_call_steps`).Scan(&traces); err != nil || traces != 2 {
 		t.Fatalf("distinct traces=%d err=%v", traces, err)
+	}
+}
+
+// Korean is the normal case here, and every stored preview, detail and error
+// message is length-limited. A byte-wise cut would split a three-byte character
+// and write invalid UTF-8 into the audit trail.
+func TestTruncationKeepsTextValid(t *testing.T) {
+	korean := "실패한 웹훅을 다시 보내는 코드를 찾아 주세요. 결제 서비스의 재시도 정책이 어디에 있는지 알고 싶습니다."
+	for _, limit := range []int{1, 7, 20, 61, 100, 151} {
+		for name, got := range map[string]string{"clip": clip(korean, limit), "truncate": truncate(korean, limit)} {
+			if !utf8.ValidString(got) {
+				t.Fatalf("%s(%d) produced invalid UTF-8: %q", name, limit, got)
+			}
+			if len(got) > limit+len("…") {
+				t.Fatalf("%s(%d) returned %d bytes", name, limit, len(got))
+			}
+		}
+	}
+	preview, hash := argumentDigest("search-code", map[string]any{"query": korean})
+	if !utf8.ValidString(preview) || hash == "" {
+		t.Fatalf("preview=%q hash=%q", preview, hash)
+	}
+
+	// A clamped answer must also stay valid, including the pathological case
+	// where a single unbroken line has to be cut mid-way.
+	dense := "## 결과\n" + strings.Repeat("가나다라마바사아자차카타파하", 400)
+	clamped := clampResponse(dense, 3000)
+	if !utf8.ValidString(clamped) {
+		t.Fatal("clampResponse produced invalid UTF-8")
+	}
+	if len(clamped) > 3000 {
+		t.Fatalf("clamped=%d bytes", len(clamped))
 	}
 }

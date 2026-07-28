@@ -38,6 +38,7 @@ assert.deepEqual(capabilitiesFor(["readonly-operator"]), {
   sourceWrite: false,
   mcp: true,
   mcpWrite: false,
+  mcpAudit: false,
   status: true,
   security: false,
   securityEvents: true,
@@ -51,6 +52,11 @@ assert.equal(capabilitiesFor(["security-admin"]).security, true);
 assert.equal(capabilitiesFor(["security-admin"]).audit, true);
 assert.equal(capabilitiesFor(["auditor"]).audit, true);
 assert.equal(capabilitiesFor(["mcp-admin"]).mcpWrite, true);
+// 운영 조회 역할은 집계 화면만 보고, 질의 원문이 담긴 감사 로그는 보지 못합니다.
+assert.equal(capabilitiesFor(["readonly-operator"]).mcpAudit, false);
+assert.equal(capabilitiesFor(["auditor"]).mcpAudit, true);
+assert.equal(capabilitiesFor(["mcp-admin"]).mcpAudit, true);
+assert.equal(capabilitiesFor(["platform-admin"]).mcpAudit, true);
 assert.equal(capabilitiesFor(["source-admin"]).sourceWrite, true);
 assert.equal(capabilitiesFor(["developer"]).settings, false);
 assert.equal(capabilitiesFor(["platform-admin"]).backupWrite, true);

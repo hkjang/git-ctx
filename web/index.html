@@ -508,6 +508,18 @@
             <h3>호출 추이</h3>
             <div id="mcp-timeline" class="table-wrap"></div>
             <div class="section-title">
+              <div><h3>연동 자가 점검</h3><p>지금 이 계정의 권한으로 실제 검색 경로를 실행하고, 단계별 결과를 그대로 보여 줍니다.</p></div>
+              <div class="button-row">
+                <label class="inline-field">질의<input id="selfcheck-query" placeholder="README" /></label>
+                <button id="run-selfcheck" type="button">자가 점검 실행</button>
+              </div>
+            </div>
+            <div id="selfcheck-result" class="table-wrap"></div>
+            <h3>세션(에이전트 대화)</h3>
+            <p class="field-help">답을 얻지 못한 채 끝난 대화를 위로 올립니다. 호출 하나만 보면 정상으로 보이지만 대화 전체로는 실패인 경우를 찾습니다.</p>
+            <div id="mcp-sessions" class="table-wrap"></div>
+            <div id="mcp-audit-block" hidden>
+            <div class="section-title">
               <div><h3>호출 감사 로그</h3><p>세션·클라이언트·질의·검색 경로까지 남긴 개별 호출 기록입니다.</p></div>
               <div class="button-row"><button id="mcp-calls-export" class="secondary" type="button">CSV 내보내기</button></div>
             </div>
@@ -519,6 +531,7 @@
               <div class="button-row"><button type="submit">조회</button></div>
             </form>
             <div id="mcp-calls" class="table-wrap"></div>
+            </div>
           </section>
           <section id="source-admin-section" class="panel admin-panel" hidden>
             <div class="section-title">

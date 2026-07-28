@@ -2582,8 +2582,60 @@ async function refreshMCPAnalytics(capabilities = activeCapabilities) {
   }
 }
 
+async function refreshMCPSessions(capabilities = activeCapabilities) {
+  if (!capabilities.mcpAudit) return;
+  try {
+    const result = (await api(`/api/v1/admin/mcp/sessions?window=${encodeURIComponent($("#mcp-window").value)}`)) || {};
+    const sessions = rows(result.sessions);
+    $("#mcp-sessions").innerHTML = sessions.length
+      ? `<table><thead><tr><th>세션</th><th>클라이언트</th><th>호출 흐름</th><th>결과</th><th>소요/응답</th><th></th></tr></thead><tbody>${sessions
+          .map(
+            (item) =>
+              `<tr><td>${esc(item.sessionId)}<br><small>${date(item.lastCallAt)}</small></td>
+<td>${esc(item.client || "unknown")}<br><small>${esc(item.userId)}</small></td>
+<td>${item.toolChain.map((tool) => esc(tool)).join(" → ") || "-"}</td>
+<td>${item.unresolved ? '<span class="state failed">답 없이 종료</span>' : '<span class="state ok">해결</span>'}<br><small>성공 ${item.success} · 빈 ${item.empty} · 오류 ${item.errors}</small></td>
+<td>${item.durationMs} ms<br><small>${kb(item.responseBytes)}</small></td>
+<td>${item.lastCallId ? `<button class="secondary" data-session-trace="${esc(item.lastCallId)}">마지막 호출 X-ray</button>` : ""}</td></tr>`,
+          )
+          .join("")}</tbody></table>`
+      : '<p class="field-help">이 기간에 기록된 세션이 없습니다.</p>';
+    $$("[data-session-trace]").forEach((button) => (button.onclick = () => openCallTrace(button.dataset.sessionTrace)));
+  } catch (error) {
+    reportError(error, "MCP 세션");
+  }
+}
+
+// runSelfCheck는 저장된 설정이 아니라 실제 검색 경로를 실행합니다. 각 점검은
+// 호출 X-ray와 같은 단계 기록을 반환하므로, 실패했을 때 어디서 멈췄는지 같은
+// 화면에서 바로 읽을 수 있습니다.
+async function runSelfCheck() {
+  const output = $("#selfcheck-result");
+  output.innerHTML = '<p class="field-help">실제 검색을 실행하는 중…</p>';
+  try {
+    const result = await api("/api/v1/admin/mcp/selfcheck", {
+      method: "POST",
+      body: JSON.stringify({ query: $("#selfcheck-query").value.trim() || "README" }),
+    });
+    const verdict = { ok: ["ok", "정상"], warn: ["warn", "확인 필요"], fail: ["error", "실패"] }[result.verdict] || ["warn", result.verdict];
+    output.innerHTML =
+      `<div class="notice ${verdict[0]}">자가 점검 ${esc(verdict[1])} · 질의 "${esc(result.query)}" · ${result.durationMs} ms</div>` +
+      `<table><thead><tr><th>점검</th><th>결과</th><th>설명</th><th>단계</th></tr></thead><tbody>${rows(result.checks)
+        .map(
+          (check) =>
+            `<tr><td>${esc(check.name)}</td>
+<td><span class="state ${check.status === "fail" ? "error" : check.status}">${esc(check.status)}</span><br><small>${check.durationMs || 0} ms</small></td>
+<td>${esc(check.detail || "-")}${check.action ? `<br><small>${esc(check.action)}</small>` : ""}</td>
+<td>${rows(check.steps).map((step) => `${esc(step.stage)}${step.target ? `(${esc(step.target)})` : ""} ${step.candidates}→${step.results}`).join("<br>") || "-"}</td></tr>`,
+        )
+        .join("")}</tbody></table>`;
+  } catch (error) {
+    output.innerHTML = `<div class="notice error">${esc(error.message)}</div>`;
+  }
+}
+
 async function refreshMCPCalls(capabilities = activeCapabilities) {
-  if (!capabilities.mcp) return;
+  if (!capabilities.mcpAudit) return;
   try {
     const result = (await api(`/api/v1/admin/mcp/calls?${mcpCallQuery()}`)) || {};
     const items = rows(result.items);
@@ -2690,14 +2742,20 @@ function openMCPTool(name, capabilities, advice) {
 
 function setupMCPAdmin(capabilities) {
   if (!capabilities.mcp) return;
-  $("#refresh-mcp-analytics").onclick = () => {
+  // 감사 로그는 사용자 식별자와 질의 원문을 담고 있어, 권한이 없는 역할에게는
+  // 화면 자체를 보여 주지 않습니다. 숨기지 않으면 조회 때마다 403 이 납니다.
+  $("#mcp-audit-block").hidden = !capabilities.mcpAudit;
+  const refreshAll = () => {
     refreshMCPAnalytics(capabilities);
     refreshMCPCalls(capabilities);
+    refreshMCPSessions(capabilities);
   };
-  $("#mcp-window").onchange = () => {
-    refreshMCPAnalytics(capabilities);
-    refreshMCPCalls(capabilities);
-  };
+  $("#refresh-mcp-analytics").onclick = refreshAll;
+  $("#mcp-window").onchange = refreshAll;
+  // 서버는 mcp-admin·source-admin·search-admin 에게 허용하므로, 화면도 같은 범위로
+  // 맞춥니다. 더 좁게 숨기면 권한이 있는 관리자가 버튼을 못 찾습니다.
+  $("#run-selfcheck").hidden = !(capabilities.mcpWrite || capabilities.sourceWrite || capabilities.qualityWrite);
+  $("#run-selfcheck").onclick = runSelfCheck;
   $("#mcp-calls-filter").onsubmit = (event) => {
     event.preventDefault();
     refreshMCPCalls(capabilities);
@@ -2738,8 +2796,7 @@ function setupMCPAdmin(capabilities) {
       showAdmin(error.message, false);
     }
   };
-  refreshMCPAnalytics(capabilities);
-  refreshMCPCalls(capabilities);
+  refreshAll();
 }
 async function refreshOps(capabilities = activeCapabilities) {
   try {

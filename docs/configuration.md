@@ -630,6 +630,11 @@ MCP 응답 한 건의 크기는 도구별 예산으로 제한됩니다. 기본�
 - `GET /api/v1/admin/mcp/calls/{id}` — 호출 하나의 단계별 X-ray와 같은 세션의 호출 순서
   (`GET /api/v1/me/calls/{id}` 는 자기 호출만)
 
+- `GET /api/v1/admin/mcp/sessions?window=` — 에이전트 대화 단위 집계. 마지막 호출이
+  빈 응답이나 오류로 끝난 대화를 위로 올립니다
+- `POST /api/v1/admin/mcp/selfcheck` — 호출자 본인의 ACL 주체로 실제 검색 경로를
+  실행하고 단계 기록과 판정을 반환합니다
+
 ### 호출 X-ray
 
 호출 한 건은 여러 단계를 거칩니다. ACL 해석, 색인 조회, 저장소별 원격 폴백,
