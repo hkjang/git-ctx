@@ -479,10 +479,46 @@
           </section>
           <section id="mcp-admin-section" class="panel admin-panel" hidden>
             <div class="section-title">
-              <div><h2>MCP 도구 운영</h2><p>도구별 활성화, Timeout과 캐시를 조정합니다.</p></div>
-              <button class="secondary" type="button" data-guide="mcp">MCP 운영 가이드</button>
+              <div><h2>MCP 도구 운영</h2><p>도구별 활성화·Timeout·캐시·응답 예산을 조정하고, 실제 호출 통계로 검증합니다.</p></div>
+              <div class="button-row">
+                <label class="inline-field">기간<select id="mcp-window">
+                    <option value="24h">최근 24시간</option>
+                    <option value="7d" selected>최근 7일</option>
+                    <option value="30d">최근 30일</option>
+                  </select></label>
+                <button id="refresh-mcp-analytics" class="secondary" type="button">통계 새로고침</button>
+                <button class="secondary" type="button" data-guide="mcp">MCP 운영 가이드</button>
+              </div>
             </div>
+            <div id="mcp-summary" class="stat-grid"></div>
+            <div id="mcp-recommendations"></div>
+            <h3>도구별 지표와 설정</h3>
             <div id="mcp-tools" class="table-wrap"></div>
+            <div class="split-grid">
+              <article class="card subtle-card">
+                <h3>답하지 못한 질문</h3>
+                <p class="field-help">빈 응답으로 끝난 질문입니다. 색인되지 않은 저장소, 좁은 ACL, 오해를 부르는 도구 설명 중 하나가 원인입니다.</p>
+                <div id="mcp-unanswered" class="table-wrap"></div>
+              </article>
+              <article class="card subtle-card">
+                <h3>클라이언트 · 검색 경로 · 오류</h3>
+                <div id="mcp-breakdown" class="table-wrap"></div>
+              </article>
+            </div>
+            <h3>호출 추이</h3>
+            <div id="mcp-timeline" class="table-wrap"></div>
+            <div class="section-title">
+              <div><h3>호출 감사 로그</h3><p>세션·클라이언트·질의·검색 경로까지 남긴 개별 호출 기록입니다.</p></div>
+              <div class="button-row"><button id="mcp-calls-export" class="secondary" type="button">CSV 내보내기</button></div>
+            </div>
+            <form id="mcp-calls-filter" class="form-row">
+              <label>도구<input name="tool" placeholder="search-code" /></label>
+              <label>결과<select name="outcome"><option value="">전체</option><option value="success">success</option><option value="empty">empty</option><option value="error">error</option></select></label>
+              <label>세션<input name="session" placeholder="세션 ID 앞 12자" /></label>
+              <label class="wide">질의·Library 검색<input name="q" placeholder="gpu" /></label>
+              <div class="button-row"><button type="submit">조회</button></div>
+            </form>
+            <div id="mcp-calls" class="table-wrap"></div>
           </section>
           <section id="source-admin-section" class="panel admin-panel" hidden>
             <div class="section-title">
@@ -699,6 +735,47 @@
         <div class="dialog-foot">
           <button type="submit">저장 후 재색인</button>
           <button id="index-policy-cancel" type="button" class="secondary">취소</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="mcp-trace-dialog" class="app-dialog guide-dialog">
+      <div class="dialog-head">
+        <strong id="mcp-trace-title">호출 X-ray</strong>
+        <button id="mcp-trace-close" type="button" aria-label="닫기">×</button>
+      </div>
+      <div id="mcp-trace-summary" class="notice"></div>
+      <h4>단계별 실행</h4>
+      <p class="field-help">후보(candidates)와 통과(results)의 차이가 결과가 사라진 지점입니다.</p>
+      <div id="mcp-trace-steps" class="table-wrap"></div>
+      <h4>같은 세션의 호출 순서</h4>
+      <p class="field-help">에이전트가 이 호출 앞뒤로 무엇을 시도했는지 보여 줍니다.</p>
+      <div id="mcp-trace-sequence" class="table-wrap"></div>
+      <div class="dialog-foot">
+        <button id="mcp-trace-dismiss" type="button" class="secondary">닫기</button>
+      </div>
+    </dialog>
+    <dialog id="mcp-tool-dialog" class="app-dialog">
+      <form id="mcp-tool-form">
+        <div class="dialog-head">
+          <strong id="mcp-tool-title">MCP 도구 설정</strong>
+          <button id="mcp-tool-close" type="button" aria-label="닫기">×</button>
+        </div>
+        <p id="mcp-tool-description" class="field-help"></p>
+        <div id="mcp-tool-stats" class="notice"></div>
+        <div class="form-row">
+          <label class="checkbox-field"><input id="mcp-tool-enabled" type="checkbox" /> 도구 활성화</label>
+          <label>Timeout (ms, 100~120000)<input id="mcp-tool-timeout" type="number" min="100" max="120000" required /></label>
+          <label>Cache (초, 0~86400)<input id="mcp-tool-cache" type="number" min="0" max="86400" required /></label>
+          <label>응답 예산 (Byte, 0=기본 24576)<input id="mcp-tool-budget" type="number" min="0" max="262144" required /></label>
+        </div>
+        <div id="mcp-tool-advice" class="advice" hidden>
+          <div id="mcp-tool-advice-text"></div>
+          <button type="button" id="mcp-tool-apply">권장값 적용</button>
+        </div>
+        <div class="dialog-foot">
+          <button type="submit">저장</button>
+          <button id="mcp-tool-defaults" type="button" class="secondary">기본값 복원</button>
+          <button id="mcp-tool-cancel" type="button" class="secondary">취소</button>
         </div>
       </form>
     </dialog>

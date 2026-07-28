@@ -11,11 +11,14 @@ import (
 	"net/http"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"git-ctx/internal/auth"
+	"git-ctx/internal/calltrace"
+	"git-ctx/internal/contentsecurity"
 	"git-ctx/internal/search"
 	"git-ctx/internal/store"
 	"git-ctx/internal/version"
@@ -35,8 +38,10 @@ type Server struct {
 	cache      map[string]cacheEntry
 }
 type session struct {
-	expires time.Time
-	done    chan struct{}
+	clientName    string
+	clientVersion string
+	expires       time.Time
+	done          chan struct{}
 }
 type cacheEntry struct {
 	text    string
@@ -152,6 +157,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "initialize":
 		var params struct {
 			ProtocolVersion string `json:"protocolVersion"`
+			ClientInfo      struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+			} `json:"clientInfo"`
 		}
 		_ = json.Unmarshal(req.Params, &params)
 		protocol := "2025-06-18"
@@ -159,7 +168,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			protocol = params.ProtocolVersion
 		}
 		var err error
-		sessionID, err = s.newSession(r.Context())
+		// The client identity is only sent here, so it is kept on the session and
+		// copied onto every call: "which agent asked this" is the first question of
+		// any MCP incident review.
+		sessionID, err = s.newSession(r.Context(), params.ClientInfo.Name, params.ClientInfo.Version)
 		if err != nil {
 			write(w, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32603, Message: "Unable to create MCP session"}})
 			return
@@ -212,9 +224,10 @@ Choosing a tool:
 Reading the results:
 - Search responses end with Notes explaining which path ran, what the ACL filtered and whether a timeout was hit. An empty result with an ACL or indexing note is not proof that the code does not exist.
 - Repositories that are still indexing are answered live from the source code search API and the response says so.
-- Snippets and files are secret-masked. Cite the Source line, which points at the exact ref and lines.`
+- Snippets and files are secret-masked. Cite the Source line, which points at the exact ref and lines.
+- Answers are bounded by a byte budget. A Truncated section states how many results were withheld; narrow the call (libraryId, path, limit, read-file line range) rather than repeating it. Pass maxBytes to ask for a smaller answer.`
 
-func (s *Server) newSession(ctx context.Context) (string, error) {
+func (s *Server) newSession(ctx context.Context, clientName, clientVersion string) (string, error) {
 	raw := make([]byte, 24)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
@@ -222,7 +235,8 @@ func (s *Server) newSession(ctx context.Context) (string, error) {
 	id := hex.EncodeToString(raw)
 	now := time.Now().UTC()
 	expires := now.Add(30 * time.Minute)
-	if _, err := s.store.DB.ExecContext(ctx, s.store.Rebind(`INSERT INTO mcp_sessions(id_hash,expires_at,last_seen_at) VALUES(?,?,?)`), mcpSessionHash(id), expires, now); err != nil {
+	if _, err := s.store.DB.ExecContext(ctx, s.store.Rebind(`INSERT INTO mcp_sessions(id_hash,expires_at,last_seen_at,client_name,client_version) VALUES(?,?,?,?,?)`),
+		mcpSessionHash(id), expires, now, clip(clientName, 80), clip(clientVersion, 40)); err != nil {
 		return "", err
 	}
 	s.mu.Lock()
@@ -233,7 +247,7 @@ func (s *Server) newSession(ctx context.Context) (string, error) {
 			delete(s.sessions, key)
 		}
 	}
-	s.sessions[id] = &session{expires: expires, done: make(chan struct{})}
+	s.sessions[id] = &session{expires: expires, done: make(chan struct{}), clientName: clip(clientName, 80), clientVersion: clip(clientVersion, 40)}
 	return id, nil
 }
 func (s *Server) validSession(ctx context.Context, id string) bool {
@@ -284,7 +298,29 @@ func mcpSessionHash(id string) []byte {
 	return sum[:]
 }
 
+// Catalog is the tool list advertised to MCP clients. Every tool accepts
+// maxBytes, so an agent that only wants a short answer can say so instead of
+// spending a full page of its context window on one call.
 func Catalog() []map[string]any {
+	tools := catalog()
+	for _, tool := range tools {
+		schema, ok := tool["inputSchema"].(map[string]any)
+		if !ok {
+			continue
+		}
+		properties, ok := schema["properties"].(map[string]any)
+		if !ok {
+			continue
+		}
+		properties["maxBytes"] = map[string]any{
+			"type": "integer", "minimum": MinResponseBytes, "maximum": MaxResponseBytes,
+			"description": "Optional smaller response budget in bytes for this call. It can only lower the configured budget, never raise it.",
+		}
+	}
+	return tools
+}
+
+func catalog() []map[string]any {
 	return []map[string]any{
 		{"name": "resolve-library-id", "description": "Resolves a repository or library name to a Context7-compatible library ID.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryName", "query"}, "properties": map[string]any{
@@ -454,6 +490,9 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 	timeout := s.toolTimeout(r.Context(), params.Name)
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
+	// Every stage of this call records itself against the recorder, so a later
+	// reader can see where the results appeared or disappeared.
+	ctx, recorder := calltrace.New(ctx)
 	r = r.WithContext(ctx)
 	text := ""
 	var err error
@@ -464,10 +503,23 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 	if params.Name == "query-docs" || params.Name == "reindex-repository" || params.Name == "get-repository-map" || params.Name == "get-symbol-context" || params.Name == "trace-dependencies" || params.Name == "compare-refs" || params.Name == "get-change-impact" || params.Name == "explain-search-result" {
 		libraryID = stringArg(params.Arguments, "libraryId")
 	}
+	// The budget is resolved before the tool runs, because the call context is
+	// already cancelled by the time a timed-out answer is written.
+	budget := s.responseBudget(r.Context(), params.Name)
+	// A caller may lower the budget for one call — an agent that only needs a
+	// reminder should not have to spend a full page of context on it — but never
+	// raise it past what the operator configured.
+	if requested := intArg(params.Arguments, "maxBytes", 0); requested >= MinResponseBytes && requested < budget {
+		budget = requested
+	}
+	audit := s.auditContext(w, r, params.Name, params.Arguments)
+	audit.trace = recorder
 	cacheKey := s.cacheKey(r.Context(), p, params.Name, params.Arguments)
 	if cached, ok := s.cached(cacheKey); ok {
 		span.SetAttributes(attribute.Bool("git_ctx.cache.hit", true))
-		s.finishCall(w, r, req, p, params.Name, libraryID, start, cached, nil, false)
+		audit.cacheHit = true
+		recorder.Note("cache", params.Name, calltrace.StatusOK, "answered from the tool cache without running the search")
+		s.finishCall(w, r, req, p, params.Name, libraryID, start, cached, nil, false, budget, audit)
 		return
 	}
 	span.SetAttributes(attribute.Bool("git_ctx.cache.hit", false))
@@ -772,7 +824,117 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "MCP tool call failed")
 	}
-	s.finishCall(w, r, req, p, params.Name, libraryID, start, text, err, empty)
+	s.finishCall(w, r, req, p, params.Name, libraryID, start, text, err, empty, budget, audit)
+}
+
+// callAudit is what an operator or a reviewer needs to reconstruct one call:
+// which client and session asked, what was asked, and how it was answered.
+type callAudit struct {
+	sessionID     string
+	requestID     string
+	clientName    string
+	clientVersion string
+	preview       string
+	hash          string
+	cacheHit      bool
+	trace         *calltrace.Recorder
+}
+
+// auditContext collects the identifying facts of one call. The session is
+// hashed in storage, so only a short prefix of the client-visible id is kept:
+// enough to group a conversation, not enough to replay it.
+func (s *Server) auditContext(w http.ResponseWriter, r *http.Request, tool string, args map[string]any) callAudit {
+	// The HTTP middleware stamps the request id on the response, and the trace id
+	// is the identifier the distributed traces use; either one joins this row to
+	// the server logs.
+	requestID := w.Header().Get("X-Request-ID")
+	if requestID == "" {
+		if span := oteltrace.SpanContextFromContext(r.Context()); span.HasTraceID() {
+			requestID = span.TraceID().String()
+		}
+	}
+	audit := callAudit{requestID: requestID}
+	if id := r.Header.Get("Mcp-Session-Id"); len(id) >= 12 {
+		audit.sessionID = id[:12]
+		s.mu.Lock()
+		if current, ok := s.sessions[id]; ok {
+			audit.clientName, audit.clientVersion = current.clientName, current.clientVersion
+		}
+		s.mu.Unlock()
+		if audit.clientName == "" {
+			// A session created by another replica is only in the database.
+			_ = s.store.DB.QueryRowContext(r.Context(), s.store.Rebind(`SELECT client_name,client_version FROM mcp_sessions WHERE id_hash=?`), mcpSessionHash(id)).
+				Scan(&audit.clientName, &audit.clientVersion)
+		}
+	}
+	audit.preview, audit.hash = argumentDigest(tool, args)
+	return audit
+}
+
+// argumentDigest renders the arguments for the audit log and hashes them for
+// grouping. Values are masked and clipped: an audit trail must survive a secret
+// pasted into a query, and a log line is not a place for a whole file.
+func argumentDigest(tool string, args map[string]any) (string, string) {
+	keys := make([]string, 0, len(args))
+	for key := range args {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, key := range keys {
+		if b.Len() > 0 {
+			b.WriteString(" ")
+		}
+		fmt.Fprintf(&b, "%s=%v", key, args[key])
+	}
+	masked, _ := contentsecurity.Sanitize(b.String())
+	preview := clip(masked, 300)
+	sum := sha256.Sum256([]byte(tool + "\x00" + b.String()))
+	return preview, hex.EncodeToString(sum[:8])
+}
+
+// retrievalMode reports which path produced an answer, so the analytics screen
+// can show how often the platform fell back instead of using its index.
+func retrievalMode(text string) string {
+	switch {
+	case strings.Contains(text, "retrieval: vector database ANN"):
+		return "vector"
+	case strings.Contains(text, "retrieval: in-database scan"):
+		return "scan"
+	case strings.Contains(text, "answered live"), strings.Contains(text, "live source code search"):
+		return "remote"
+	case strings.Contains(text, "still indexing"):
+		return "indexing"
+	default:
+		return "index"
+	}
+}
+
+// errorCode classifies a failure so the analytics screen can separate "the
+// source server was slow" from "the caller asked for something that is gone".
+func errorCode(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case strings.Contains(strings.ToLower(err.Error()), "not accessible"), strings.Contains(strings.ToLower(err.Error()), "permission"):
+		return "forbidden"
+	case strings.Contains(strings.ToLower(err.Error()), "not found"):
+		return "not_found"
+	default:
+		return "error"
+	}
+}
+
+func clip(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "…"
 }
 
 func catalogContains(name string) bool {
@@ -837,6 +999,127 @@ func (s *Server) toolTimeout(ctx context.Context, name string) time.Duration {
 		return 30 * time.Second
 	}
 	return time.Duration(timeout) * time.Millisecond
+}
+
+const (
+	// DefaultResponseBytes bounds one tool answer when the operator set no
+	// per-tool budget. Roughly six thousand tokens: large enough for a full
+	// search page, small enough to leave the agent room to work.
+	DefaultResponseBytes = 24 << 10
+	// MinResponseBytes keeps a budget from becoming a header with no content.
+	MinResponseBytes = 2000
+	// MaxResponseBytes is the ceiling an operator or caller may raise a tool to.
+	MaxResponseBytes = 256 << 10
+)
+
+// responseBudget is the byte budget for one answer of this tool.
+func (s *Server) responseBudget(ctx context.Context, name string) int {
+	var budget int
+	if err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT max_response_bytes FROM mcp_tools WHERE name=?`), name).Scan(&budget); err != nil || budget <= 0 {
+		return DefaultResponseBytes
+	}
+	return min(max(budget, MinResponseBytes), MaxResponseBytes)
+}
+
+// clampResponse trims one answer to the byte budget without hiding that it did
+// so. Two properties matter for an agent reading the result:
+//
+//   - the cut lands on a result boundary, so the last entry is whole rather than
+//     ending mid-line, and
+//   - the trailing Notes section survives, because that is where the tool
+//     explains which retrieval path ran and what the ACL filtered. Losing it
+//     would turn "indexing, answered live" into an unexplained short answer.
+func clampResponse(text string, budget int) string {
+	if budget <= 0 || len(text) <= budget {
+		return text
+	}
+	body, notes := text, ""
+	if at := strings.LastIndex(text, "\n### Notes\n"); at >= 0 {
+		body, notes = text[:at], text[at:]
+	}
+	// The notes only keep their reservation while they stay a small part of the
+	// budget; an oversized tail would leave no room for actual results.
+	reserved := len(notes)
+	if reserved > budget/3 {
+		body, notes, reserved = text, "", 0
+	}
+	total := sectionCount(body)
+	room := budget - reserved - responseNoticeBytes
+	if room < MinResponseBytes/2 {
+		room = budget / 2
+	}
+	kept := cutAtBoundary(body, room)
+	shown := sectionCount(kept)
+	notice := fmt.Sprintf("\n\n### Truncated\n- This answer was cut to the %s byte budget of this tool; %s bytes were produced.\n",
+		thousands(budget), thousands(len(text)))
+	if total > 0 {
+		notice += fmt.Sprintf("- %d of %d result sections are included. The rest are not lost, only unsent.\n", shown, total)
+	}
+	notice += "- Narrow the next call instead of retrying the same one: add libraryId or path, lower limit, or read a line range with read-file.\n"
+	return strings.TrimRight(kept, "\n") + notice + notes
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+// responseNoticeBytes reserves room for the truncation notice itself, so adding
+// it can never push the answer back over the budget.
+const responseNoticeBytes = 320
+
+// sectionCount counts the result entries of a formatted answer. The formatters
+// use a `### ` heading per result, and the list formatters use a `- ` item.
+func sectionCount(text string) int {
+	if count := strings.Count(text, "\n### "); count > 0 {
+		return count
+	}
+	return strings.Count(text, "\n- ")
+}
+
+// cutAtBoundary returns the longest prefix within limit that ends on a result
+// boundary. A section start is preferred so the last result stays whole, but
+// not at any price: when the nearest section start is near the beginning — one
+// long section, or a heading right after the title — cutting there would throw
+// away most of the budget, so a paragraph or line boundary is used instead and
+// the content is kept.
+func cutAtBoundary(text string, limit int) string {
+	if limit >= len(text) {
+		return text
+	}
+	window := text[:limit]
+	best := ""
+	if at := strings.LastIndex(window, "\n### "); at > 0 {
+		best = text[:at]
+	}
+	if len(best)*10 >= limit*6 {
+		return best
+	}
+	if at := strings.LastIndex(window, "\n\n"); at > len(best) {
+		return text[:at]
+	}
+	if at := strings.LastIndexByte(window, '\n'); at > len(best) {
+		return text[:at]
+	}
+	if best != "" {
+		return best
+	}
+	return window
+}
+
+// thousands formats a byte count the way the notice reads best.
+func thousands(value int) string {
+	digits := strconv.Itoa(value)
+	var b strings.Builder
+	for index, char := range digits {
+		if index > 0 && (len(digits)-index)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(char)
+	}
+	return b.String()
 }
 
 func (s *Server) platformStatus(ctx context.Context) (string, error) {
@@ -1004,17 +1287,38 @@ func (s *Server) storeCache(ctx context.Context, tool, key, text string) {
 	}
 	s.cache[key] = cacheEntry{text: text, expires: time.Now().Add(time.Duration(seconds) * time.Second)}
 }
-func (s *Server) finishCall(w http.ResponseWriter, r *http.Request, req request, p auth.Principal, tool, libraryID string, start time.Time, text string, err error, empty bool) {
-	outcome := "success"
+func (s *Server) finishCall(w http.ResponseWriter, r *http.Request, req request, p auth.Principal, tool, libraryID string, start time.Time, text string, err error, empty bool, budget int, audit callAudit) {
+	outcome, truncated, results, mode := "success", false, 0, ""
 	switch {
 	case err != nil:
 		outcome = "error"
 		text = err.Error()
 	case empty:
 		outcome = "empty"
+		mode = retrievalMode(text)
+	default:
+		// The cache holds the whole answer, so a later call with a larger budget
+		// still gets everything; only what is sent now is bounded.
+		produced := len(text)
+		results, mode = sectionCount(text), retrievalMode(text)
+		text = clampResponse(text, budget)
+		truncated = len(text) != produced
 	}
-	_, _ = s.store.DB.ExecContext(r.Context(), s.store.Rebind(`INSERT INTO mcp_calls(id,user_id,api_key_prefix,tool,library_id,outcome,duration_ms,client_ip) VALUES(?,?,?,?,?,?,?,?)`),
-		fmt.Sprintf("%d", time.Now().UnixNano()), p.UserID, p.KeyPrefix, tool, libraryID, outcome, time.Since(start).Milliseconds(), clientIP(r))
+	// The audit row is written with the server context: a call that timed out
+	// must still be recorded, and its request context is already cancelled.
+	ctx := context.WithoutCancel(r.Context())
+	callID := fmt.Sprintf("%d", time.Now().UnixNano())
+	summary := audit.trace.Summary()
+	if err != nil && summary == "" {
+		summary = errorCode(err) + ": " + clip(err.Error(), 160)
+	}
+	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`INSERT INTO mcp_calls(id,user_id,api_key_prefix,tool,library_id,outcome,duration_ms,client_ip,response_bytes,truncated,session_id,request_id,client_name,client_version,arguments_preview,arguments_hash,result_count,cache_hit,error_code,retrieval_mode,trace_summary) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+		callID, p.UserID, p.KeyPrefix, tool, libraryID, outcome, time.Since(start).Milliseconds(), clientIP(r), len(text), boolInt(truncated),
+		audit.sessionID, audit.requestID, audit.clientName, audit.clientVersion, audit.preview, audit.hash, results, boolInt(audit.cacheHit), errorCode(err), mode, summary)
+	for _, step := range audit.trace.Steps() {
+		_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`INSERT INTO mcp_call_steps(call_id,sequence,stage,target,status,detail,candidates,results,duration_ms,offset_ms) VALUES(?,?,?,?,?,?,?,?,?,?)`),
+			callID, step.Sequence, step.Stage, clip(step.Target, 200), step.Status, clip(step.Detail, 300), step.Candidates, step.Results, step.DurationMS, step.OffsetMS)
+	}
 	write(w, response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"content": []map[string]string{{"type": "text", "text": text}}, "isError": err != nil}})
 }
 

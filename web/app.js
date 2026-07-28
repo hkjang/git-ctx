@@ -1224,15 +1224,16 @@ async function loadActivity() {
     $("#my-repositories").innerHTML =
       `<table><thead><tr><th>Library ID</th><th>이름</th><th>기본 브랜치</th><th>최근 색인</th></tr></thead><tbody>${repos.map((r) => `<tr><td>${esc(r.libraryId)}</td><td>${esc(r.name)}</td><td>${esc(r.defaultBranch)}</td><td>${date(r.indexedAt)}</td></tr>`).join("")}</tbody></table>`;
     $("#my-usage").innerHTML =
-      `<table><thead><tr><th>도구</th><th>결과</th><th>호출</th><th>평균/최대 지연</th></tr></thead><tbody>${usage.map((x) => `<tr><td>${esc(x.tool)}</td><td>${esc(x.outcome)}</td><td>${x.calls}</td><td>${Math.round(x.averageLatencyMs)}/${Math.round(x.maximumLatencyMs)} ms</td></tr>`).join("")}</tbody></table>`;
+      `<table><thead><tr><th>도구</th><th>결과</th><th>호출</th><th>평균/최대 지연</th><th>평균/최대 응답</th><th>예산 초과</th></tr></thead><tbody>${usage.map((x) => `<tr><td>${esc(x.tool)}</td><td>${esc(x.outcome)}</td><td>${x.calls}</td><td>${Math.round(x.averageLatencyMs)}/${Math.round(x.maximumLatencyMs)} ms</td><td>${Math.round((x.averageResponseBytes || 0) / 1024)}/${Math.round((x.maximumResponseBytes || 0) / 1024)} KB</td><td>${x.truncatedCalls ? `<strong>${x.truncatedCalls}회 잘림</strong>` : "-"}</td></tr>`).join("")}</tbody></table>`;
     $("#my-calls").innerHTML =
-      `<table><thead><tr><th>시간</th><th>키</th><th>도구</th><th>Library</th><th>결과/지연</th></tr></thead><tbody>${calls
+      `<table><thead><tr><th>시간</th><th>키</th><th>도구</th><th>Library</th><th>결과/지연</th><th></th></tr></thead><tbody>${calls
         .slice(0, 100)
         .map(
           (x) =>
-            `<tr><td>${date(x.occurredAt)}</td><td>${esc(x.apiKeyPrefix)}</td><td>${esc(x.tool)}</td><td>${esc(x.libraryId)}</td><td>${esc(x.outcome)} / ${x.durationMs}ms</td></tr>`,
+            `<tr><td>${date(x.occurredAt)}</td><td>${esc(x.apiKeyPrefix)}</td><td>${esc(x.tool)}</td><td>${esc(x.libraryId)}</td><td>${esc(x.outcome)} ${x.resultCount ?? 0}건 / ${x.durationMs}ms${x.traceSummary ? `<br><small>${esc(x.traceSummary)}</small>` : ""}</td><td><button class="secondary" data-my-trace="${esc(x.id)}">X-ray</button></td></tr>`,
         )
         .join("")}</tbody></table>`;
+    $$("[data-my-trace]").forEach((button) => (button.onclick = () => openCallTrace(button.dataset.myTrace, true)));
     markEmptyTables();
   } catch (e) {
     console.warn(e);
@@ -2030,6 +2031,7 @@ function setupOps(capabilities) {
   }
   if (capabilities.sourceWrite) $("#discover").onclick = discover;
   else $("#discover").hidden = true;
+  setupMCPAdmin(capabilities);
   $("#refresh-ops").onclick = () => {
     refreshOps(capabilities);
     refreshSecurity(capabilities);
@@ -2472,6 +2474,273 @@ async function registerRepository(sourceType, repository) {
     reportError(e, "저장소 등록");
   }
 }
+/* ---------------------------------------------------------------------------
+ * MCP 운영 분석
+ * 도구 설정과 실제 호출 통계를 한 화면에 둡니다. 예산·Timeout·캐시를 바꾸는
+ * 근거(잘림 비율, p95, 빈 응답률)가 같은 표에 있어야 추측 대신 측정으로
+ * 조정할 수 있습니다.
+ * ------------------------------------------------------------------------- */
+let mcpToolCatalog = [];
+let mcpStatsByTool = {};
+let mcpRecommendations = [];
+
+const percent = (part, total) => (total > 0 ? Math.round((part / total) * 100) : 0);
+const kb = (bytes) => `${Math.round((bytes || 0) / 1024)} KB`;
+
+function renderMCPTools(tools, capabilities) {
+  if (tools && tools.length) mcpToolCatalog = tools;
+  const header = "<tr><th>도구</th><th>상태</th><th>호출</th><th>빈 응답</th><th>오류</th><th>p95 지연</th><th>Timeout</th><th>평균 응답</th><th>예산</th><th>잘림</th><th>Cache</th><th></th></tr>";
+  const body = mcpToolCatalog
+    .map((tool) => {
+      const stat = mcpStatsByTool[tool.name] || {};
+      const calls = stat.calls || 0;
+      const truncated = percent(stat.truncated || 0, calls);
+      return `<tr><td>${esc(tool.name)}<br><small>${esc(tool.description)}</small></td>
+<td>${tool.enabled ? "활성" : "<strong>비활성</strong>"}</td>
+<td>${calls}</td>
+<td>${percent(stat.empty || 0, calls)}%</td>
+<td>${percent(stat.errors || 0, calls)}%</td>
+<td>${stat.p95LatencyMs || 0} ms</td>
+<td>${tool.timeoutMs} ms</td>
+<td>${kb(stat.averageResponseBytes)}</td>
+<td>${kb(tool.effectiveResponseBytes)}${tool.maxResponseBytes ? "" : " <small>(기본)</small>"}</td>
+<td>${truncated >= 20 ? `<strong>${truncated}%</strong>` : `${truncated}%`}</td>
+<td>${tool.cacheSeconds} s</td>
+<td><button data-tool="${esc(tool.name)}">설정</button></td></tr>`;
+    })
+    .join("");
+  $("#mcp-tools").innerHTML = `<table><thead>${header}</thead><tbody>${body}</tbody></table>`;
+  $$("[data-tool]").forEach(
+    (button) =>
+      (button.hidden = !capabilities.mcpWrite) ||
+      (button.onclick = () => openMCPTool(button.dataset.tool, capabilities)),
+  );
+}
+
+async function refreshMCPAnalytics(capabilities = activeCapabilities) {
+  if (!capabilities.mcp) return;
+  const window = $("#mcp-window").value;
+  try {
+    const result = (await api(`/api/v1/admin/mcp/analytics?window=${encodeURIComponent(window)}`)) || {};
+    const summary = result.summary || {};
+    mcpStatsByTool = {};
+    for (const tool of rows(result.tools)) mcpStatsByTool[tool.tool] = tool;
+    mcpRecommendations = rows(result.recommendations);
+    const cards = [
+      ["호출", summary.calls || 0, `세션 ${summary.sessions || 0}개`],
+      ["성공", summary.success || 0, `${percent(summary.success, summary.calls)}%`],
+      ["빈 응답", summary.empty || 0, `${percent(summary.empty, summary.calls)}% · 색인·ACL 점검 신호`],
+      ["오류", summary.errors || 0, `${percent(summary.errors, summary.calls)}%`],
+      ["캐시 적중", summary.cacheHits || 0, `${percent(summary.cacheHits, summary.calls)}%`],
+      ["예산 초과", summary.truncated || 0, `${percent(summary.truncated, summary.calls)}% 잘림`],
+      ["평균 지연", `${Math.round(summary.averageLatencyMs || 0)} ms`, ""],
+      ["평균 응답", kb(summary.averageResponseBytes), "에이전트 컨텍스트 소모량"],
+    ];
+    $("#mcp-summary").innerHTML = cards
+      .map(([label, value, hint]) => `<article><span>${esc(label)}</span><strong>${esc(String(value))}</strong><span>${esc(hint)}</span></article>`)
+      .join("");
+    $("#mcp-recommendations").innerHTML = mcpRecommendations.length
+      ? mcpRecommendations
+          .map(
+            (item, index) =>
+              `<div class="advice ${esc(item.severity)}"><div><strong>${esc(item.tool)}</strong> · ${esc(item.message)}</div>${item.field ? `<button class="secondary" data-advice="${index}">설정 열기</button>` : ""}</div>`,
+          )
+          .join("")
+      : '<div class="notice ok">현재 기간에는 조치가 필요한 지표가 없습니다.</div>';
+    $$("[data-advice]").forEach(
+      (button) =>
+        (button.hidden = !capabilities.mcpWrite) ||
+        (button.onclick = () => {
+          const advice = mcpRecommendations[Number(button.dataset.advice)];
+          openMCPTool(advice.tool, capabilities, advice);
+        }),
+    );
+    const unanswered = rows(result.unanswered);
+    $("#mcp-unanswered").innerHTML = unanswered.length
+      ? `<table><thead><tr><th>도구</th><th>질의</th><th>횟수</th></tr></thead><tbody>${unanswered.map((item) => `<tr><td>${esc(item.tool)}</td><td><code>${esc(item.arguments)}</code></td><td>${item.calls}</td></tr>`).join("")}</tbody></table>`
+      : '<p class="field-help">빈 응답으로 끝난 질문이 없습니다.</p>';
+    const section = (title, list) =>
+      `<h4>${title}</h4><table><tbody>${(list || []).map((item) => `<tr><td>${esc(item.label)}</td><td>${item.calls}</td></tr>`).join("") || "<tr><td>기록 없음</td><td>-</td></tr>"}</tbody></table>`;
+    $("#mcp-breakdown").innerHTML =
+      section("클라이언트", rows(result.clients)) +
+      section("검색 경로", rows(result.retrieval)) +
+      section("오류 코드", rows(result.errors)) +
+      section("Library", rows(result.libraries));
+    const timeline = rows(result.timeline);
+    const peak = Math.max(1, ...timeline.map((item) => item.calls));
+    $("#mcp-timeline").innerHTML = timeline.length
+      ? `<table><tbody>${timeline
+          .map(
+            (item) =>
+              `<tr><td>${esc(item.bucket)}</td><td><span class="spark" style="width:${Math.max(2, Math.round((item.calls / peak) * 240))}px"></span></td><td>${item.calls}건${item.errors ? ` · 오류 ${item.errors}` : ""}${item.empty ? ` · 빈 응답 ${item.empty}` : ""}</td></tr>`,
+          )
+          .join("")}</tbody></table>`
+      : '<p class="field-help">이 기간에 기록된 호출이 없습니다.</p>';
+    renderMCPTools(mcpToolCatalog, capabilities);
+  } catch (error) {
+    reportError(error, "MCP 통계");
+  }
+}
+
+async function refreshMCPCalls(capabilities = activeCapabilities) {
+  if (!capabilities.mcp) return;
+  try {
+    const result = (await api(`/api/v1/admin/mcp/calls?${mcpCallQuery()}`)) || {};
+    const items = rows(result.items);
+    $("#mcp-calls").innerHTML = items.length
+      ? `<p class="field-help">${result.total}건 중 ${items.length}건 표시</p><table><thead><tr><th>시각</th><th>도구</th><th>결과</th><th>질의</th><th>지연/응답</th><th>클라이언트·세션</th><th></th></tr></thead><tbody>${items
+          .map(
+            (item) =>
+              `<tr><td>${date(item.occurredAt)}<br><small>${esc(item.clientIp)}</small></td>
+<td>${esc(item.tool)}<br><small>${esc(item.libraryId || "-")}</small></td>
+<td><span class="state ${esc(item.outcome)}">${esc(item.outcome)}</span>${item.errorCode ? `<br><small>${esc(item.errorCode)}</small>` : ""}${item.retrievalMode ? `<br><small>${esc(item.retrievalMode)}</small>` : ""}</td>
+<td><code>${esc(item.arguments || "-")}</code><br><small>결과 ${item.resultCount}건${item.cacheHit ? " · 캐시" : ""}</small></td>
+<td>${item.durationMs} ms<br><small>${kb(item.responseBytes)}${item.truncated ? " · 잘림" : ""}</small></td>
+<td>${esc(item.client || "unknown")}<br><small>${esc(item.sessionId || "-")} · ${esc(item.apiKeyPrefix || "session")}</small></td>
+<td><button class="secondary" data-trace="${esc(item.id)}">X-ray</button></td></tr>`,
+          )
+          .join("")}</tbody></table>`
+      : '<p class="field-help">조건에 해당하는 호출이 없습니다.</p>';
+    $$("[data-trace]").forEach((button) => (button.onclick = () => openCallTrace(button.dataset.trace)));
+  } catch (error) {
+    reportError(error, "MCP 호출 감사");
+  }
+}
+
+// openCallTrace는 호출 하나를 단계별로 펼칩니다. 어느 단계가 몇 건을 보고 몇 건을
+// 넘겼는지, 그리고 같은 세션에서 그 앞뒤로 무엇을 했는지까지 함께 보여 주어야
+// "왜 이 답이 나왔는가"를 추적할 수 있습니다.
+async function openCallTrace(id, personal = false) {
+  const dialog = $("#mcp-trace-dialog");
+  try {
+    const base = personal ? "/api/v1/me/calls/" : "/api/v1/admin/mcp/calls/";
+    const result = await api(base + encodeURIComponent(id));
+    const call = result.call || {};
+    $("#mcp-trace-title").textContent = `${call.tool} · ${date(call.occurredAt)}`;
+    $("#mcp-trace-summary").className = `notice ${call.outcome === "error" ? "error" : call.outcome === "empty" ? "warn" : "ok"}`;
+    $("#mcp-trace-summary").textContent =
+      `${call.outcome} · 결과 ${call.resultCount}건 · ${call.durationMs} ms (추적 ${call.tracedMs} ms, 그 외 ${call.untracedMs} ms) · ${kb(call.responseBytes)}${call.truncated ? " (예산 초과로 잘림)" : ""} · 경로 ${call.retrievalMode || "-"}` +
+      (call.traceSummary ? ` · ${call.traceSummary}` : "") +
+      `\n질의: ${call.arguments || "-"} · 클라이언트 ${call.client || "unknown"} · 세션 ${call.sessionId || "-"} · 요청 ${call.requestId || "-"}`;
+    const steps = rows(result.steps);
+    const slowest = Math.max(1, ...steps.map((step) => step.durationMs));
+    $("#mcp-trace-steps").innerHTML = steps.length
+      ? `<table><thead><tr><th>#</th><th>단계</th><th>대상</th><th>상태</th><th>후보→통과</th><th>소요</th><th>설명</th></tr></thead><tbody>${steps
+          .map(
+            (step) =>
+              `<tr><td>${step.sequence}</td><td>${esc(step.stage)}</td><td>${esc(step.target || "-")}</td>
+<td><span class="state ${esc(step.status)}">${esc(step.status)}</span></td>
+<td>${step.candidates} → ${step.results}${step.candidates > 0 && step.results === 0 ? " <strong>(전부 탈락)</strong>" : ""}</td>
+<td><span class="spark" style="width:${Math.max(2, Math.round((step.durationMs / slowest) * 120))}px"></span> ${step.durationMs} ms<br><small>+${step.offsetMs} ms</small></td>
+<td>${esc(step.detail || "-")}</td></tr>`,
+          )
+          .join("")}</tbody></table>`
+      : '<p class="field-help">이 호출에는 기록된 단계가 없습니다. 캐시에서 응답했거나 추적 이전 버전에서 기록된 호출입니다.</p>';
+    const sequence = rows(result.sessionSequence);
+    $("#mcp-trace-sequence").innerHTML = sequence.length
+      ? `<table><thead><tr><th>시각</th><th>도구</th><th>결과</th><th>질의</th></tr></thead><tbody>${sequence
+          .map(
+            (item) =>
+              `<tr${item.current ? ' class="active"' : ""}><td>${date(item.occurredAt)}</td><td>${esc(item.tool)}${item.current ? " ←" : ""}</td>
+<td><span class="state ${esc(item.outcome)}">${esc(item.outcome)}</span> ${item.resultCount}건 · ${item.durationMs} ms${item.errorCode ? ` · ${esc(item.errorCode)}` : ""}</td>
+<td><code>${esc(item.arguments || "-")}</code></td></tr>`,
+          )
+          .join("")}</tbody></table>`
+      : '<p class="field-help">세션 정보가 없는 호출입니다.</p>';
+    dialog.showModal();
+  } catch (error) {
+    reportError(error, "호출 X-ray");
+  }
+}
+
+function mcpCallQuery() {
+  const form = new FormData($("#mcp-calls-filter"));
+  const params = new URLSearchParams({ window: $("#mcp-window").value, limit: "100" });
+  for (const [key, value] of form.entries()) if (String(value).trim()) params.set(key, String(value).trim());
+  return params.toString();
+}
+
+// openMCPTool은 도구 하나의 설정과 그 근거가 되는 지표를 함께 보여 줍니다.
+// advice가 있으면 권장값을 미리 채워, 관리자가 숫자를 옮겨 적지 않아도 됩니다.
+let activeMCPTool = null;
+function openMCPTool(name, capabilities, advice) {
+  const tool = mcpToolCatalog.find((item) => item.name === name);
+  if (!tool) return;
+  activeMCPTool = { name, capabilities };
+  const stat = mcpStatsByTool[name] || {};
+  $("#mcp-tool-title").textContent = `${name} 설정`;
+  $("#mcp-tool-description").textContent = tool.description || "";
+  $("#mcp-tool-stats").textContent = stat.calls
+    ? `최근 ${$("#mcp-window").value}: 호출 ${stat.calls}건 · 빈 응답 ${percent(stat.empty, stat.calls)}% · 오류 ${percent(stat.errors, stat.calls)}% · p50/p95 ${stat.p50LatencyMs}/${stat.p95LatencyMs} ms · 평균 응답 ${kb(stat.averageResponseBytes)} · 잘림 ${percent(stat.truncated, stat.calls)}%`
+    : "이 기간에 기록된 호출이 없습니다.";
+  $("#mcp-tool-enabled").checked = tool.enabled !== false;
+  $("#mcp-tool-timeout").value = tool.timeoutMs || 30000;
+  $("#mcp-tool-cache").value = tool.cacheSeconds || 0;
+  $("#mcp-tool-budget").value = tool.maxResponseBytes || 0;
+  const suggestion = advice || mcpRecommendations.find((item) => item.tool === name && item.field);
+  $("#mcp-tool-advice").hidden = !suggestion?.field;
+  $("#mcp-tool-advice").className = `advice ${suggestion?.severity || ""}`;
+  $("#mcp-tool-advice-text").textContent = suggestion?.message || "";
+  $("#mcp-tool-apply").onclick = () => {
+    const field = { maxResponseBytes: "#mcp-tool-budget", timeoutMs: "#mcp-tool-timeout", cacheSeconds: "#mcp-tool-cache" }[suggestion?.field];
+    if (field) $(field).value = suggestion.value;
+  };
+  $("#mcp-tool-dialog").showModal();
+}
+
+function setupMCPAdmin(capabilities) {
+  if (!capabilities.mcp) return;
+  $("#refresh-mcp-analytics").onclick = () => {
+    refreshMCPAnalytics(capabilities);
+    refreshMCPCalls(capabilities);
+  };
+  $("#mcp-window").onchange = () => {
+    refreshMCPAnalytics(capabilities);
+    refreshMCPCalls(capabilities);
+  };
+  $("#mcp-calls-filter").onsubmit = (event) => {
+    event.preventDefault();
+    refreshMCPCalls(capabilities);
+  };
+  $("#mcp-calls-export").onclick = () => {
+    // 브라우저가 세션 쿠키로 직접 내려받게 해서, 큰 CSV를 메모리에 담지 않습니다.
+    location.href = `/api/v1/admin/mcp/calls?${mcpCallQuery()}&limit=1000&format=csv`;
+  };
+  $("#mcp-trace-close").onclick = () => $("#mcp-trace-dialog").close();
+  $("#mcp-trace-dismiss").onclick = () => $("#mcp-trace-dialog").close();
+  const dialog = $("#mcp-tool-dialog");
+  $("#mcp-tool-close").onclick = () => dialog.close();
+  $("#mcp-tool-cancel").onclick = () => dialog.close();
+  $("#mcp-tool-defaults").onclick = () => {
+    $("#mcp-tool-enabled").checked = true;
+    $("#mcp-tool-timeout").value = 30000;
+    $("#mcp-tool-cache").value = 0;
+    $("#mcp-tool-budget").value = 0;
+  };
+  $("#mcp-tool-form").onsubmit = async (event) => {
+    event.preventDefault();
+    if (!activeMCPTool) return;
+    try {
+      await api(`/api/v1/admin/mcp/tools/${encodeURIComponent(activeMCPTool.name)}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          enabled: $("#mcp-tool-enabled").checked,
+          timeoutMs: Number($("#mcp-tool-timeout").value),
+          cacheSeconds: Number($("#mcp-tool-cache").value),
+          maxResponseBytes: Number($("#mcp-tool-budget").value),
+        }),
+      });
+      dialog.close();
+      showAdmin(`${activeMCPTool.name} 설정을 저장했습니다.`, true);
+      refreshOps(activeMCPTool.capabilities);
+      refreshMCPAnalytics(activeMCPTool.capabilities);
+    } catch (error) {
+      showAdmin(error.message, false);
+    }
+  };
+  refreshMCPAnalytics(capabilities);
+  refreshMCPCalls(capabilities);
+}
 async function refreshOps(capabilities = activeCapabilities) {
   try {
     const tools = capabilities.mcp ? rows(await api("/api/v1/admin/mcp/tools")) : [];
@@ -2484,32 +2753,7 @@ async function refreshOps(capabilities = activeCapabilities) {
       : [[], [], { repositories: [], staleCount: 0, sloMinutes: 0 }];
     [repos, jobs] = [rows(repos), rows(jobs)];
     freshness = freshness || { repositories: [], staleCount: 0, sloMinutes: 0 };
-    $("#mcp-tools").innerHTML =
-      `<table><thead><tr><th>도구</th><th>상태</th><th>Timeout</th><th>Cache</th><th></th></tr></thead><tbody>${tools.map((t) => `<tr><td>${esc(t.name)}<br><small>${esc(t.description)}</small></td><td>${t.enabled ? "활성" : "비활성"}</td><td>${t.timeoutMs} ms</td><td>${t.cacheSeconds} s</td><td><button data-tool="${esc(t.name)}" data-enabled="${t.enabled}" data-timeout="${t.timeoutMs}" data-cache="${t.cacheSeconds}">설정</button></td></tr>`).join("")}</tbody></table>`;
-    document.querySelectorAll("[data-tool]").forEach(
-      (b) =>
-        (b.hidden = !capabilities.mcpWrite) ||
-        (b.onclick = async () => {
-          const enabled = confirm(
-              `${b.dataset.tool} 도구를 활성화할까요? 취소를 누르면 비활성화합니다.`,
-            ),
-            timeout = prompt("Timeout(ms, 100~120000)", b.dataset.timeout),
-            cache = prompt("Cache(seconds, 0~86400)", b.dataset.cache);
-          if (timeout === null || cache === null) return;
-          await api(
-            `/api/v1/admin/mcp/tools/${encodeURIComponent(b.dataset.tool)}`,
-            {
-              method: "PUT",
-              body: JSON.stringify({
-                enabled,
-                timeoutMs: Number(timeout),
-                cacheSeconds: Number(cache),
-              }),
-            },
-          );
-          refreshOps(capabilities);
-        }),
-    );
+    renderMCPTools(tools, capabilities);
     $("#repositories").innerHTML =
       `<table><thead><tr><th>소스</th><th>Library ID</th><th>기본 브랜치</th><th>마지막 색인</th><th></th></tr></thead><tbody>${repos.map((r) => `<tr><td>${esc(r.sourceType)}</td><td>${esc(r.libraryId)}</td><td>${esc(r.defaultBranch)}</td><td>${date(r.indexedAt)}</td><td><button class="secondary" data-policy="${esc(r.id)}" data-policy-label="${esc(r.libraryId)}">색인 정책</button> <button data-index="${esc(r.id)}">재색인</button></td></tr>`).join("")}</tbody></table>`;
     $$("[data-policy]").forEach(

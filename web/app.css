@@ -1147,6 +1147,72 @@ td small {
     padding: var(--space-4);
   }
 }
+
+/* MCP 분석 화면 -----------------------------------------------------------
+   숫자 카드, 좌우 분할, 막대 하나로 끝나는 추이. 별도 차트 라이브러리 없이
+   같은 토큰만 사용해 오프라인 배포에서도 그대로 동작합니다. */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+.stat-grid article {
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-muted);
+}
+.stat-grid strong {
+  display: block;
+  font-size: 22px;
+  line-height: 1.2;
+}
+.stat-grid span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.split-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--space-3);
+}
+.inline-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.advice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 10px var(--space-3);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-muted);
+  margin-bottom: 8px;
+}
+.advice.warning {
+  border-left-color: var(--warning);
+}
+.advice.critical {
+  border-left-color: var(--danger);
+}
+.spark {
+  display: inline-block;
+  height: 10px;
+  min-width: 2px;
+  border-radius: 2px;
+  background: var(--brand);
+}
 @media (prefers-reduced-motion: reduce) {
   * {
     animation: none !important;

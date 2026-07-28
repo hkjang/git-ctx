@@ -790,7 +790,7 @@ func TestPublicAndAdminDatabaseStatus(t *testing.T) {
 	adminRequest.Header.Set("Authorization", "Bearer bootstrap")
 	admin := httptest.NewRecorder()
 	a.Handler().ServeHTTP(admin, adminRequest)
-	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"latest":"035_semantic_search_tool.sql"`) || !strings.Contains(admin.Body.String(), `"pool"`) {
+	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"latest":"038_mcp_call_steps.sql"`) || !strings.Contains(admin.Body.String(), `"pool"`) {
 		t.Fatalf("admin status=%d body=%s", admin.Code, admin.Body.String())
 	}
 }
@@ -1437,5 +1437,223 @@ func TestIndexStateExplainsEveryBlockedCase(t *testing.T) {
 		if testCase.wantAction != (action != "") {
 			t.Errorf("%s: action=%q", testCase.name, action)
 		}
+	}
+}
+
+// MCP analytics has to answer an operator's real questions, and the audit view
+// has to reconstruct one credential's calls. Both are built from the same rows,
+// so this covers the aggregate, the recommendation it produces, and the export.
+func TestMCPAnalyticsAndCallAudit(t *testing.T) {
+	a, err := New(context.Background(), config.Config{DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "mcp-analytics.db") + "?_foreign_keys=on", KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(t.TempDir(), "backups")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	now := time.Now().UTC()
+	insert := func(id, tool, outcome string, latency, bytes int, truncated int, preview, mode, code string, age time.Duration) {
+		t.Helper()
+		if _, err := a.store.DB.Exec(`INSERT INTO mcp_calls(id,occurred_at,user_id,api_key_prefix,tool,library_id,outcome,duration_ms,client_ip,response_bytes,truncated,session_id,request_id,client_name,client_version,arguments_preview,arguments_hash,result_count,cache_hit,error_code,retrieval_mode)
+VALUES(?,?,'u1','KEY123',?,'/kcb/clustara',?,?,'10.0.0.1',?,?,'sess01234567','req-1','claude-code','1.2',?,?,3,0,?,?)`,
+			id, now.Add(-age), tool, outcome, latency, bytes, truncated, preview, "h-"+preview, code, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index := 0; index < 10; index++ {
+		insert(fmt.Sprintf("c%d", index), "search-code", "success", 100*(index+1), 40000, 1, "query=gpu", "index", "", time.Hour)
+	}
+	for index := 0; index < 6; index++ {
+		insert(fmt.Sprintf("e%d", index), "find-file", "empty", 50, 200, 0, "name=Jenkinsfile", "indexing", "", time.Hour)
+	}
+	insert("x1", "find-file", "error", 30000, 0, 0, "name=broken", "", "timeout", time.Hour)
+	// Outside the 24h window, so it must not be counted there.
+	insert("old", "search-code", "success", 10, 100, 0, "query=old", "index", "", 72*time.Hour)
+
+	get := func(path string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("Authorization", "Bearer bootstrap")
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	response := get("/api/v1/admin/mcp/analytics?window=24h")
+	if response.Code != http.StatusOK {
+		t.Fatalf("analytics=%d body=%s", response.Code, response.Body.String())
+	}
+	var analytics struct {
+		Summary struct {
+			Calls, Empty, Errors, Truncated int64
+		} `json:"summary"`
+		Tools []struct {
+			Tool                       string `json:"tool"`
+			Calls, P95LatencyMS, Empty int64
+			BudgetBytes                int `json:"responseBudgetBytes"`
+		} `json:"tools"`
+		Recommendations []struct {
+			Tool, Severity, Message, Field string
+			Value                          int
+		} `json:"recommendations"`
+		Unanswered []struct {
+			Tool, Arguments string
+			Calls           int64
+		} `json:"unanswered"`
+		Retrieval, Errors, Clients []struct {
+			Label string
+			Calls int64
+		}
+		Timeline []struct {
+			Bucket string
+			Calls  int64
+		} `json:"timeline"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &analytics); err != nil {
+		t.Fatal(err)
+	}
+	if analytics.Summary.Calls != 17 || analytics.Summary.Empty != 6 || analytics.Summary.Errors != 1 || analytics.Summary.Truncated != 10 {
+		t.Fatalf("the window must exclude the older call: %#v", analytics.Summary)
+	}
+	var searchCode struct {
+		p95, calls int64
+	}
+	for _, tool := range analytics.Tools {
+		if tool.Tool == "search-code" {
+			searchCode.p95, searchCode.calls = tool.P95LatencyMS, tool.Calls
+		}
+	}
+	if searchCode.calls != 10 || searchCode.p95 != 900 {
+		t.Fatalf("per-tool percentiles are wrong: %#v", analytics.Tools)
+	}
+	// Every answer of search-code was truncated and most find-file calls were
+	// empty, so both must be reported with an actionable field.
+	var budgetAdvice, emptyAdvice bool
+	for _, item := range analytics.Recommendations {
+		if item.Tool == "search-code" && item.Field == "maxResponseBytes" && item.Value > 0 {
+			budgetAdvice = true
+		}
+		if item.Tool == "find-file" && item.Severity == "critical" {
+			emptyAdvice = true
+		}
+	}
+	if !budgetAdvice || !emptyAdvice {
+		t.Fatalf("recommendations=%#v", analytics.Recommendations)
+	}
+	if len(analytics.Unanswered) == 0 || analytics.Unanswered[0].Arguments != "name=Jenkinsfile" || analytics.Unanswered[0].Calls != 6 {
+		t.Fatalf("the unanswered list must rank the repeated empty question: %#v", analytics.Unanswered)
+	}
+	if len(analytics.Timeline) == 0 || len(analytics.Clients) == 0 || analytics.Clients[0].Label != "claude-code 1.2" {
+		t.Fatalf("timeline=%#v clients=%#v", analytics.Timeline, analytics.Clients)
+	}
+
+	filtered := get("/api/v1/admin/mcp/calls?window=24h&tool=find-file&outcome=error")
+	if filtered.Code != http.StatusOK {
+		t.Fatalf("calls=%d body=%s", filtered.Code, filtered.Body.String())
+	}
+	var audit struct {
+		Total int64
+		Items []struct {
+			Tool, Outcome, ErrorCode, SessionID, Client, Arguments string
+			Truncated                                              bool
+		}
+	}
+	if err := json.Unmarshal(filtered.Body.Bytes(), &audit); err != nil {
+		t.Fatal(err)
+	}
+	if audit.Total != 1 || len(audit.Items) != 1 || audit.Items[0].ErrorCode != "timeout" || audit.Items[0].SessionID != "sess01234567" {
+		t.Fatalf("audit filter=%#v", audit)
+	}
+
+	export := get("/api/v1/admin/mcp/calls?window=24h&tool=search-code&format=csv")
+	if export.Code != http.StatusOK || !strings.HasPrefix(export.Header().Get("Content-Type"), "text/csv") {
+		t.Fatalf("csv export=%d type=%s", export.Code, export.Header().Get("Content-Type"))
+	}
+	if lines := strings.Count(strings.TrimSpace(export.Body.String()), "\n"); lines != 10 {
+		t.Fatalf("csv rows=%d body=%s", lines, export.Body.String())
+	}
+	if !strings.HasPrefix(export.Body.String(), "call_id,occurred_at") || !strings.Contains(export.Body.String(), "query=gpu") {
+		t.Fatalf("csv body=%s", export.Body.String())
+	}
+}
+
+// The X-ray view has to show the stages of one call and the sequence the agent
+// followed around it, and must never show another user their neighbour's calls.
+func TestMCPCallTraceAndSessionSequence(t *testing.T) {
+	a, err := New(context.Background(), config.Config{DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "mcp-trace.db") + "?_foreign_keys=on", KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(t.TempDir(), "backups")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	now := time.Now().UTC()
+	call := func(id, tool, outcome string, results int, age time.Duration, summary string) {
+		t.Helper()
+		if _, err := a.store.DB.Exec(`INSERT INTO mcp_calls(id,occurred_at,user_id,api_key_prefix,tool,library_id,outcome,duration_ms,client_ip,response_bytes,truncated,session_id,request_id,client_name,client_version,arguments_preview,arguments_hash,result_count,cache_hit,error_code,retrieval_mode,trace_summary)
+VALUES(?,?,'u1','KEY123',?,'',?,120,'10.0.0.1',900,0,'sessAAAAAAAA','req-1','claude-code','1.2','query=webhook','h1',?,0,'','index',?)`, id, now.Add(-age), tool, outcome, results, summary); err != nil {
+			t.Fatal(err)
+		}
+	}
+	call("call-1", "search-code", "empty", 0, 2*time.Minute, "source-query gitlab: 12 candidates, none passed")
+	call("call-2", "search-semantic", "success", 3, time.Minute, "")
+	// Another user's call in another session must stay invisible below.
+	if _, err := a.store.DB.Exec(`INSERT INTO mcp_calls(id,occurred_at,user_id,tool,outcome,duration_ms,client_ip,session_id) VALUES('call-x',?, 'u2','search-code','success',10,'10.0.0.9','sessBBBBBBBB')`, now); err != nil {
+		t.Fatal(err)
+	}
+	steps := [][]any{
+		{1, "acl", "restricted", "ok", "2 principals", 0, 0, 1, 0},
+		{2, "index-repositories", "gitlab", "empty", "", 0, 0, 8, 1},
+		{3, "source-query", "gitlab", "empty", "indexed and remote per-repository search", 12, 0, 90, 9},
+	}
+	for _, step := range steps {
+		if _, err := a.store.DB.Exec(`INSERT INTO mcp_call_steps(call_id,sequence,stage,target,status,detail,candidates,results,duration_ms,offset_ms) VALUES('call-1',?,?,?,?,?,?,?,?,?)`, step...); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/admin/mcp/calls/call-1", nil)
+	request.Header.Set("Authorization", "Bearer bootstrap")
+	recorder := httptest.NewRecorder()
+	a.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("trace=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var trace struct {
+		Call struct {
+			Tool, Outcome, TraceSummary string
+			DurationMs, TracedMs        int64
+			UntracedMs                  int64
+		}
+		Steps []struct {
+			Sequence              int64
+			Stage, Status, Target string
+			Candidates, Results   int64
+			DurationMs, OffsetMs  int64
+		}
+		SessionSequence []struct {
+			ID, Tool, Outcome string
+			Current           bool
+		}
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &trace); err != nil {
+		t.Fatal(err)
+	}
+	if len(trace.Steps) != 3 || trace.Steps[2].Stage != "source-query" || trace.Steps[2].Candidates != 12 || trace.Steps[2].Results != 0 {
+		t.Fatalf("steps=%#v", trace.Steps)
+	}
+	if trace.Call.TracedMs != 99 || trace.Call.UntracedMs != 21 {
+		t.Fatalf("the untraced remainder must be reported: traced=%d untraced=%d", trace.Call.TracedMs, trace.Call.UntracedMs)
+	}
+	if trace.Call.TraceSummary == "" {
+		t.Fatal("the summary must state where the results were lost")
+	}
+	if len(trace.SessionSequence) != 2 || !trace.SessionSequence[0].Current || trace.SessionSequence[1].Tool != "search-semantic" {
+		t.Fatalf("the session sequence must show what the agent did next: %#v", trace.SessionSequence)
+	}
+
+	// The personal route only opens the caller's own calls.
+	own := httptest.NewRequest(http.MethodGet, "/api/v1/me/calls/call-x", nil)
+	own.Header.Set("Authorization", "Bearer bootstrap")
+	ownRecorder := httptest.NewRecorder()
+	a.Handler().ServeHTTP(ownRecorder, own)
+	if ownRecorder.Code != http.StatusNotFound {
+		t.Fatalf("another user's call must not be readable: %d %s", ownRecorder.Code, ownRecorder.Body.String())
 	}
 }

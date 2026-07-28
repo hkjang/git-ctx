@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"git-ctx/internal/calltrace"
 	"git-ctx/internal/contentsecurity"
 	"git-ctx/internal/embedding"
 	"git-ctx/internal/rerank"
@@ -880,6 +881,7 @@ WHERE r.enabled=1 AND ` + predicate
 	if err = rows.Close(); err != nil {
 		return nil, err
 	}
+	calltrace.From(ctx).Note("acl-candidates", sourceType, statusFor(len(candidates)), fmt.Sprintf("%d repositories visible to this caller", len(candidates)))
 	// Query every candidate repository in parallel. One remote round trip per
 	// repository in sequence regularly exceeded the MCP tool timeout, and a
 	// deadline in the middle of the loop dropped all code hits while the cheap
@@ -916,7 +918,13 @@ WHERE r.enabled=1 AND ` + predicate
 			if !ok {
 				return
 			}
+			span := calltrace.Start(ctx, "repository-query", item.libraryID)
 			hits, searchErr := searcher.SearchQuery(ctx, source.RepositoryRef{ProjectKey: item.project, Slug: item.slug}, selectedRef, query, limit)
+			if searchErr != nil {
+				span.Fail(searchErr)
+			} else {
+				span.End(statusFor(len(hits)), len(hits), len(hits), selectedRef)
+			}
 			found[index].hits, found[index].err = hits, searchErr
 		}(index, item)
 	}
@@ -1041,6 +1049,8 @@ WHERE r.enabled=1 AND ` + predicate
 	if err = rows.Err(); err != nil {
 		return FileSearchResult{}, err
 	}
+	calltrace.From(ctx).Note("index-files", "", statusFor(len(result.Files)),
+		fmt.Sprintf("%d stored paths across %d repositories", len(result.Files), len(seenRepositories)))
 	result.Diagnostics = append(result.Diagnostics, fmt.Sprintf("index: matched %d stored paths across %d repositories.", len(result.Files), len(seenRepositories)))
 	if remote := s.remoteFileListings(ctx, principals, matcher, libraryID, sourceType, project, repository, ref, seenRepositories, limit); len(remote.files) > 0 || remote.diagnostic != "" {
 		result.Files = append(result.Files, remote.files...)
@@ -1128,10 +1138,13 @@ AND NOT EXISTS (SELECT 1 FROM repository_files f WHERE f.repository_id=r.id)`
 		if selectedRef == "" {
 			selectedRef = "main"
 		}
+		listSpan := calltrace.Start(ctx, "remote-tree", item.libraryID)
 		files, listErr := adapter.ListFiles(ctx, source.RepositoryRef{ProjectKey: item.project, Slug: item.slug}, selectedRef)
 		if listErr != nil {
+			listSpan.Fail(listErr)
 			continue
 		}
+		listSpan.End(statusFor(len(files)), len(files), len(files), selectedRef)
 		listed++
 		for _, file := range files {
 			score, ok := matcher.match(file.Path)
@@ -1452,6 +1465,7 @@ WHERE r.enabled=1 AND ` + predicate + ` AND LOWER(f.path)=LOWER(?)`
 // whose content the index policy skipped.
 func (s *Service) fileBody(ctx context.Context, repositoryID, sourceType, project, slug, ref, filePath string, indexed bool) (string, string, []string) {
 	if indexed {
+		span := calltrace.Start(ctx, "read-index", filePath)
 		rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(
 			`SELECT content FROM document_chunks WHERE repository_id=? AND ref_name=? AND file_path=? ORDER BY line_start`), repositoryID, ref, filePath)
 		if err == nil {
@@ -1464,9 +1478,11 @@ func (s *Service) fileBody(ctx context.Context, repositoryID, sourceType, projec
 			}
 			rows.Close()
 			if len(parts) > 0 {
+				span.End(calltrace.StatusOK, len(parts), len(parts), "reassembled from stored chunks")
 				return strings.Join(parts, "\n"), "index", []string{"index: reassembled from the stored chunks of this ref."}
 			}
 		}
+		span.End(calltrace.StatusEmpty, 0, 0, "no stored chunks for this ref; falling back to a live read")
 	}
 	if s.sources == nil {
 		return "", "index", []string{"remote: no source connector is configured, so an unindexed file cannot be read."}
@@ -1475,7 +1491,13 @@ func (s *Service) fileBody(ctx context.Context, repositoryID, sourceType, projec
 	if adapterErr != nil {
 		return "", "remote", []string{"remote: " + adapterErr.Error()}
 	}
+	remoteSpan := calltrace.Start(ctx, "read-remote", filePath)
 	raw, readErr := adapter.GetFile(ctx, source.RepositoryRef{ProjectKey: project, Slug: slug}, ref, filePath)
+	if readErr != nil {
+		remoteSpan.Fail(readErr)
+	} else {
+		remoteSpan.End(statusFor(len(raw)), len(raw), len(raw), "live read from the source server")
+	}
 	if readErr != nil {
 		return "", "remote", []string{"remote: " + readErr.Error()}
 	}
@@ -1548,20 +1570,27 @@ WHERE r.enabled=1 AND c.embedding IS NOT NULL AND ` + predicate
 
 	// The query vector comes from the configured provider so it lives in the same
 	// space as the stored chunks.
+	embedSpan := calltrace.Start(ctx, "embed-query", "")
 	queryVector, embedErr := s.embedder(ctx).Embed(ctx, query)
 	if embedErr != nil || len(queryVector) == 0 {
 		queryVector = embedding.Embed(query)
+		embedSpan.End(calltrace.StatusSkipped, 0, len(queryVector), "configured model unavailable; built-in embedding used")
 		result.Diagnostics = append(result.Diagnostics, "embedding: the configured model was unavailable, so the built-in embedding was used for this query.")
+	} else {
+		embedSpan.End(calltrace.StatusOK, 0, len(queryVector), "configured model")
 	}
 
 	var statement string
 	args := make([]any, 0, len(aclArgs)+len(scopeArgs)+limit*4)
 	if s.globalVector != nil {
 		// Over-fetch: the ACL and the scope filters run after the ANN stage.
+		vectorSpan := calltrace.Start(ctx, "vector-ann", "")
 		candidates, vectorErr := s.globalVector(ctx, query, limit*10)
 		if vectorErr != nil {
+			vectorSpan.Fail(vectorErr)
 			result.Diagnostics = append(result.Diagnostics, "vector database: "+vectorErr.Error()+"; falling back to the in-database scan.")
 		} else if len(candidates) > 0 {
+			vectorSpan.End(calltrace.StatusOK, len(candidates), len(candidates), "nearest neighbours before the ACL filter")
 			scores := make(map[string]float64, len(candidates))
 			ids := make([]any, 0, len(candidates))
 			for _, candidate := range candidates {
@@ -1581,6 +1610,8 @@ WHERE r.enabled=1 AND c.embedding IS NOT NULL AND ` + predicate
 				return SemanticSearch{}, err
 			}
 			result.Hits = hits
+			calltrace.From(ctx).Note("acl-filter", "vector candidates", statusFor(len(hits)),
+				fmt.Sprintf("%d neighbours, %d visible after ACL and scope", len(ids), len(hits)))
 			result.Diagnostics = append(result.Diagnostics,
 				fmt.Sprintf("vector database: %d nearest neighbours, %d visible after the repository ACL and scope filters.", len(ids), len(hits)))
 			return result, nil
@@ -1589,10 +1620,13 @@ WHERE r.enabled=1 AND c.embedding IS NOT NULL AND ` + predicate
 	statement = selectClause + scoped + fmt.Sprintf(" LIMIT %d", semanticScanLimit)
 	args = append(args, aclArgs...)
 	args = append(args, scopeArgs...)
+	scanSpan := calltrace.Start(ctx, "embedding-scan", "")
 	hits, err := s.collectSemanticHits(ctx, statement, args, queryVector, nil, limit)
 	if err != nil {
+		scanSpan.Fail(err)
 		return SemanticSearch{}, err
 	}
+	scanSpan.End(statusFor(len(hits)), semanticScanLimit, len(hits), "bounded scan of stored embeddings")
 	result.Hits = hits
 	result.Diagnostics = append(result.Diagnostics,
 		fmt.Sprintf("in-database scan: scored up to %d stored embeddings. Configure a vector database for exhaustive coverage on a large corpus.", semanticScanLimit))
@@ -2074,8 +2108,25 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 				"acl: the Keycloak identity has no bitbucket_user_slug or gitlab_user_id claim, so no repository can be authorized.",
 			}}, nil
 	}
+	aclScope := "restricted"
+	if Unrestricted(principals) {
+		aclScope = "unrestricted"
+	}
+	calltrace.From(ctx).Note("acl", aclScope, calltrace.StatusOK, fmt.Sprintf("%d principals", len(principals)))
+	repoSpan := calltrace.Start(ctx, "index-repositories", sourceType)
 	repositories, repoErr := s.SearchRepositories(ctx, principals, normalized, sourceType, limit)
+	if repoErr != nil {
+		repoSpan.Fail(repoErr)
+	} else {
+		repoSpan.End(statusFor(len(repositories)), len(repositories), len(repositories), "")
+	}
+	sourceSpan := calltrace.Start(ctx, "source-query", sourceType)
 	hits, sourceErr := s.SearchSource(ctx, principals, normalized, sourceType, project, repository, ref, limit)
+	if sourceErr != nil {
+		sourceSpan.Fail(sourceErr)
+	} else {
+		sourceSpan.End(statusFor(len(hits)), len(hits), len(hits), "indexed and remote per-repository search")
+	}
 	result := CodeSearchResult{Query: normalized, Repositories: repositories, Hits: hits}
 	if Unrestricted(principals) {
 		result.Diagnostics = append(result.Diagnostics, "acl: platform, source or search administrator role - repository ACL checks are bypassed for this search.")
@@ -2091,9 +2142,12 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 		}
 	}
 	if ctx.Err() != nil {
+		calltrace.From(ctx).Note("remote-discovery", sourceType, calltrace.StatusTimeout, "deadline passed before instance-wide discovery")
 		result.Diagnostics = append(result.Diagnostics, "remote: skipped instance-wide discovery because the request deadline had already passed.")
 	} else if s.sources != nil && repository == "" {
+		discoverySpan := calltrace.Start(ctx, "remote-discovery", sourceType)
 		discovery := s.discoverRemoteCode(ctx, principals, normalized, sourceType, project, ref, limit, result.Repositories, result.Hits)
+		discoverySpan.End(statusFor(len(discovery.hits)+len(discovery.repositories)), len(discovery.repositories)+len(discovery.hits), len(discovery.hits), discovery.warning)
 		result.Repositories = append(result.Repositories, discovery.repositories...)
 		result.Hits = append(result.Hits, discovery.hits...)
 		result.Diagnostics = append(result.Diagnostics, discovery.diagnostics...)
@@ -2102,15 +2156,26 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 		}
 	}
 	if len(result.Repositories) > limit {
+		calltrace.From(ctx).Note("limit", "repositories", calltrace.StatusOK, fmt.Sprintf("%d of %d kept", limit, len(result.Repositories)))
 		result.Repositories = result.Repositories[:limit]
 	}
 	if len(result.Hits) > limit {
+		calltrace.From(ctx).Note("limit", "hits", calltrace.StatusOK, fmt.Sprintf("%d of %d kept", limit, len(result.Hits)))
 		result.Hits = result.Hits[:limit]
 	}
 	if repoErr != nil && sourceErr != nil {
 		return CodeSearchResult{}, sourceErr
 	}
 	return result, repoErr
+}
+
+// statusFor maps a result count to a trace status, so an empty stage is visible
+// as empty rather than as a successful stage that happened to return nothing.
+func statusFor(results int) string {
+	if results == 0 {
+		return calltrace.StatusEmpty
+	}
+	return calltrace.StatusOK
 }
 
 // maxDiscoveryProjects and maxDiscoveryRepositories bound the fallback path that

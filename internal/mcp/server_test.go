@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -206,6 +207,61 @@ func TestToolsListExtendedAndStrictCompatibility(t *testing.T) {
 	tools = out["result"].(map[string]any)["tools"].([]any)
 	if len(tools) != 2 {
 		t.Fatalf("strict mode got %d tools", len(tools))
+	}
+}
+
+// An answer that overflows the agent's context is as useless as no answer, so
+// every response is bounded, cut on a result boundary, and says what it left
+// out. The diagnostics in Notes must survive the cut.
+func TestResponseBudgetTruncatesOnResultBoundaryAndKeepsNotes(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("## Source Matches\n")
+	for index := 0; index < 40; index++ {
+		fmt.Fprintf(&b, "\n### /kcb/clustara · internal/service_%02d.go\n\n%s\n", index, strings.Repeat("x", 500))
+	}
+	b.WriteString("\n### Notes\n- Repository /kcb/legacy is still indexing; answered live.\n")
+	full := b.String()
+
+	clamped := clampResponse(full, 8000)
+	if len(clamped) > 8000 {
+		t.Fatalf("clamped to %d bytes, over the 8000 budget", len(clamped))
+	}
+	if !strings.Contains(clamped, "still indexing") {
+		t.Fatalf("the Notes section must survive truncation: %s", clamped)
+	}
+	if !strings.Contains(clamped, "### Truncated") || !strings.Contains(clamped, "of 40 result sections are included") {
+		t.Fatalf("truncation must be stated with counts: %s", clamped)
+	}
+	// The cut lands between results, so the last one shown is whole.
+	body := clamped[:strings.Index(clamped, "### Truncated")]
+	if strings.Count(body, "### ") != strings.Count(body, ".go\n") {
+		t.Fatalf("a result was cut in half: %s", body)
+	}
+	// Most of the budget has to be spent on content. A cut that keeps a header
+	// and nothing else is technically within budget and useless.
+	if len(clamped) < 6000 {
+		t.Fatalf("the cut wasted the budget: %d of 8000 bytes used", len(clamped))
+	}
+	if unchanged := clampResponse(full, len(full)+1); unchanged != full {
+		t.Fatal("an answer within budget must not be touched")
+	}
+
+	// The budget applies to a real call, and a caller may ask for less.
+	s := fixture(t)
+	if _, err := s.store.DB.Exec(`UPDATE mcp_tools SET max_response_bytes=2000 WHERE name='search-code'`); err != nil {
+		t.Fatal(err)
+	}
+	out := call(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search-code","arguments":{"query":"GPU","maxBytes":2500}}}`)
+	text := out["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if len(text) > 2000 {
+		t.Fatalf("the configured budget must win over a larger maxBytes: %d bytes", len(text))
+	}
+	// Every tool advertises maxBytes, otherwise a strict client would refuse it.
+	for _, tool := range Catalog() {
+		schema := tool["inputSchema"].(map[string]any)
+		if _, ok := schema["properties"].(map[string]any)["maxBytes"]; !ok {
+			t.Fatalf("%v does not accept maxBytes", tool["name"])
+		}
 	}
 }
 
@@ -440,5 +496,57 @@ func TestAPIKeyToolAndRepositoryRestrictions(t *testing.T) {
 	s.ServeHTTP(rec, req)
 	if bytes.Contains(bytes.ToLower(rec.Body.Bytes()), []byte("clustara")) {
 		t.Fatalf("repository restriction leaked library: %s", rec.Body.String())
+	}
+}
+
+// The per-stage trace is what turns "the answer was empty" into "the ACL saw
+// two repositories and the index matched nothing in them". It must be written
+// for every call, ordered, and attributed to that call only.
+func TestCallTraceRecordsEveryStage(t *testing.T) {
+	s := fixture(t)
+	out := call(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search-code","arguments":{"query":"GPU"}}}`)
+	if out["result"] == nil {
+		t.Fatalf("call failed: %#v", out)
+	}
+	var callID, tool, summary string
+	if err := s.store.DB.QueryRow(`SELECT id,tool,trace_summary FROM mcp_calls ORDER BY id DESC LIMIT 1`).Scan(&callID, &tool, &summary); err != nil {
+		t.Fatal(err)
+	}
+	if tool != "search-code" {
+		t.Fatalf("tool=%s", tool)
+	}
+	rows, err := s.store.DB.Query(`SELECT sequence,stage,status,candidates,results FROM mcp_call_steps WHERE call_id=? ORDER BY sequence`, callID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	stages := map[string]bool{}
+	previous := 0
+	for rows.Next() {
+		var sequence, candidates, results int
+		var stage, status string
+		if err = rows.Scan(&sequence, &stage, &status, &candidates, &results); err != nil {
+			t.Fatal(err)
+		}
+		if sequence != previous+1 {
+			t.Fatalf("steps must be ordered without gaps: got %d after %d", sequence, previous)
+		}
+		previous = sequence
+		if status == "" {
+			t.Fatalf("stage %s has no status", stage)
+		}
+		stages[stage] = true
+	}
+	for _, expected := range []string{"acl", "index-repositories", "source-query", "acl-candidates"} {
+		if !stages[expected] {
+			t.Fatalf("stage %q was not traced; recorded %v", expected, stages)
+		}
+	}
+
+	// A second call keeps its own trace rather than appending to the first.
+	call(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"find-file","arguments":{"pattern":"*.md"}}}`)
+	var traces int
+	if err := s.store.DB.QueryRow(`SELECT COUNT(DISTINCT call_id) FROM mcp_call_steps`).Scan(&traces); err != nil || traces != 2 {
+		t.Fatalf("distinct traces=%d err=%v", traces, err)
 	}
 }

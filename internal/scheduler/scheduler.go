@@ -146,6 +146,12 @@ func (s *Scheduler) applyRetention(ctx context.Context, now time.Time, policy Re
 	}
 	deleteBefore(policy.AuditLogDays, `DELETE FROM audit_logs WHERE occurred_at<?`)
 	deleteBefore(policy.MCPCallDays, `DELETE FROM mcp_calls WHERE occurred_at<?`)
+	// The per-stage trace belongs to its call, so it expires with it. There is no
+	// foreign key on this pair because the call row is written by the MCP server
+	// on a hot path and the trace is best effort.
+	if policy.MCPCallDays > 0 {
+		_, _ = s.store.DB.ExecContext(ctx, `DELETE FROM mcp_call_steps WHERE NOT EXISTS (SELECT 1 FROM mcp_calls c WHERE c.id=mcp_call_steps.call_id)`)
+	}
 	deleteBefore(policy.NotificationDays, `DELETE FROM notifications WHERE created_at<?`)
 	deleteBefore(policy.WebhookEventDays, `DELETE FROM webhook_events WHERE received_at<?`)
 	deleteBefore(policy.IndexJobDays, `DELETE FROM index_jobs WHERE status IN ('completed','failed') AND created_at<?`)

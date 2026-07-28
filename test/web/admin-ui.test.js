@@ -137,6 +137,8 @@ assert.match(script, /api\/v1\/tools\/file-history\/test/);
 assert.match(script, /api\/v1\/tools\/merge-requests\/test/);
 assert.match(script, /api\/v1\/tools\/dependents\/test/);
 assert.match(script, /api\/v1\/tools\/semantic\/test/);
+assert.match(script, /api\/v1\/admin\/mcp\/analytics/);
+assert.match(script, /api\/v1\/admin\/mcp\/calls/);
 assert.match(script, /api\/v1\/admin\/vector\/status/);
 assert.match(script, /api\/v1\/admin\/vector\/rebuild/);
 // 새로고침해도 화면이 유지되어야 하므로 위치를 주소에 기록하고 복원한다.

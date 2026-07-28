@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.30.0
+  version: 0.31.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -632,9 +632,52 @@ paths:
   /api/v1/admin/mcp/tools/{id}:
     put:
       {
-        summary: Change tool enabled state timeout and cache,
+        summary: Change tool enabled state timeout cache and response budget,
         parameters: [{ $ref: "#/components/parameters/Id" }],
         responses: { "200": { description: Updated policy } },
+      }
+  /api/v1/admin/mcp/analytics:
+    get:
+      {
+        summary: MCP traffic analytics for one window with per-tool latency percentiles response sizes truncation rates unanswered questions and the settings changes they imply,
+        parameters:
+          [
+            {
+              name: window,
+              in: query,
+              schema: { type: string, enum: [24h, 7d, 30d] },
+            },
+          ],
+        responses: { "200": { description: Aggregated statistics } },
+      }
+  /api/v1/admin/mcp/calls:
+    get:
+      {
+        summary: Individual MCP call audit records filtered by tool outcome session or query text with an optional CSV export,
+        parameters:
+          [
+            { name: window, in: query, schema: { type: string } },
+            { name: tool, in: query, schema: { type: string } },
+            { name: outcome, in: query, schema: { type: string } },
+            { name: session, in: query, schema: { type: string } },
+            { name: q, in: query, schema: { type: string } },
+            { name: format, in: query, schema: { type: string, enum: [csv] } },
+          ],
+        responses: { "200": { description: Call records or CSV } },
+      }
+  /api/v1/admin/mcp/calls/{id}:
+    get:
+      {
+        summary: Stage by stage trace of one MCP call with the session sequence around it,
+        parameters: [{ $ref: "#/components/parameters/Id" }],
+        responses: { "200": { description: Call steps and session sequence } },
+      }
+  /api/v1/me/calls/{id}:
+    get:
+      {
+        summary: Stage by stage trace of one of the caller's own MCP calls,
+        parameters: [{ $ref: "#/components/parameters/Id" }],
+        responses: { "200": { description: Call steps and session sequence } },
       }
 components:
   securitySchemes:
