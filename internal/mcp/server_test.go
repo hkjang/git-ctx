@@ -107,7 +107,7 @@ func TestToolsListExtendedAndStrictCompatibility(t *testing.T) {
 	s := fixture(t)
 	out := call(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
 	tools := out["result"].(map[string]any)["tools"].([]any)
-	if len(tools) != 13 {
+	if len(tools) != 14 {
 		t.Fatalf("got %d tools", len(tools))
 	}
 	if tools[0].(map[string]any)["name"] != "resolve-library-id" || tools[1].(map[string]any)["name"] != "query-docs" {
@@ -175,6 +175,15 @@ func TestContextPackRunbookAndExportTools(t *testing.T) {
 	text = exported["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
 	if !strings.Contains(text, "untrusted reference data") || !strings.Contains(text, "/kcb/clustara") {
 		t.Fatalf("export=%s", text)
+	}
+}
+
+func TestSearchExplanationTool(t *testing.T) {
+	s := fixture(t)
+	result := call(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"explain-search-result","arguments":{"libraryId":"/kcb/clustara","query":"GPU metrics"}}}`)
+	text := result["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "Search Explanation") || !strings.Contains(text, "normalized query terms matched") || !strings.Contains(text, "docs/gpu.md") {
+		t.Fatalf("explanation=%s", text)
 	}
 }
 

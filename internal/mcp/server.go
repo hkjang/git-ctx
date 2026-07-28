@@ -328,6 +328,12 @@ func Catalog() []map[string]any {
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryIds", "query"}, "properties": map[string]any{
 				"libraryIds": map[string]any{"type": "array", "minItems": 1, "maxItems": 20, "items": map[string]string{"type": "string"}},
 				"query":      map[string]string{"type": "string"}}}},
+		{"name": "explain-search-result", "description": "Explains keyword matches, retrieval mode, source lines, and embedding metadata for accessible search candidates.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId", "query"}, "properties": map[string]any{
+				"libraryId": map[string]string{"type": "string"},
+				"query":     map[string]string{"type": "string"},
+				"ref":       map[string]string{"type": "string"},
+				"limit":     map[string]any{"type": "integer", "minimum": 1, "maximum": 50}}}},
 		{"name": "get-platform-status", "description": "Returns administrative MCP, source, index, and database status. Requires an administrator MCP API key.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}}},
 		{"name": "list-index-jobs", "description": "Lists recent indexing jobs for source administrators and operators using an MCP API key.",
@@ -371,7 +377,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 	text := ""
 	var err error
 	libraryID := ""
-	if params.Name == "query-docs" || params.Name == "reindex-repository" || params.Name == "get-repository-map" || params.Name == "get-symbol-context" || params.Name == "trace-dependencies" || params.Name == "compare-refs" || params.Name == "get-change-impact" {
+	if params.Name == "query-docs" || params.Name == "reindex-repository" || params.Name == "get-repository-map" || params.Name == "get-symbol-context" || params.Name == "trace-dependencies" || params.Name == "compare-refs" || params.Name == "get-change-impact" || params.Name == "explain-search-result" {
 		libraryID = stringArg(params.Arguments, "libraryId")
 	}
 	cacheKey := s.cacheKey(r.Context(), p, params.Name, params.Arguments)
@@ -526,6 +532,16 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 		}
 		if err == nil {
 			text, err = s.search.ExportContext(r.Context(), principalACLs(p), libraries, stringArg(params.Arguments, "query"))
+		}
+	case "explain-search-result":
+		if p.KeyID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+			err = errors.New("library is unavailable or access is denied")
+		} else {
+			var item search.SearchExplanation
+			item, err = s.search.ExplainSearch(r.Context(), principalACLs(p), libraryID, stringArg(params.Arguments, "ref"), stringArg(params.Arguments, "query"), intArg(params.Arguments, "limit", 10))
+			if err == nil {
+				text = formatSearchExplanation(item)
+			}
 		}
 	case "get-platform-status":
 		text, err = s.platformStatus(r.Context())
@@ -913,6 +929,20 @@ func formatRunbooks(items []search.RunbookResult) string {
 	b.WriteString("## Runbooks\n")
 	for _, item := range items {
 		fmt.Fprintf(&b, "\n### %s\n\n%s\n\nSource: bitcontext://%s@%s/%s#L%d-L%d\n", item.Heading, item.Content, item.LibraryID, item.CommitID, item.FilePath, item.LineStart, item.LineEnd)
+	}
+	return b.String()
+}
+
+func formatSearchExplanation(item search.SearchExplanation) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Search Explanation\n\n- Library ID: %s\n- Ref: %s\n- Retrieval: %s\n", item.LibraryID, item.Ref, item.RetrievalMode)
+	if len(item.Hits) == 0 {
+		b.WriteString("\nNo lexical candidates matched the normalized query.")
+		return b.String()
+	}
+	for _, hit := range item.Hits {
+		fmt.Fprintf(&b, "\n### %s\n\n- Matched Terms: %d\n- Keyword Occurrences: %d\n- Reasons: %s\n- Embedding: %s / %s / %s\n- Source: bitcontext://%s@%s/%s#L%d-L%d\n",
+			hit.Heading, hit.MatchedTerms, hit.KeywordOccurrences, strings.Join(hit.Reasons, "; "), hit.EmbeddingProvider, hit.EmbeddingModel, hit.EmbeddingRevision, item.LibraryID, hit.CommitID, hit.FilePath, hit.LineStart, hit.LineEnd)
 	}
 	return b.String()
 }

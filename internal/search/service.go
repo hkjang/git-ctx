@@ -126,6 +126,17 @@ type RunbookResult struct {
 	LineStart, LineEnd                                   int
 }
 
+type SearchExplanation struct {
+	LibraryID, Ref, RetrievalMode string
+	Hits                          []ExplainedHit
+}
+
+type ExplainedHit struct {
+	FilePath, Heading, CommitID, EmbeddingProvider, EmbeddingModel, EmbeddingRevision string
+	LineStart, LineEnd, MatchedTerms, KeywordOccurrences                              int
+	Reasons                                                                           []string
+}
+
 func (s *Service) RepositoryMap(ctx context.Context, principals []string, libraryID, requestedRef string) (RepositoryMap, error) {
 	baseID, version, ok := splitLibraryID(libraryID)
 	if !ok || len(principals) == 0 {
@@ -540,6 +551,73 @@ func (s *Service) ExportContext(ctx context.Context, principals []string, librar
 		result = result[:200000] + "\n\n[Export truncated at the platform safety limit.]"
 	}
 	return result, nil
+}
+
+func (s *Service) ExplainSearch(ctx context.Context, principals []string, libraryID, requestedRef, query string, limit int) (SearchExplanation, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return SearchExplanation{}, errors.New("query is required")
+	}
+	repositoryID, baseID, ref, err := s.authorizedRepository(ctx, principals, libraryID, requestedRef)
+	if err != nil {
+		return SearchExplanation{}, err
+	}
+	if limit < 1 || limit > 50 {
+		limit = 10
+	}
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT file_path,heading,commit_id,line_start,line_end,
+COALESCE(embedding_provider,''),COALESCE(embedding_model,''),COALESCE(embedding_revision,''),content
+FROM document_chunks WHERE repository_id=? AND ref_name=? ORDER BY indexed_at DESC LIMIT 500`), repositoryID, ref)
+	if err != nil {
+		return SearchExplanation{}, err
+	}
+	terms := unique(embedding.Tokens(query))
+	var hits []ExplainedHit
+	for rows.Next() {
+		var item ExplainedHit
+		var content string
+		if err = rows.Scan(&item.FilePath, &item.Heading, &item.CommitID, &item.LineStart, &item.LineEnd, &item.EmbeddingProvider, &item.EmbeddingModel, &item.EmbeddingRevision, &content); err != nil {
+			rows.Close()
+			return SearchExplanation{}, err
+		}
+		haystack := strings.ToLower(item.FilePath + " " + item.Heading + " " + content)
+		for _, term := range terms {
+			count := strings.Count(haystack, term)
+			if count > 0 {
+				item.MatchedTerms++
+				item.KeywordOccurrences += count
+			}
+		}
+		if item.MatchedTerms == 0 {
+			continue
+		}
+		if strings.Contains(strings.ToLower(item.Heading), strings.ToLower(query)) {
+			item.Reasons = append(item.Reasons, "exact heading phrase")
+		}
+		if strings.Contains(strings.ToLower(item.FilePath), strings.ToLower(query)) {
+			item.Reasons = append(item.Reasons, "file path phrase")
+		}
+		item.Reasons = append(item.Reasons, fmt.Sprintf("%d/%d normalized query terms matched", item.MatchedTerms, len(terms)))
+		if item.EmbeddingProvider != "" {
+			item.Reasons = append(item.Reasons, "embedding available for semantic scoring")
+		}
+		hits = append(hits, item)
+	}
+	rows.Close()
+	sort.SliceStable(hits, func(i, j int) bool {
+		if hits[i].MatchedTerms == hits[j].MatchedTerms {
+			return hits[i].KeywordOccurrences > hits[j].KeywordOccurrences
+		}
+		return hits[i].MatchedTerms > hits[j].MatchedTerms
+	})
+	if len(hits) > limit {
+		hits = hits[:limit]
+	}
+	mode := "application lexical + vector"
+	if s.store.Driver() == "postgres" {
+		mode = "PostgreSQL FTS candidates + vector/rerank"
+	}
+	return SearchExplanation{LibraryID: baseID, Ref: ref, RetrievalMode: mode, Hits: hits}, nil
 }
 
 func splitLibraryID(libraryID string) (string, string, bool) {
@@ -1022,9 +1100,45 @@ func (s *Service) indexedSourceHits(ctx context.Context, repoID, ref string, rem
 			continue
 		}
 		var safe source.QueryResult
-		err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT file_path,content,commit_id,line_start,line_end FROM document_chunks WHERE repository_id=? AND ref_name=? AND file_path=? ORDER BY line_start LIMIT 1`), repoID, ref, hit.Path).Scan(&safe.Path, &safe.Snippet, &safe.CommitID, &safe.LineStart, &safe.LineEnd)
+		lineStart, lineEnd := hit.LineStart, hit.LineEnd
+		if lineStart < 1 {
+			lineStart = 1
+		}
+		if lineEnd < lineStart {
+			lineEnd = lineStart
+		}
+		err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT file_path,content,commit_id,line_start,line_end FROM document_chunks
+WHERE repository_id=? AND ref_name=? AND file_path=?
+ORDER BY CASE WHEN line_end>=? AND line_start<=? THEN 0 ELSE 1 END,ABS(line_start-?) LIMIT 1`),
+			repoID, ref, hit.Path, lineStart, lineEnd, lineStart).Scan(&safe.Path, &safe.Snippet, &safe.CommitID, &safe.LineStart, &safe.LineEnd)
 		if err != nil {
 			continue
+		}
+		neighborRows, neighborErr := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT content,line_start,line_end FROM document_chunks
+WHERE repository_id=? AND ref_name=? AND file_path=? AND id<>(SELECT id FROM document_chunks WHERE repository_id=? AND ref_name=? AND file_path=? AND line_start=? LIMIT 1)
+AND line_start<=? AND line_end>=? ORDER BY line_start LIMIT 2`),
+			repoID, ref, safe.Path, repoID, ref, safe.Path, safe.LineStart, safe.LineEnd+3, max(1, safe.LineStart-3))
+		if neighborErr == nil {
+			type neighbor struct {
+				content    string
+				start, end int
+			}
+			all := []neighbor{{safe.Snippet, safe.LineStart, safe.LineEnd}}
+			for neighborRows.Next() {
+				var item neighbor
+				if neighborRows.Scan(&item.content, &item.start, &item.end) == nil {
+					all = append(all, item)
+				}
+			}
+			neighborRows.Close()
+			sort.Slice(all, func(i, j int) bool { return all[i].start < all[j].start })
+			contents := make([]string, len(all))
+			for index := range all {
+				contents[index] = all[index].content
+				safe.LineStart = min(safe.LineStart, all[index].start)
+				safe.LineEnd = max(safe.LineEnd, all[index].end)
+			}
+			safe.Snippet = strings.Join(contents, "\n\n")
 		}
 		seen[safe.Path] = true
 		out = append(out, safe)

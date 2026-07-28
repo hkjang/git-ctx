@@ -2550,18 +2550,54 @@ func (a *App) projectOpenSearch(ctx context.Context, repositoryID, ref string) e
 
 func (a *App) openSearchCandidates(ctx context.Context, repositoryID, ref string, principals []string, query string, limit int) ([]search.KeywordCandidate, error) {
 	client, enabled, err := a.openSearchClient(ctx)
-	if err != nil || !enabled {
-		return nil, err
-	}
-	candidates, err := client.Search(ctx, repositoryID, ref, principals, query, limit)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]search.KeywordCandidate, len(candidates))
-	for i, candidate := range candidates {
-		out[i] = search.KeywordCandidate{ID: candidate.ID, Score: candidate.Score}
+	if enabled {
+		candidates, searchErr := client.Search(ctx, repositoryID, ref, principals, query, limit)
+		if searchErr != nil {
+			return nil, searchErr
+		}
+		out := make([]search.KeywordCandidate, len(candidates))
+		for i, candidate := range candidates {
+			out[i] = search.KeywordCandidate{ID: candidate.ID, Score: candidate.Score}
+		}
+		return out, nil
 	}
-	return out, nil
+	if a.store.Driver() != "postgres" || len(principals) == 0 {
+		return nil, nil
+	}
+	if limit < 1 || limit > 20000 {
+		limit = 5000
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(principals)), ",")
+	rows, err := a.store.DB.QueryContext(ctx, a.store.Rebind(`SELECT c.id,
+ts_rank_cd(to_tsvector('simple',COALESCE(c.heading,'') || ' ' || COALESCE(c.content,'')),plainto_tsquery('simple',?))
+FROM document_chunks c WHERE c.repository_id=? AND c.ref_name=? AND
+to_tsvector('simple',COALESCE(c.heading,'') || ' ' || COALESCE(c.content,'')) @@ plainto_tsquery('simple',?) AND
+EXISTS (SELECT 1 FROM repository_permissions p WHERE p.repository_id=c.repository_id AND (p.principal IN (`+placeholders+`) OR p.principal='*'))
+ORDER BY 2 DESC LIMIT ?`), append([]any{query, repositoryID, ref, query}, append(principalArgs(principals), limit)...)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []search.KeywordCandidate
+	for rows.Next() {
+		var item search.KeywordCandidate
+		if err = rows.Scan(&item.ID, &item.Score); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func principalArgs(principals []string) []any {
+	out := make([]any, len(principals))
+	for index, principal := range principals {
+		out[index] = principal
+	}
+	return out
 }
 func embeddingProviderFromMap(settings map[string]any) (embedding.Provider, error) {
 	provider, _ := settings["provider"].(string)

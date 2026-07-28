@@ -15,6 +15,8 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - 두 ref의 심볼 변경과 의존 코드를 연결하는 `compare-refs`, `get-change-impact`
 - 여러 저장소·ref를 업무 단위로 묶는 관리자 CRUD와 `get-context-pack`
 - 운영 문서 전용 `find-runbook`, 비신뢰 데이터 경계·크기 제한을 적용한 `export-context`
+- PostgreSQL `tsvector` 후보 선별, 원격 line 기반 인접 청크 hydration
+- 검색어 일치 근거·retrieval 모드·embedding 버전을 보여주는 `explain-search-result`
 - 검색 후보 단계의 저장소 ACL 적용과 브랜치·태그별 조회
 - 사용자 API 키 생성·목록·중지·폐기 및 HMAC 기반 비가역 저장
 - SQLite와 PostgreSQL 공통 스키마

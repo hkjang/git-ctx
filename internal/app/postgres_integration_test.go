@@ -48,8 +48,21 @@ func TestPostgresDSNOnlyBootstrapIntegration(t *testing.T) {
 	adminRequest.Header.Set("Authorization", "Bearer "+a.bootstrapAdminToken())
 	admin := httptest.NewRecorder()
 	a.Handler().ServeHTTP(admin, adminRequest)
-	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"database"`) || !strings.Contains(admin.Body.String(), `"latest":"026_context_packs.sql"`) {
+	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"database"`) || !strings.Contains(admin.Body.String(), `"latest":"027_search_explain.sql"`) {
 		t.Fatalf("admin DB status=%d body=%s", admin.Code, admin.Body.String())
+	}
+	if _, err = a.store.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,library_id,default_branch) VALUES('fts-repo','OPS','fts','FTS','/ops/fts','main')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.store.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('fts-repo','alice','read')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.store.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('fts-chunk','fts-repo','main','c1','docs/runbook.md',1,5,'GPU Runbook','document','restart exporter for gpu metrics','h1')`); err != nil {
+		t.Fatal(err)
+	}
+	candidates, err := a.openSearchCandidates(context.Background(), "fts-repo", "main", []string{"alice"}, "gpu metrics", 10)
+	if err != nil || len(candidates) != 1 || candidates[0].ID != "fts-chunk" {
+		t.Fatalf("PostgreSQL FTS candidates=%#v err=%v", candidates, err)
 	}
 }
 
