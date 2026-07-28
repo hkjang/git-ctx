@@ -269,12 +269,12 @@ func Catalog() []map[string]any {
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId", "query"}, "properties": map[string]any{
 				"libraryId": map[string]string{"type": "string", "description": "Context7-compatible /organization/project[/version] ID"},
 				"query":     map[string]string{"type": "string", "description": "Focused documentation question"}}}},
-		{"name": "search-repositories", "description": "Searches accessible Bitbucket and GitLab projects and repositories without requiring a library ID.",
+		{"name": "search-repositories", "description": "Lists matching Bitbucket and GitLab repositories by name or description only. This tool never returns file contents; call search-code when the user asks about code, symbols, configuration, or any file text.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
 				"query":      map[string]string{"type": "string", "description": "Project, repository, product, or description search text"},
 				"sourceType": map[string]any{"type": "string", "enum": []string{"bitbucket", "gitlab", "confluence", "jira"}, "description": "Optional source filter"},
 				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 50}}}},
-		{"name": "search-source", "description": "Searches code and files through the connected Bitbucket or GitLab query API across accessible repositories.",
+		{"name": "search-source", "description": "Searches file contents through the connected Bitbucket or GitLab code search API across accessible repositories. Prefer search-code, which runs this search and repository discovery together.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
 				"query":      map[string]string{"type": "string", "description": "Code, symbol, API, or text query"},
 				"sourceType": map[string]any{"type": "string", "enum": []string{"bitbucket", "gitlab", "confluence", "jira"}},
@@ -282,12 +282,12 @@ func Catalog() []map[string]any {
 				"repository": map[string]string{"type": "string", "description": "Optional repository slug or library ID"},
 				"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"},
 				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 50}}}},
-		{"name": "search-code", "description": "Finds accessible repositories and searches their source without requiring a library ID. Uses Bitbucket, GitLab, Confluence, or Jira query APIs when configured.",
+		{"name": "search-code", "description": "Primary code search. Finds repositories AND matching file contents in one call, without a library ID, and falls back to the live Bitbucket or GitLab code search API for repositories that are not indexed yet. Use this first for any question about source code, symbols, configuration, or where something is implemented.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
 				"query":      map[string]string{"type": "string", "description": "Natural-language request, repository name, code symbol, API, or text query"},
 				"sourceType": map[string]any{"type": "string", "enum": []string{"bitbucket", "gitlab", "confluence", "jira"}},
 				"project":    map[string]string{"type": "string", "description": "Optional project key or namespace"},
-				"repository": map[string]string{"type": "string", "description": "Optional repository slug or library ID"},
+				"repository": map[string]string{"type": "string", "description": "Optional repository slug or /library/id to search inside one repository"},
 				"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"},
 				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 50}}}},
 		{"name": "get-repository-map", "description": "Returns the indexed languages, directories, key files, and entry points for a repository.",
@@ -424,7 +424,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 				}
 				items = filtered
 			}
-			text = formatRepositories(items)
+			text = formatRepositorySearch(items, stringArg(params.Arguments, "query"))
 		}
 	case "search-source":
 		var hits []search.SourceResult
@@ -837,6 +837,9 @@ func formatLibraries(items []search.Library) string {
 	b.WriteString("Available Libraries:\n")
 	for _, x := range items {
 		fmt.Fprintf(&b, "\n- Name: %s\n- Library ID: %s\n- Description: %s\n- Code Snippets: %d\n- Source Reputation: %s\n- Versions: %s\n", x.Name, x.ID, x.Description, x.Snippets, x.Reputation, strings.Join(x.Versions, ", "))
+		if x.Snippets == 0 {
+			b.WriteString("- Note: not indexed yet; query-docs answers this library from the live source code search API.\n")
+		}
 	}
 	return b.String()
 }
@@ -869,6 +872,16 @@ func formatSourceResults(items []search.SourceResult) string {
 	return b.String()
 }
 
+// formatRepositorySearch appends the next step so a coding agent that asked for
+// repositories does not stop before it has any code.
+func formatRepositorySearch(items []search.RepositoryResult, query string) string {
+	text := formatRepositories(items)
+	if len(items) == 0 {
+		return text
+	}
+	return text + fmt.Sprintf("\nThis tool matched repository names only. For file contents call `search-code {\"query\":%q}`.\n", query)
+}
+
 func formatCodeSearch(result search.CodeSearchResult) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "## Code Search\n\nNormalized query: `%s`\n", result.Query)
@@ -886,15 +899,25 @@ func formatCodeSearch(result search.CodeSearchResult) string {
 			}
 		}
 	}
-	b.WriteString("\n### Source Matches\n")
+	fmt.Fprintf(&b, "\n### Source Matches (%d)\n", len(result.Hits))
 	if len(result.Hits) == 0 {
-		b.WriteString("\nNo matching source snippets were returned by the connected query APIs.\n")
-		for _, diagnostic := range result.Diagnostics {
-			fmt.Fprintf(&b, "- %s\n", diagnostic)
+		b.WriteString("\nNo file contents matched. This is not the same as \"the code does not exist\": check the notes below.\n")
+		if len(result.Repositories) > 0 {
+			fmt.Fprintf(&b, "\nNext step: retry with a narrower scope, for example `search-code {\"query\":%q,\"repository\":%q}`, or use `find-symbol` for an exact identifier.\n",
+				result.Query, result.Repositories[0].LibraryID)
 		}
 	} else {
 		for _, item := range result.Hits {
 			fmt.Fprintf(&b, "\n#### %s · %s\n\n%s\n\nSource: %s://%s/%s@%s/%s#L%d-L%d\n", item.LibraryID, item.Path, item.Snippet, item.SourceType, item.ProjectKey, item.RepositorySlug, item.CommitID, item.Path, item.LineStart, item.LineEnd)
+		}
+	}
+	// Diagnostics always ship: an agent that knows the search ran a name-only
+	// path, hit a timeout or was ACL-filtered can pick a better next call
+	// instead of telling the user the code is missing.
+	if len(result.Diagnostics) > 0 {
+		b.WriteString("\n### Notes\n")
+		for _, diagnostic := range result.Diagnostics {
+			fmt.Fprintf(&b, "- %s\n", diagnostic)
 		}
 	}
 	return b.String()

@@ -103,6 +103,46 @@ func TestRepositorySearchAndAdministratorTools(t *testing.T) {
 	}
 }
 
+// A coding agent must be able to tell repository matches from file matches, and
+// must never be left with a repository list when it asked about code.
+func TestCodeSearchResponseGuidesTheClient(t *testing.T) {
+	s := fixture(t)
+	repositories := call(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search-repositories","arguments":{"query":"GPU"}}}`)
+	text := repositories["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "search-code") {
+		t.Fatalf("a repository-only result must point at the code search tool: %s", text)
+	}
+
+	code := call(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search-code","arguments":{"query":"GPU"}}}`)
+	text = code["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	for _, expected := range []string{"### Repository Matches", "### Source Matches", "/kcb/clustara"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("code search response is missing %q: %s", expected, text)
+		}
+	}
+	if strings.Contains(text, "Source Matches (0)") && !strings.Contains(text, "Next step") {
+		t.Fatalf("an empty code result must state the next step: %s", text)
+	}
+
+	// The tool catalog must describe search-code as the primary entry point so a
+	// client does not settle for repository names.
+	var searchCode, searchRepositories string
+	for _, tool := range Catalog() {
+		switch tool["name"] {
+		case "search-code":
+			searchCode, _ = tool["description"].(string)
+		case "search-repositories":
+			searchRepositories, _ = tool["description"].(string)
+		}
+	}
+	if !strings.Contains(searchCode, "file contents") || !strings.Contains(searchCode, "Primary code search") {
+		t.Fatalf("search-code description=%q", searchCode)
+	}
+	if !strings.Contains(searchRepositories, "never returns file contents") {
+		t.Fatalf("search-repositories description=%q", searchRepositories)
+	}
+}
+
 func TestToolsListExtendedAndStrictCompatibility(t *testing.T) {
 	s := fixture(t)
 	out := call(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)

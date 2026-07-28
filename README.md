@@ -47,6 +47,7 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - BM25와 256차원 로컬 벡터 결합 검색, 색인 전 Secret 차단·마스킹
 - ACL 필터 이후 사내 `/v1/rerank` 재순위화와 장애 시 하이브리드 점수 fallback
 - 모델 미설정 시 ACL 선검사 후 Bitbucket/GitLab 서버측 Query Search API 모드
+- 색인 전 저장소를 위한 `query-docs`의 소스 Code Search API failover와 병렬 원격 검색
 - 선택적 OpenSearch BM25 증분 projection, 질의 단계 ACL filter와 DB 원문 재검증
 - ACL 적용 정답 데이터셋 기반 Recall@K·MRR·nDCG@K 검색 품질 회귀 게이트
 - 버전형 DB migration 및 PostgreSQL 다중 Worker `SKIP LOCKED`

@@ -823,11 +823,27 @@
           ],
         },
         {
-          title: "2. 결과가 비어 있을 때",
+          title: "2. MCP 도구 선택",
+          table: {
+            head: ["도구", "언제 쓰나", "반환"],
+            rows: [
+              ["search-code", "코드·심볼·설정 위치를 찾을 때 (기본)", "저장소 + 파일 내용 + 실행 경로 Notes"],
+              ["search-repositories", "저장소 이름만 찾을 때", "저장소 목록 (파일 내용 없음)"],
+              ["query-docs", "특정 Library ID의 문서를 물을 때", "색인 결과, 없으면 소스 API failover"],
+              ["find-symbol", "정확한 식별자를 알 때", "심볼 정의 위치"],
+            ],
+          },
+          notice:
+            "코드 질문에 search-repositories만 호출하면 파일 내용이 나오지 않습니다. 결과 안내 문구가 search-code 재호출을 유도하도록 되어 있습니다.",
+        },
+        {
+          title: "3. 결과가 비어 있을 때",
           body: [
             "응답의 Diagnostics 항목에 실행 경로와 차단 사유가 표시됩니다.",
             "'no source ACL principal' 이면 권한 진단에서 ACL Principal 을 확인하세요.",
             "'instance-wide code search is unavailable' 이면 GitLab Advanced Search 가 꺼져 있는 것이므로 저장소나 프로젝트를 함께 지정하세요.",
+            "'did not finish within the tool timeout' 이면 저장소·프로젝트로 범위를 좁히거나 MCP 도구 화면에서 Timeout 을 늘리세요.",
+            "색인이 아직 없는 저장소도 query-docs 가 소스 Code Search API 로 failover 하므로 즉시 사용할 수 있습니다.",
           ],
         },
       ],

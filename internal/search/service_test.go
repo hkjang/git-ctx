@@ -60,7 +60,10 @@ func TestHybridRankingAndGitLabSource(t *testing.T) {
 	}
 }
 
+// querySource is shared by the tests below. SearchSource queries candidate
+// repositories concurrently, so the double guards its counters.
 type querySource struct {
+	mu        sync.Mutex
 	calls     int
 	lastQuery string
 }
@@ -109,8 +112,10 @@ func (q *querySource) RegisterWebhook(context.Context, source.RepositoryRef, str
 	return nil
 }
 func (q *querySource) SearchQuery(_ context.Context, repo source.RepositoryRef, ref, query string, limit int) ([]source.QueryResult, error) {
+	q.mu.Lock()
 	q.calls++
 	q.lastQuery = query
+	q.mu.Unlock()
 	return []source.QueryResult{{Path: "docs/source-api.md", Snippet: "source API result", CommitID: "remote-commit", LineStart: 4, LineEnd: 8}}, nil
 }
 
@@ -241,11 +246,13 @@ type globalQuerySource struct {
 }
 
 func (q *globalQuerySource) SearchGlobalQuery(_ context.Context, query string, _ int) ([]source.GlobalQueryResult, error) {
+	q.mu.Lock()
 	q.globalCalls++
+	q.lastQuery = query
+	q.mu.Unlock()
 	if q.unsupported {
 		return nil, source.ErrGlobalSearchUnsupported
 	}
-	q.lastQuery = query
 	return []source.GlobalQueryResult{{
 		ProjectKey: "apps", Slug: "dify", Name: "Dify", Ref: "main", DefaultBranch: "main", ID: 77,
 		QueryResult: source.QueryResult{Path: "api/core/auth.py", Snippet: "def verify_token(", LineStart: 42, LineEnd: 42},
@@ -436,6 +443,92 @@ func TestAdministratorRolesSearchWithoutRepositoryACL(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("the ACL bypass must be stated in the diagnostics: %v", result.Diagnostics)
+	}
+}
+
+// A registered repository that is still being embedded has no chunks yet.
+// query-docs must fail over to the source code search API instead of answering
+// "not indexed", which is useless to a coding agent.
+func TestQueryFailsOverToSourceSearchWhileIndexing(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:query-failover?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r','core','demo','Demo','gitlab','1','/core/demo','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r','alice','read')`)
+	remote := &querySource{}
+	service := New(db)
+	// A remote embedding model is configured, so the source query mode is off and
+	// only the failover can produce an answer.
+	service.SetConfigLoader(func(context.Context) Config {
+		return Config{KeywordWeight: 1, VectorWeight: 0.35, FinalK: 8, CandidateLimit: 100, SourceQuerySearch: false}
+	})
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) { return remote, nil })
+	result, err := service.Query(ctx, []string{"alice"}, "/core/demo/main", "source API")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "docs/source-api.md") || !strings.Contains(result, "source API result") {
+		t.Fatalf("failover did not return remote content: %s", result)
+	}
+	if !strings.Contains(result, "no local index yet") {
+		t.Fatalf("the failover mode must be stated: %s", result)
+	}
+	remote.mu.Lock()
+	calls := remote.calls
+	remote.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("expected exactly one remote query, got %d", calls)
+	}
+
+	// An unauthorized principal must not reach the remote API through failover.
+	before := calls
+	if _, err = service.Query(ctx, []string{"mallory"}, "/core/demo/main", "source API"); err == nil {
+		t.Fatal("expected an ACL error")
+	}
+	remote.mu.Lock()
+	after := remote.calls
+	remote.mu.Unlock()
+	if after != before {
+		t.Fatalf("failover leaked past the ACL: calls %d -> %d", before, after)
+	}
+}
+
+// search-code must return file contents, not only repository names, for a
+// repository that is registered but not indexed.
+func TestSearchCodeReturnsCodeForRegisteredButUnindexedRepository(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:code-without-index?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	for index := 1; index <= 5; index++ {
+		id := fmt.Sprintf("r%d", index)
+		_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch) VALUES(?,?,?,?,?,'gitlab',?,?,'main')`,
+			id, "core", fmt.Sprintf("demo-%d", index), fmt.Sprintf("Demo %d", index), "gpu platform", fmt.Sprint(index), fmt.Sprintf("/core/demo-%d", index))
+		_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES(?,'alice','read')`, id)
+	}
+	remote := &querySource{}
+	service := New(db)
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) { return remote, nil })
+	result, err := service.SearchCode(ctx, []string{"alice"}, "gpu", "gitlab", "", "", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Repositories) != 5 {
+		t.Fatalf("repositories=%d", len(result.Repositories))
+	}
+	if len(result.Hits) == 0 {
+		t.Fatalf("code hits are missing even though the source API answered: %#v", result)
+	}
+	remote.mu.Lock()
+	calls := remote.calls
+	remote.mu.Unlock()
+	if calls != 5 {
+		t.Fatalf("every candidate repository must be queried, calls=%d", calls)
 	}
 }
 

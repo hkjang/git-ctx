@@ -817,36 +817,59 @@ WHERE r.enabled=1 AND ` + predicate
 	if err = rows.Close(); err != nil {
 		return nil, err
 	}
+	// Query every candidate repository in parallel. One remote round trip per
+	// repository in sequence regularly exceeded the MCP tool timeout, and a
+	// deadline in the middle of the loop dropped all code hits while the cheap
+	// local repository list still returned - which is exactly what "MCP only
+	// shows repositories" looks like from a client.
+	type candidateHits struct {
+		hits []source.QueryResult
+		ref  string
+		err  error
+	}
+	found := make([]candidateHits, len(candidates))
+	slots := make(chan struct{}, sourceQueryConcurrency)
+	var wait sync.WaitGroup
+	for index, item := range candidates {
+		if s.sources == nil {
+			break
+		}
+		wait.Add(1)
+		slots <- struct{}{}
+		go func(index int, item candidate) {
+			defer wait.Done()
+			defer func() { <-slots }()
+			selectedRef := ref
+			if selectedRef == "" {
+				selectedRef = item.defaultRef
+			}
+			found[index].ref = selectedRef
+			adapter, loadErr := s.sources(ctx, item.sourceType)
+			if loadErr != nil {
+				found[index].err = loadErr
+				return
+			}
+			searcher, ok := adapter.(source.QuerySearcher)
+			if !ok {
+				return
+			}
+			hits, searchErr := searcher.SearchQuery(ctx, source.RepositoryRef{ProjectKey: item.project, Slug: item.slug}, selectedRef, query, limit)
+			found[index].hits, found[index].err = hits, searchErr
+		}(index, item)
+	}
+	wait.Wait()
 	var out []SourceResult
 	var lastErr error
-	for _, item := range candidates {
-		selectedRef := ref
-		if selectedRef == "" {
-			selectedRef = item.defaultRef
-		}
-		if s.sources == nil {
+	for index, item := range candidates {
+		if found[index].err != nil {
+			lastErr = found[index].err
 			continue
-		}
-		adapter, loadErr := s.sources(ctx, item.sourceType)
-		if loadErr != nil {
-			lastErr = loadErr
-			continue
-		}
-		searcher, ok := adapter.(source.QuerySearcher)
-		if !ok {
-			continue
-		}
-		hits, searchErr := searcher.SearchQuery(ctx, source.RepositoryRef{ProjectKey: item.project, Slug: item.slug}, selectedRef, query, limit-len(out))
-		if searchErr != nil {
-			lastErr = searchErr
-			continue
-		}
-		hits = s.safeSourceHits(ctx, item.id, selectedRef, hits, limit-len(out))
-		for _, hit := range hits {
-			out = append(out, SourceResult{LibraryID: item.libraryID, SourceType: item.sourceType, ProjectKey: item.project, RepositorySlug: item.slug, Ref: selectedRef, QueryResult: hit})
 		}
 		if len(out) >= limit {
 			break
+		}
+		for _, hit := range s.safeSourceHits(ctx, item.id, found[index].ref, found[index].hits, limit-len(out)) {
+			out = append(out, SourceResult{LibraryID: item.libraryID, SourceType: item.sourceType, ProjectKey: item.project, RepositorySlug: item.slug, Ref: found[index].ref, QueryResult: hit})
 		}
 	}
 	if len(out) == 0 && lastErr != nil {
@@ -884,8 +907,16 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 	if sourceErr != nil {
 		result.Warning = "The remote source query API was unavailable; repository matches are still shown."
 		result.Diagnostics = append(result.Diagnostics, "indexed-source: "+sourceErr.Error())
+		// A deadline is the difference between "no code matched" and "we ran out
+		// of time", and only the second one is worth retrying with a narrower
+		// scope. Say which one happened.
+		if errors.Is(sourceErr, context.DeadlineExceeded) {
+			result.Warning = "The code search did not finish within the tool timeout; narrow the search with repository or project, or raise the MCP tool timeout."
+		}
 	}
-	if s.sources != nil && repository == "" {
+	if ctx.Err() != nil {
+		result.Diagnostics = append(result.Diagnostics, "remote: skipped instance-wide discovery because the request deadline had already passed.")
+	} else if s.sources != nil && repository == "" {
 		discovery := s.discoverRemoteCode(ctx, principals, normalized, sourceType, project, ref, limit, result.Repositories, result.Hits)
 		result.Repositories = append(result.Repositories, discovery.repositories...)
 		result.Hits = append(result.Hits, discovery.hits...)
@@ -988,6 +1019,9 @@ type remoteScan struct {
 	failures                int
 	candidates              []source.Repository
 }
+
+// sourceQueryConcurrency bounds parallel remote code searches.
+const sourceQueryConcurrency = 6
 
 // aclLookupConcurrency bounds parallel permission calls. Repository ACL lookups
 // are one or two remote requests each, so a serial scan of a discovery page adds
@@ -1478,19 +1512,31 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 	if cfg.RerankLimit < 1 || cfg.RerankLimit > 100 {
 		cfg.RerankLimit = 30
 	}
-	if cfg.SourceQuerySearch && s.sources != nil && (sourceType != "bitbucket" || ref == defaultRef) {
+	// remoteDocuments asks the source code search API for this repository. It is
+	// used both as the primary mode when no embedding model is configured and as
+	// the failover below when the local index has nothing to offer yet.
+	remoteDocuments := func() []source.QueryResult {
+		if s.sources == nil || (sourceType == "bitbucket" && ref != defaultRef) {
+			return nil
+		}
 		adapter, sourceErr := s.sources(ctx, sourceType)
-		if sourceErr == nil {
-			if querySearcher, ok := adapter.(source.QuerySearcher); ok {
-				remoteHits, queryErr := querySearcher.SearchQuery(ctx, source.RepositoryRef{ProjectKey: projectKey, Slug: repositorySlug}, ref, NormalizeSourceQuery(query), cfg.FinalK)
-				if queryErr == nil && len(remoteHits) > 0 {
-					safeHits := s.safeSourceHits(ctx, repoID, ref, remoteHits, cfg.FinalK)
-					if len(safeHits) > 0 {
-						span.SetAttributes(attribute.Int("git_ctx.search.result_count", len(safeHits)), attribute.String("git_ctx.search.mode", "source-query-api"))
-						return assembleSourceQueryResults(name, sourceType, baseID, ref, safeHits), nil
-					}
-				}
-			}
+		if sourceErr != nil {
+			return nil
+		}
+		querySearcher, ok := adapter.(source.QuerySearcher)
+		if !ok {
+			return nil
+		}
+		remoteHits, queryErr := querySearcher.SearchQuery(ctx, source.RepositoryRef{ProjectKey: projectKey, Slug: repositorySlug}, ref, NormalizeSourceQuery(query), cfg.FinalK)
+		if queryErr != nil || len(remoteHits) == 0 {
+			return nil
+		}
+		return s.safeSourceHits(ctx, repoID, ref, remoteHits, cfg.FinalK)
+	}
+	if cfg.SourceQuerySearch {
+		if safeHits := remoteDocuments(); len(safeHits) > 0 {
+			span.SetAttributes(attribute.Int("git_ctx.search.result_count", len(safeHits)), attribute.String("git_ctx.search.mode", "source-query-api"))
+			return assembleSourceQueryResults(name, sourceType, baseID, projectKey+"/"+repositorySlug, ref, safeHits, "source-query-api"), nil
 		}
 	}
 	keywordScores := map[string]float64{}
@@ -1618,7 +1664,14 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 	}
 	if len(hits) == 0 {
 		span.SetAttributes(attribute.Int("git_ctx.search.result_count", 0))
-		return fmt.Sprintf("No indexed documentation matched the query in %s at %s. Try another term or version.", name, ref), nil
+		// Failover: an empty index is normal while a repository is still being
+		// embedded, and a client that only ever hears "not indexed yet" cannot do
+		// its job. Ask the source code search API before giving up.
+		if safeHits := remoteDocuments(); len(safeHits) > 0 {
+			span.SetAttributes(attribute.Int("git_ctx.search.result_count", len(safeHits)), attribute.String("git_ctx.search.mode", "source-query-failover"))
+			return assembleSourceQueryResults(name, sourceType, baseID, projectKey+"/"+repositorySlug, ref, safeHits, "source-query-failover"), nil
+		}
+		return fmt.Sprintf("No indexed documentation matched the query in %s at %s, and the %s code search API returned nothing for it. The repository may still be indexing; try `search-code` with the same term, another term, or another version.", name, ref, sourceType), nil
 	}
 	span.SetAttributes(attribute.Int("git_ctx.search.result_count", len(hits)))
 	var b strings.Builder
@@ -1703,9 +1756,16 @@ AND line_start<=? AND line_end>=? ORDER BY line_start LIMIT 2`),
 	}
 	return out
 }
-func assembleSourceQueryResults(name, sourceType, baseID, ref string, hits []source.QueryResult) string {
+
+// assembleSourceQueryResults renders remote code search hits. location is the
+// source-side `project/repository` path so the citation matches the one used for
+// indexed content instead of repeating the library ID prefix.
+func assembleSourceQueryResults(name, sourceType, baseID, location, ref string, hits []source.QueryResult, mode string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# %s\n\n", name)
+	fmt.Fprintf(&b, "# %s (`%s`)\n\n", name, baseID)
+	if mode == "source-query-failover" {
+		fmt.Fprintf(&b, "> Served live from the %s code search API because ref `%s` has no local index yet. The repository may still be indexing; line ranges come from the remote match.\n\n", sourceType, ref)
+	}
 	for _, hit := range hits {
 		commit := hit.CommitID
 		if commit == "" {
@@ -1718,7 +1778,7 @@ func assembleSourceQueryResults(name, sourceType, baseID, ref string, hits []sou
 		if snippet == "" {
 			snippet = "Matched by the repository source query API."
 		}
-		fmt.Fprintf(&b, "## %s\n\n%s\n\nSource: `%s://%s@%s/%s#L%d-L%d`\n\n", hit.Path, snippet, sourceType, strings.TrimPrefix(baseID, "/"), commit, hit.Path, max(1, hit.LineStart), max(max(1, hit.LineStart), hit.LineEnd))
+		fmt.Fprintf(&b, "## %s\n\n%s\n\nSource: `%s://%s@%s/%s#L%d-L%d`\n\n", hit.Path, snippet, sourceType, location, commit, hit.Path, max(1, hit.LineStart), max(max(1, hit.LineStart), hit.LineEnd))
 	}
 	return b.String()
 }
