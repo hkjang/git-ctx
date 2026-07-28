@@ -34,6 +34,9 @@ func fixture(t *testing.T) *Server {
 	must(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('c1','r1','main','4fa21bd','docs/gpu.md',20,30,'GPU metrics','document','Use DCGM exporter for Pod GPU metrics.','h1')`)
 	must(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('c2','r1','main','4fa21bd','service.go',20,30,'Service.GetGPU','code','func (s *Service) GetGPU() error { return nil }','h2')`)
 	must(`INSERT INTO code_symbols(id,repository_id,ref_name,commit_id,file_path,name,qualified_name,symbol_kind,language,signature,documentation,line_start,line_end,content_hash) VALUES('s1','r1','main','4fa21bd','service.go','GetGPU','Service.GetGPU','method','go','func (s *Service) GetGPU() error','Returns GPU metrics.',20,30,'sh1')`)
+	must(`INSERT INTO code_symbols(id,repository_id,ref_name,commit_id,file_path,name,qualified_name,symbol_kind,language,signature,documentation,line_start,line_end,content_hash) VALUES('s2','r1','release','5ba31ce','service.go','GetGPU','Service.GetGPU','method','go','func (s *Service) GetGPU(ctx context.Context) error','Returns GPU metrics.',20,31,'sh2')`)
+	must(`INSERT INTO code_symbols(id,repository_id,ref_name,commit_id,file_path,name,qualified_name,symbol_kind,language,signature,documentation,line_start,line_end,content_hash) VALUES('s3','r1','release','5ba31ce','handler.go','HandleGPU','HandleGPU','function','go','func HandleGPU() error','Handles GPU requests.',10,15,'sh3')`)
+	must(`INSERT INTO code_dependencies(id,repository_id,ref_name,commit_id,file_path,from_symbol,target,dependency_kind,line_number) VALUES('d1','r1','release','5ba31ce','handler.go','HandleGPU','Service.GetGPU','call',12)`)
 	must(`INSERT INTO repository_maps(repository_id,ref_name,commit_id,summary_json) VALUES('r1','main','4fa21bd','{"languages":{"go":1},"symbols":{"method":1},"directories":["docs"],"keyFiles":["README.md"],"entryPoints":["service.go:Service.GetGPU"]}')`)
 	return New(search.New(s), s)
 }
@@ -101,7 +104,7 @@ func TestToolsListExtendedAndStrictCompatibility(t *testing.T) {
 	s := fixture(t)
 	out := call(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
 	tools := out["result"].(map[string]any)["tools"].([]any)
-	if len(tools) != 7 {
+	if len(tools) != 10 {
 		t.Fatalf("got %d tools", len(tools))
 	}
 	if tools[0].(map[string]any)["name"] != "resolve-library-id" || tools[1].(map[string]any)["name"] != "query-docs" {
@@ -131,6 +134,25 @@ func TestRepositoryMapAndSymbolTools(t *testing.T) {
 	text = contextResult["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
 	if !strings.Contains(text, "Returns GPU metrics") || !strings.Contains(text, "func (s *Service) GetGPU") {
 		t.Fatalf("symbol context=%s", text)
+	}
+}
+
+func TestDependencyAndChangeAnalysisTools(t *testing.T) {
+	s := fixture(t)
+	traced := call(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"trace-dependencies","arguments":{"libraryId":"/kcb/clustara","ref":"release","symbol":"Service.GetGPU"}}}`)
+	text := traced["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "HandleGPU") || !strings.Contains(text, "--call-->") {
+		t.Fatalf("dependency trace=%s", text)
+	}
+	compared := call(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"compare-refs","arguments":{"libraryId":"/kcb/clustara","baseRef":"main","headRef":"release"}}}`)
+	text = compared["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "MODIFIED `Service.GetGPU`") || !strings.Contains(text, "ADDED `HandleGPU`") {
+		t.Fatalf("comparison=%s", text)
+	}
+	impact := call(t, s, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get-change-impact","arguments":{"libraryId":"/kcb/clustara","baseRef":"main","headRef":"release"}}}`)
+	text = impact["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "Potentially Affected") || !strings.Contains(text, "HandleGPU") {
+		t.Fatalf("impact=%s", text)
 	}
 }
 

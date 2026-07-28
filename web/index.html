@@ -98,6 +98,8 @@
             <dd>저장소 언어·구조·진입점과 주요 설정 파일 조회</dd>
             <dt>find-symbol / get-symbol-context</dt>
             <dd>함수·메서드·클래스·인터페이스 검색과 정의 문맥 조회</dd>
+            <dt>trace-dependencies / compare-refs / get-change-impact</dt>
+            <dd>의존 관계 추적, branch·tag 비교와 변경 영향 분석</dd>
           </dl>
         </article>
       </section>
@@ -145,6 +147,15 @@
             ><label
               ><input type="checkbox" name="scope" value="get-symbol-context" checked />
               get-symbol-context</label
+            ><label
+              ><input type="checkbox" name="scope" value="trace-dependencies" checked />
+              trace-dependencies</label
+            ><label
+              ><input type="checkbox" name="scope" value="compare-refs" checked />
+              compare-refs</label
+            ><label
+              ><input type="checkbox" name="scope" value="get-change-impact" checked />
+              get-change-impact</label
             >
           </fieldset>
           <fieldset id="admin-key-scopes" hidden>
@@ -203,6 +214,24 @@
               <label>심볼<input name="query" required placeholder="Service.GetGPU" /></label>
               <label>종류<input name="kind" placeholder="method" /></label>
               <button type="submit">심볼 검색</button>
+            </form>
+          </article>
+          <article>
+            <h3>Dependency Trace</h3>
+            <form id="dependency-form" class="form-row">
+              <label>Library ID<input name="libraryId" required placeholder="/kcb/clustara" /></label>
+              <label>Ref<input name="ref" placeholder="main" /></label>
+              <label>심볼 또는 모듈<input name="symbol" required placeholder="Service.GetGPU" /></label>
+              <button type="submit">의존성 추적</button>
+            </form>
+          </article>
+          <article>
+            <h3>Change Impact</h3>
+            <form id="change-impact-form" class="form-row">
+              <label>Library ID<input name="libraryId" required placeholder="/kcb/clustara" /></label>
+              <label>기준 Ref<input name="baseRef" required placeholder="main" /></label>
+              <label>비교 Ref<input name="headRef" required placeholder="release/v1" /></label>
+              <button type="submit">변경 영향 분석</button>
             </form>
           </article>
         </div>

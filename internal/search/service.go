@@ -97,6 +97,25 @@ type RepositoryMap struct {
 	LibraryID, Ref, CommitID, SummaryJSON string
 }
 
+type DependencyResult struct {
+	LibraryID, Ref, CommitID, FilePath, FromSymbol, Target, Kind string
+	LineNumber                                                   int
+}
+
+type RefChange struct {
+	Type, Name, Kind, FilePath, BeforeSignature, AfterSignature string
+}
+
+type RefComparison struct {
+	LibraryID, BaseRef, HeadRef string
+	Changes                     []RefChange
+}
+
+type ChangeImpact struct {
+	Comparison RefComparison
+	Dependents []DependencyResult
+}
+
 func (s *Service) RepositoryMap(ctx context.Context, principals []string, libraryID, requestedRef string) (RepositoryMap, error) {
 	baseID, version, ok := splitLibraryID(libraryID)
 	if !ok || len(principals) == 0 {
@@ -220,6 +239,159 @@ func (s *Service) SymbolContext(ctx context.Context, principals []string, librar
 	rows.Close()
 	selected.Content = strings.Join(contents, "\n\n")
 	return selected, nil
+}
+
+func (s *Service) TraceDependencies(ctx context.Context, principals []string, libraryID, ref, symbol string, limit int) ([]DependencyResult, error) {
+	symbol = strings.TrimSpace(symbol)
+	if symbol == "" {
+		return nil, errors.New("symbol is required")
+	}
+	repositoryID, baseID, selectedRef, err := s.authorizedRepository(ctx, principals, libraryID, ref)
+	if err != nil {
+		return nil, err
+	}
+	if limit < 1 || limit > 200 {
+		limit = 50
+	}
+	like := "%" + symbol + "%"
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT commit_id,file_path,from_symbol,target,dependency_kind,line_number
+FROM code_dependencies WHERE repository_id=? AND ref_name=? AND
+(LOWER(from_symbol) LIKE LOWER(?) OR LOWER(target) LIKE LOWER(?))
+ORDER BY CASE WHEN LOWER(from_symbol)=LOWER(?) OR LOWER(target)=LOWER(?) THEN 0 ELSE 1 END,file_path,line_number LIMIT ?`),
+		repositoryID, selectedRef, like, like, symbol, symbol, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DependencyResult
+	for rows.Next() {
+		item := DependencyResult{LibraryID: baseID, Ref: selectedRef}
+		if err = rows.Scan(&item.CommitID, &item.FilePath, &item.FromSymbol, &item.Target, &item.Kind, &item.LineNumber); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Service) CompareRefs(ctx context.Context, principals []string, libraryID, baseRef, headRef string) (RefComparison, error) {
+	baseRef, headRef = strings.TrimSpace(baseRef), strings.TrimSpace(headRef)
+	if baseRef == "" || headRef == "" || baseRef == headRef {
+		return RefComparison{}, errors.New("distinct baseRef and headRef are required")
+	}
+	repositoryID, baseID, _, err := s.authorizedRepository(ctx, principals, libraryID, baseRef)
+	if err != nil {
+		return RefComparison{}, err
+	}
+	load := func(ref string) (map[string]SymbolResult, error) {
+		rows, queryErr := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT commit_id,file_path,name,qualified_name,symbol_kind,language,signature,documentation,line_start,line_end
+FROM code_symbols WHERE repository_id=? AND ref_name=? ORDER BY qualified_name,file_path,line_start`), repositoryID, ref)
+		if queryErr != nil {
+			return nil, queryErr
+		}
+		defer rows.Close()
+		items := map[string]SymbolResult{}
+		for rows.Next() {
+			var item SymbolResult
+			item.LibraryID, item.Ref = baseID, ref
+			if queryErr = rows.Scan(&item.CommitID, &item.FilePath, &item.Name, &item.QualifiedName, &item.Kind, &item.Language, &item.Signature, &item.Documentation, &item.LineStart, &item.LineEnd); queryErr != nil {
+				return nil, queryErr
+			}
+			items[item.QualifiedName+"\x00"+item.Kind+"\x00"+item.FilePath] = item
+		}
+		return items, rows.Err()
+	}
+	before, err := load(baseRef)
+	if err != nil {
+		return RefComparison{}, err
+	}
+	after, err := load(headRef)
+	if err != nil {
+		return RefComparison{}, err
+	}
+	if len(before) == 0 && len(after) == 0 {
+		return RefComparison{}, errors.New("indexed refs are unavailable")
+	}
+	result := RefComparison{LibraryID: baseID, BaseRef: baseRef, HeadRef: headRef}
+	for key, old := range before {
+		current, exists := after[key]
+		if !exists {
+			result.Changes = append(result.Changes, RefChange{Type: "removed", Name: old.QualifiedName, Kind: old.Kind, FilePath: old.FilePath, BeforeSignature: old.Signature})
+		} else if old.ContentHashKey() != current.ContentHashKey() {
+			result.Changes = append(result.Changes, RefChange{Type: "modified", Name: current.QualifiedName, Kind: current.Kind, FilePath: current.FilePath, BeforeSignature: old.Signature, AfterSignature: current.Signature})
+		}
+	}
+	for key, current := range after {
+		if _, exists := before[key]; !exists {
+			result.Changes = append(result.Changes, RefChange{Type: "added", Name: current.QualifiedName, Kind: current.Kind, FilePath: current.FilePath, AfterSignature: current.Signature})
+		}
+	}
+	sort.Slice(result.Changes, func(i, j int) bool {
+		if result.Changes[i].FilePath == result.Changes[j].FilePath {
+			return result.Changes[i].Name < result.Changes[j].Name
+		}
+		return result.Changes[i].FilePath < result.Changes[j].FilePath
+	})
+	return result, nil
+}
+
+func (s SymbolResult) ContentHashKey() string {
+	return s.Signature + "\x00" + s.Documentation + "\x00" + fmt.Sprint(s.LineStart) + "\x00" + fmt.Sprint(s.LineEnd)
+}
+
+func (s *Service) ChangeImpact(ctx context.Context, principals []string, libraryID, baseRef, headRef string, limit int) (ChangeImpact, error) {
+	comparison, err := s.CompareRefs(ctx, principals, libraryID, baseRef, headRef)
+	if err != nil {
+		return ChangeImpact{}, err
+	}
+	if limit < 1 || limit > 200 {
+		limit = 100
+	}
+	seen := map[string]bool{}
+	var dependents []DependencyResult
+	for _, change := range comparison.Changes {
+		if len(dependents) >= limit {
+			break
+		}
+		results, traceErr := s.TraceDependencies(ctx, principals, libraryID, headRef, change.Name, limit-len(dependents))
+		if traceErr != nil {
+			return ChangeImpact{}, traceErr
+		}
+		for _, item := range results {
+			key := item.FilePath + "\x00" + item.FromSymbol + "\x00" + item.Target + "\x00" + fmt.Sprint(item.LineNumber)
+			if !seen[key] {
+				seen[key] = true
+				dependents = append(dependents, item)
+			}
+		}
+	}
+	return ChangeImpact{Comparison: comparison, Dependents: dependents}, nil
+}
+
+func (s *Service) authorizedRepository(ctx context.Context, principals []string, libraryID, requestedRef string) (repositoryID, baseID, ref string, err error) {
+	baseID, version, ok := splitLibraryID(libraryID)
+	if !ok || len(principals) == 0 {
+		return "", "", "", errors.New("library is unavailable or access is denied")
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(principals)), ",")
+	args := []any{baseID}
+	for _, principal := range principals {
+		args = append(args, principal)
+	}
+	var defaultRef string
+	err = s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT r.id,r.default_branch FROM repositories r JOIN repository_permissions p ON p.repository_id=r.id
+WHERE r.library_id=? AND r.enabled=1 AND (p.principal IN (`+placeholders+`) OR p.principal='*') LIMIT 1`), args...).Scan(&repositoryID, &defaultRef)
+	if err != nil {
+		return "", "", "", errors.New("library is unavailable or access is denied")
+	}
+	ref = strings.TrimSpace(requestedRef)
+	if ref == "" {
+		ref = version
+	}
+	if ref == "" {
+		ref = defaultRef
+	}
+	return repositoryID, baseID, ref, nil
 }
 
 func splitLibraryID(libraryID string) (string, string, bool) {

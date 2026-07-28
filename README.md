@@ -11,6 +11,8 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - 관리자 MCP 키 전용 `get-platform-status`, `list-index-jobs`, `reindex-repository`
 - Go AST와 Java·TypeScript·Python·SQL 구조 분석 기반 `find-symbol`, `get-symbol-context`
 - 언어·디렉터리·주요 파일·진입점을 요약하는 ACL 기반 `get-repository-map`
+- import·호출·데이터 관계를 색인하는 `trace-dependencies`
+- 두 ref의 심볼 변경과 의존 코드를 연결하는 `compare-refs`, `get-change-impact`
 - 검색 후보 단계의 저장소 ACL 적용과 브랜치·태그별 조회
 - 사용자 API 키 생성·목록·중지·폐기 및 HMAC 기반 비가역 저장
 - SQLite와 PostgreSQL 공통 스키마

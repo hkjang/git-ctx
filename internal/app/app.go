@@ -360,6 +360,9 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/tools/repository-map/test", a.authenticate(http.HandlerFunc(a.testRepositoryMap)))
 	a.mux.Handle("POST /api/v1/tools/symbols/test", a.authenticate(http.HandlerFunc(a.testSymbols)))
 	a.mux.Handle("POST /api/v1/tools/symbol-context/test", a.authenticate(http.HandlerFunc(a.testSymbolContext)))
+	a.mux.Handle("POST /api/v1/tools/dependencies/test", a.authenticate(http.HandlerFunc(a.testDependencies)))
+	a.mux.Handle("POST /api/v1/tools/compare-refs/test", a.authenticate(http.HandlerFunc(a.testCompareRefs)))
+	a.mux.Handle("POST /api/v1/tools/change-impact/test", a.authenticate(http.HandlerFunc(a.testChangeImpact)))
 	a.mux.Handle("GET /api/v1/admin/settings", a.admin(http.HandlerFunc(a.listSettings)))
 	a.mux.Handle("GET /api/v1/admin/settings/{category}", a.settingsAuthorize(http.HandlerFunc(a.getSetting)))
 	a.mux.Handle("DELETE /api/v1/admin/settings/{category}", a.settingsAuthorize(http.HandlerFunc(a.deleteSetting)))
@@ -1239,6 +1242,79 @@ func (a *App) testSymbolContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	item, err := a.search.SymbolContext(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.LibraryID, in.Ref, in.Symbol)
+	if err != nil {
+		problem(w, 400, "search_failed", err.Error())
+		return
+	}
+	jsonOut(w, 200, item)
+}
+func (a *App) testDependencies(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	if p.KeyID != "" && !stringContains(p.Scopes, "trace-dependencies") {
+		problem(w, 403, "forbidden", "API key is not allowed to call trace-dependencies")
+		return
+	}
+	var in struct {
+		LibraryID string `json:"libraryId"`
+		Ref       string `json:"ref"`
+		Symbol    string `json:"symbol"`
+		Limit     int    `json:"limit"`
+	}
+	if decode(r, &in) != nil || in.LibraryID == "" || in.Symbol == "" {
+		problem(w, 400, "invalid_request", "libraryId and symbol are required")
+		return
+	}
+	if p.KeyID != "" && !repositoryAllowed(baseLibraryID(in.LibraryID), p.AllowedRepositories) {
+		problem(w, 403, "forbidden", "Library is unavailable or access is denied")
+		return
+	}
+	items, err := a.search.TraceDependencies(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.LibraryID, in.Ref, in.Symbol, in.Limit)
+	if err != nil {
+		problem(w, 400, "search_failed", err.Error())
+		return
+	}
+	jsonOut(w, 200, map[string]any{"dependencies": items})
+}
+func (a *App) testCompareRefs(w http.ResponseWriter, r *http.Request) {
+	a.refAnalysis(w, r, false)
+}
+func (a *App) testChangeImpact(w http.ResponseWriter, r *http.Request) {
+	a.refAnalysis(w, r, true)
+}
+func (a *App) refAnalysis(w http.ResponseWriter, r *http.Request, impact bool) {
+	p, _ := auth.FromContext(r.Context())
+	scope := "compare-refs"
+	if impact {
+		scope = "get-change-impact"
+	}
+	if p.KeyID != "" && !stringContains(p.Scopes, scope) {
+		problem(w, 403, "forbidden", "API key is not allowed to call "+scope)
+		return
+	}
+	var in struct {
+		LibraryID string `json:"libraryId"`
+		BaseRef   string `json:"baseRef"`
+		HeadRef   string `json:"headRef"`
+		Limit     int    `json:"limit"`
+	}
+	if decode(r, &in) != nil || in.LibraryID == "" || in.BaseRef == "" || in.HeadRef == "" {
+		problem(w, 400, "invalid_request", "libraryId, baseRef and headRef are required")
+		return
+	}
+	if p.KeyID != "" && !repositoryAllowed(baseLibraryID(in.LibraryID), p.AllowedRepositories) {
+		problem(w, 403, "forbidden", "Library is unavailable or access is denied")
+		return
+	}
+	if impact {
+		item, err := a.search.ChangeImpact(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.LibraryID, in.BaseRef, in.HeadRef, in.Limit)
+		if err != nil {
+			problem(w, 400, "search_failed", err.Error())
+			return
+		}
+		jsonOut(w, 200, item)
+		return
+	}
+	item, err := a.search.CompareRefs(r.Context(), aclPrincipals(p.ACLPrincipal, p.ACLPrincipals), in.LibraryID, in.BaseRef, in.HeadRef)
 	if err != nil {
 		problem(w, 400, "search_failed", err.Error())
 		return

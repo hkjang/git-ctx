@@ -298,6 +298,23 @@ func Catalog() []map[string]any {
 				"libraryId": map[string]string{"type": "string"},
 				"symbol":    map[string]string{"type": "string", "description": "Exact or partial qualified symbol name"},
 				"ref":       map[string]string{"type": "string"}}}},
+		{"name": "trace-dependencies", "description": "Traces imports, calls, and data dependencies for a symbol or module.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId", "symbol"}, "properties": map[string]any{
+				"libraryId": map[string]string{"type": "string"},
+				"symbol":    map[string]string{"type": "string"},
+				"ref":       map[string]string{"type": "string"},
+				"limit":     map[string]any{"type": "integer", "minimum": 1, "maximum": 200}}}},
+		{"name": "compare-refs", "description": "Compares indexed symbols between two branches or tags.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId", "baseRef", "headRef"}, "properties": map[string]any{
+				"libraryId": map[string]string{"type": "string"},
+				"baseRef":   map[string]string{"type": "string"},
+				"headRef":   map[string]string{"type": "string"}}}},
+		{"name": "get-change-impact", "description": "Combines ref differences with incoming source dependencies to identify affected code.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId", "baseRef", "headRef"}, "properties": map[string]any{
+				"libraryId": map[string]string{"type": "string"},
+				"baseRef":   map[string]string{"type": "string"},
+				"headRef":   map[string]string{"type": "string"},
+				"limit":     map[string]any{"type": "integer", "minimum": 1, "maximum": 200}}}},
 		{"name": "get-platform-status", "description": "Returns administrative MCP, source, index, and database status. Requires an administrator MCP API key.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}}},
 		{"name": "list-index-jobs", "description": "Lists recent indexing jobs for source administrators and operators using an MCP API key.",
@@ -341,7 +358,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 	text := ""
 	var err error
 	libraryID := ""
-	if params.Name == "query-docs" || params.Name == "reindex-repository" || params.Name == "get-repository-map" || params.Name == "get-symbol-context" {
+	if params.Name == "query-docs" || params.Name == "reindex-repository" || params.Name == "get-repository-map" || params.Name == "get-symbol-context" || params.Name == "trace-dependencies" || params.Name == "compare-refs" || params.Name == "get-change-impact" {
 		libraryID = stringArg(params.Arguments, "libraryId")
 	}
 	cacheKey := s.cacheKey(r.Context(), p, params.Name, params.Arguments)
@@ -435,6 +452,36 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 			item, err = s.search.SymbolContext(r.Context(), principalACLs(p), libraryID, stringArg(params.Arguments, "ref"), stringArg(params.Arguments, "symbol"))
 			if err == nil {
 				text = formatSymbolContext(item)
+			}
+		}
+	case "trace-dependencies":
+		if p.KeyID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+			err = errors.New("library is unavailable or access is denied")
+		} else {
+			var items []search.DependencyResult
+			items, err = s.search.TraceDependencies(r.Context(), principalACLs(p), libraryID, stringArg(params.Arguments, "ref"), stringArg(params.Arguments, "symbol"), intArg(params.Arguments, "limit", 50))
+			if err == nil {
+				text = formatDependencies(items)
+			}
+		}
+	case "compare-refs":
+		if p.KeyID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+			err = errors.New("library is unavailable or access is denied")
+		} else {
+			var item search.RefComparison
+			item, err = s.search.CompareRefs(r.Context(), principalACLs(p), libraryID, stringArg(params.Arguments, "baseRef"), stringArg(params.Arguments, "headRef"))
+			if err == nil {
+				text = formatRefComparison(item)
+			}
+		}
+	case "get-change-impact":
+		if p.KeyID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+			err = errors.New("library is unavailable or access is denied")
+		} else {
+			var item search.ChangeImpact
+			item, err = s.search.ChangeImpact(r.Context(), principalACLs(p), libraryID, stringArg(params.Arguments, "baseRef"), stringArg(params.Arguments, "headRef"), intArg(params.Arguments, "limit", 100))
+			if err == nil {
+				text = formatChangeImpact(item)
 			}
 		}
 	case "get-platform-status":
@@ -761,6 +808,58 @@ func formatSymbols(items []search.SymbolResult) string {
 func formatSymbolContext(item search.SymbolResult) string {
 	return fmt.Sprintf("## %s\n\n- Kind: %s\n- Language: %s\n- Signature: `%s`\n- Source: bitcontext://%s@%s/%s#L%d-L%d\n\n%s\n\n```%s\n%s\n```\n",
 		item.QualifiedName, item.Kind, item.Language, item.Signature, item.LibraryID, item.CommitID, item.FilePath, item.LineStart, item.LineEnd, item.Documentation, item.Language, item.Content)
+}
+
+func formatDependencies(items []search.DependencyResult) string {
+	if len(items) == 0 {
+		return "No indexed dependencies matched the symbol or module."
+	}
+	var b strings.Builder
+	b.WriteString("## Dependency Trace\n")
+	for _, item := range items {
+		from := item.FromSymbol
+		if from == "" {
+			from = item.FilePath
+		}
+		fmt.Fprintf(&b, "\n- `%s` --%s--> `%s`\n  Source: bitcontext://%s@%s/%s#L%d\n", from, item.Kind, item.Target, item.LibraryID, item.CommitID, item.FilePath, item.LineNumber)
+	}
+	return b.String()
+}
+
+func formatRefComparison(item search.RefComparison) string {
+	if len(item.Changes) == 0 {
+		return fmt.Sprintf("## Ref Comparison\n\nNo indexed symbol changes between `%s` and `%s` in %s.", item.BaseRef, item.HeadRef, item.LibraryID)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Ref Comparison\n\n- Library ID: %s\n- Base: %s\n- Head: %s\n", item.LibraryID, item.BaseRef, item.HeadRef)
+	for _, change := range item.Changes {
+		fmt.Fprintf(&b, "\n- %s `%s` (%s) · %s\n", strings.ToUpper(change.Type), change.Name, change.Kind, change.FilePath)
+		if change.BeforeSignature != "" {
+			fmt.Fprintf(&b, "  Before: `%s`\n", change.BeforeSignature)
+		}
+		if change.AfterSignature != "" {
+			fmt.Fprintf(&b, "  After: `%s`\n", change.AfterSignature)
+		}
+	}
+	return b.String()
+}
+
+func formatChangeImpact(item search.ChangeImpact) string {
+	var b strings.Builder
+	b.WriteString(formatRefComparison(item.Comparison))
+	b.WriteString("\n\n## Potentially Affected Dependencies\n")
+	if len(item.Dependents) == 0 {
+		b.WriteString("\nNo incoming indexed dependencies were found.")
+		return b.String()
+	}
+	for _, dependency := range item.Dependents {
+		from := dependency.FromSymbol
+		if from == "" {
+			from = dependency.FilePath
+		}
+		fmt.Fprintf(&b, "\n- `%s` depends on `%s` (%s)\n  Source: bitcontext://%s@%s/%s#L%d\n", from, dependency.Target, dependency.Kind, dependency.LibraryID, dependency.CommitID, dependency.FilePath, dependency.LineNumber)
+	}
+	return b.String()
 }
 
 func stringArg(m map[string]any, k string) string { v, _ := m[k].(string); return v }

@@ -323,11 +323,12 @@ func TestCodeSymbolsAndRepositoryMapFollowIncrementalChanges(t *testing.T) {
 	if err = idx.SyncRepository(ctx, src, "bitbucket", repo, []source.Reference{{Name: "main", LatestCommit: "c1"}}); err != nil {
 		t.Fatal(err)
 	}
-	var symbols, chunks int
+	var symbols, chunks, dependencies int
 	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM code_symbols WHERE repository_id='bitbucket:12'`).Scan(&symbols)
 	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id='bitbucket:12' AND file_path='main.go'`).Scan(&chunks)
-	if symbols != 2 || chunks != 2 {
-		t.Fatalf("symbols=%d AST chunks=%d", symbols, chunks)
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM code_dependencies WHERE repository_id='bitbucket:12' AND target='Run'`).Scan(&dependencies)
+	if symbols != 2 || chunks != 2 || dependencies != 1 {
+		t.Fatalf("symbols=%d AST chunks=%d dependencies=%d", symbols, chunks, dependencies)
 	}
 	var summary string
 	_ = s.DB.QueryRow(`SELECT summary_json FROM repository_maps WHERE repository_id='bitbucket:12' AND ref_name='main'`).Scan(&summary)
@@ -340,7 +341,8 @@ func TestCodeSymbolsAndRepositoryMapFollowIncrementalChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM code_symbols WHERE repository_id='bitbucket:12'`).Scan(&symbols)
-	if symbols != 1 {
-		t.Fatalf("removed symbol survived incremental activation: %d", symbols)
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM code_dependencies WHERE repository_id='bitbucket:12'`).Scan(&dependencies)
+	if symbols != 1 || dependencies != 0 {
+		t.Fatalf("removed code intelligence survived incremental activation: symbols=%d dependencies=%d", symbols, dependencies)
 	}
 }

@@ -402,6 +402,24 @@ function setupKnowledgeSearch() {
       output.textContent = error.message;
     }
   };
+  $("#dependency-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.currentTarget));
+    try {
+      output.textContent = JSON.stringify(await api("/api/v1/tools/dependencies/test", { method: "POST", body: JSON.stringify({ ...data, limit: 100 }) }), null, 2);
+    } catch (error) {
+      output.textContent = error.message;
+    }
+  };
+  $("#change-impact-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.currentTarget));
+    try {
+      output.textContent = JSON.stringify(await api("/api/v1/tools/change-impact/test", { method: "POST", body: JSON.stringify({ ...data, limit: 100 }) }), null, 2);
+    } catch (error) {
+      output.textContent = error.message;
+    }
+  };
 }
 function configureMCPKeyScopes(roles) {
   const platform = roles.has("platform-admin");

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.14.0
+  version: 0.15.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -143,6 +143,24 @@ paths:
       {
         summary: Read a symbol definition documentation and source context,
         responses: { "200": { description: Symbol context } },
+      }
+  /api/v1/tools/dependencies/test:
+    post:
+      {
+        summary: Trace ACL-filtered imports calls and data dependencies,
+        responses: { "200": { description: Dependency edges } },
+      }
+  /api/v1/tools/compare-refs/test:
+    post:
+      {
+        summary: Compare indexed symbols between two refs,
+        responses: { "200": { description: Added modified and removed symbols } },
+      }
+  /api/v1/tools/change-impact/test:
+    post:
+      {
+        summary: Analyze ref changes and potentially affected dependents,
+        responses: { "200": { description: Change impact analysis } },
       }
   /api/v1/admin/settings:
     get:
@@ -485,6 +503,9 @@ components:
                 - get-repository-map
                 - find-symbol
                 - get-symbol-context
+                - trace-dependencies
+                - compare-refs
+                - get-change-impact
                 - get-platform-status
                 - list-index-jobs
                 - reindex-repository

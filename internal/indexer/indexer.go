@@ -131,6 +131,7 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 		defer cancel()
 		_, _ = i.store.DB.ExecContext(cleanupCtx, i.store.Rebind(`DELETE FROM document_chunks_staging WHERE generation_id=?`), generationID)
 		_, _ = i.store.DB.ExecContext(cleanupCtx, i.store.Rebind(`DELETE FROM code_symbols_staging WHERE generation_id=?`), generationID)
+		_, _ = i.store.DB.ExecContext(cleanupCtx, i.store.Rebind(`DELETE FROM code_dependencies_staging WHERE generation_id=?`), generationID)
 		if trackJob {
 			_, _ = i.store.DB.ExecContext(cleanupCtx, i.store.Rebind(`UPDATE index_jobs SET status='failed',error_message=?,completed_at=? WHERE id=?`), truncate(e.Error(), 1000), time.Now().UTC(), jobID)
 		}
@@ -247,6 +248,14 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 				return fail(e)
 			}
 		}
+		for _, dependency := range codeintel.ExtractDependencies(file.Path, safeContent) {
+			dependencyID := hash(repoID + "\x00" + ref.Name + "\x00" + file.Path + "\x00" + dependency.FromSymbol + "\x00" + dependency.Target + "\x00" + dependency.Kind + "\x00" + fmt.Sprint(dependency.Line))
+			_, e = i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO code_dependencies_staging(generation_id,id,repository_id,ref_name,commit_id,file_path,from_symbol,target,dependency_kind,line_number) VALUES(?,?,?,?,?,?,?,?,?,?)`),
+				generationID, dependencyID, repoID, ref.Name, ref.LatestCommit, filepath.ToSlash(file.Path), dependency.FromSymbol, dependency.Target, dependency.Kind, dependency.Line)
+			if e != nil {
+				return fail(e)
+			}
+		}
 		for _, chunk := range parse(file.Path, safeContent) {
 			id := hash(repoID + "\x00" + ref.Name + "\x00" + file.Path + "\x00" + fmt.Sprint(chunk.Start) + "\x00" + chunk.Content)
 			contentHash := hash(chunk.Content)
@@ -316,6 +325,10 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 				_ = tx.Rollback()
 				return fail(err)
 			}
+			if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM code_dependencies WHERE repository_id=? AND ref_name=? AND file_path=?`), repoID, ref.Name, path); err != nil {
+				_ = tx.Rollback()
+				return fail(err)
+			}
 		}
 	} else {
 		if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM document_chunks WHERE repository_id=? AND ref_name=?`), repoID, ref.Name); err != nil {
@@ -323,6 +336,10 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 			return fail(err)
 		}
 		if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM code_symbols WHERE repository_id=? AND ref_name=?`), repoID, ref.Name); err != nil {
+			_ = tx.Rollback()
+			return fail(err)
+		}
+		if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM code_dependencies WHERE repository_id=? AND ref_name=?`), repoID, ref.Name); err != nil {
 			_ = tx.Rollback()
 			return fail(err)
 		}
@@ -336,6 +353,12 @@ FROM document_chunks_staging WHERE generation_id=?`), generationID); err != nil 
 	if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO code_symbols(id,repository_id,ref_name,commit_id,file_path,name,qualified_name,symbol_kind,language,signature,documentation,line_start,line_end,content_hash,indexed_at)
 SELECT id,repository_id,ref_name,commit_id,file_path,name,qualified_name,symbol_kind,language,signature,documentation,line_start,line_end,content_hash,indexed_at
 FROM code_symbols_staging WHERE generation_id=?`), generationID); err != nil {
+		_ = tx.Rollback()
+		return fail(err)
+	}
+	if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO code_dependencies(id,repository_id,ref_name,commit_id,file_path,from_symbol,target,dependency_kind,line_number,indexed_at)
+SELECT id,repository_id,ref_name,commit_id,file_path,from_symbol,target,dependency_kind,line_number,indexed_at
+FROM code_dependencies_staging WHERE generation_id=?`), generationID); err != nil {
 		_ = tx.Rollback()
 		return fail(err)
 	}
@@ -353,11 +376,19 @@ FROM code_symbols_staging WHERE generation_id=?`), generationID); err != nil {
 		_ = tx.Rollback()
 		return fail(err)
 	}
+	if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM code_dependencies_staging WHERE generation_id=?`), generationID); err != nil {
+		_ = tx.Rollback()
+		return fail(err)
+	}
 	if _, err = tx.ExecContext(ctx, i.store.Rebind(`UPDATE document_chunks SET commit_id=?,indexed_at=? WHERE repository_id=? AND ref_name=?`), ref.LatestCommit, time.Now().UTC(), repoID, ref.Name); err != nil {
 		_ = tx.Rollback()
 		return fail(err)
 	}
 	if _, err = tx.ExecContext(ctx, i.store.Rebind(`UPDATE code_symbols SET commit_id=?,indexed_at=? WHERE repository_id=? AND ref_name=?`), ref.LatestCommit, time.Now().UTC(), repoID, ref.Name); err != nil {
+		_ = tx.Rollback()
+		return fail(err)
+	}
+	if _, err = tx.ExecContext(ctx, i.store.Rebind(`UPDATE code_dependencies SET commit_id=?,indexed_at=? WHERE repository_id=? AND ref_name=?`), ref.LatestCommit, time.Now().UTC(), repoID, ref.Name); err != nil {
 		_ = tx.Rollback()
 		return fail(err)
 	}
