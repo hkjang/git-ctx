@@ -2,12 +2,19 @@ package indexer
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"git-ctx/internal/source"
 	"git-ctx/internal/store"
 )
+
+type failingEmbedder struct{}
+
+func (failingEmbedder) Embed(context.Context, string) ([]float32, error) {
+	return nil, errors.New("model unavailable")
+}
 
 type fakeSource struct{}
 
@@ -100,5 +107,30 @@ func TestSyncRepositoryAppliesPolicyACLAndChunks(t *testing.T) {
 	var files int
 	if err = s.DB.QueryRow(`SELECT status,files_processed FROM index_jobs LIMIT 1`).Scan(&status, &files); err != nil || status != "completed" || files != 1 {
 		t.Fatalf("job=%s files=%d err=%v", status, files, err)
+	}
+}
+
+func TestFailedGenerationPreservesActiveChunksAndCleansStaging(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file::memory:?cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+	repo := source.Repository{ID: 7, ProjectKey: "KCB", Slug: "demo", Name: "Demo", DefaultBranch: "main"}
+	ref := []source.Reference{{Name: "main", LatestCommit: "abc123"}}
+	if err = New(s, DefaultPolicy()).SyncRepository(ctx, fakeSource{}, "bitbucket", repo, ref); err != nil {
+		t.Fatal(err)
+	}
+	var before int
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id='bitbucket:7'`).Scan(&before)
+	if err = NewWithEmbedder(s, DefaultPolicy(), failingEmbedder{}).SyncRepository(ctx, fakeSource{}, "bitbucket", repo, ref); err == nil {
+		t.Fatal("expected embedding failure")
+	}
+	var after, staged int
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id='bitbucket:7'`).Scan(&after)
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks_staging`).Scan(&staged)
+	if after != before || staged != 0 {
+		t.Fatalf("active chunks changed after failed generation: before=%d after=%d staged=%d", before, after, staged)
 	}
 }

@@ -144,6 +144,42 @@ func TestInitializeNegotiatesProtocolAndSessionLifecycle(t *testing.T) {
 	}
 }
 
+func TestSessionIsValidAcrossServerInstances(t *testing.T) {
+	first := fixture(t)
+	second := New(search.New(first.store), first.store)
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	first.ServeHTTP(rec, req)
+	sessionID := rec.Header().Get("Mcp-Session-Id")
+	if sessionID == "" {
+		t.Fatal("missing session")
+	}
+	req = httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":2,"method":"ping"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Mcp-Session-Id", sessionID)
+	rec = httptest.NewRecorder()
+	second.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second instance rejected shared session: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestACLChangeInvalidatesCachedSearch(t *testing.T) {
+	s := fixture(t)
+	_, _ = s.store.DB.Exec(`UPDATE mcp_tools SET cache_seconds=300 WHERE name='resolve-library-id'`)
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"resolve-library-id","arguments":{"libraryName":"clustara","query":"GPU"}}}`
+	first := call(t, s, body)
+	if !strings.Contains(first["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string), "/kcb/clustara") {
+		t.Fatal("fixture result missing")
+	}
+	_, _ = s.store.DB.Exec(`DELETE FROM repository_permissions WHERE repository_id='r1'`)
+	second := call(t, s, body)
+	if strings.Contains(second["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string), "/kcb/clustara") {
+		t.Fatal("revoked repository was returned from cache")
+	}
+}
+
 func TestStreamableHTTPGETKeepsSSEOpenUntilSessionDelete(t *testing.T) {
 	s := fixture(t)
 	httpServer := httptest.NewServer(s)

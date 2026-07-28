@@ -70,7 +70,9 @@ func (s *Scheduler) RunOnce(ctx context.Context) error {
 	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`UPDATE index_jobs SET status='pending',next_run_at=?,error_message='worker lease expired' WHERE status='running' AND started_at<?`), now, now.Add(-15*time.Minute))
 	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`DELETE FROM auth_flows WHERE expires_at<?`), now)
 	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`DELETE FROM user_sessions WHERE expires_at<?`), now)
+	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`DELETE FROM mcp_sessions WHERE expires_at<?`), now)
 	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`DELETE FROM admin_recovery_tokens WHERE expires_at<?`), now)
+	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`DELETE FROM document_chunks_staging WHERE indexed_at<?`), now.Add(-24*time.Hour))
 	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`DELETE FROM api_key_usage_buckets WHERE bucket_start<?`), now.Add(-48*time.Hour))
 	if s.retention != nil {
 		s.applyRetention(ctx, now, s.retention(ctx))

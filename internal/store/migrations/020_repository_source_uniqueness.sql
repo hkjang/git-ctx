@@ -1,0 +1,2 @@
+-- Applied by Store.Migrate because SQLite requires foreign-key enforcement to
+-- be disabled outside a transaction while rebuilding this legacy table.

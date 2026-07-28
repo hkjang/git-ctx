@@ -2824,7 +2824,7 @@ func (a *App) registerRepository(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := in.SourceType + ":" + fmt.Sprint(in.Repository.ID)
-	libraryID := indexer.LibraryID(in.Repository.ProjectKey, in.Repository.Slug)
+	libraryID := indexer.LibraryIDForSource(in.SourceType, in.Repository.ProjectKey, in.Repository.Slug)
 	settings, err := a.loadSettingMap(r.Context(), in.SourceType)
 	if err != nil {
 		problem(w, 400, "source_not_configured", "Source setting is required before repository registration")

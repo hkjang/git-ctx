@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS repositories (
   source_external_id TEXT NOT NULL DEFAULT '',
   library_id TEXT NOT NULL UNIQUE, default_branch TEXT NOT NULL DEFAULT 'main',
   reputation TEXT NOT NULL DEFAULT 'Medium', enabled INTEGER NOT NULL DEFAULT 1,
-  indexed_at TIMESTAMP, UNIQUE(project_key, slug)
+  indexed_at TIMESTAMP, UNIQUE(source_type, project_key, slug)
 );
 CREATE TABLE IF NOT EXISTS repository_permissions (
   repository_id TEXT NOT NULL REFERENCES repositories(id), principal TEXT NOT NULL,

@@ -50,6 +50,14 @@ func LibraryID(projectKey, slug string) string {
 	return "/" + normalize(projectKey) + "/" + normalize(slug)
 }
 
+func LibraryIDForSource(sourceType, projectKey, slug string) string {
+	project := normalize(projectKey)
+	if sourceType != "" && sourceType != "bitbucket" {
+		project = normalize(sourceType) + "~" + project
+	}
+	return "/" + project + "/" + normalize(slug)
+}
+
 func (i *Indexer) SyncRepository(ctx context.Context, adapter source.RepositorySource, sourceType string, repo source.Repository, refs []source.Reference) error {
 	return i.syncRepository(ctx, adapter, sourceType, repo, refs, true)
 }
@@ -64,7 +72,7 @@ func (i *Indexer) syncRepository(ctx context.Context, adapter source.RepositoryS
 		return errors.New("unsupported source type")
 	}
 	repoID := sourceType + ":" + fmt.Sprint(repo.ID)
-	libraryID := LibraryID(repo.ProjectKey, repo.Slug)
+	libraryID := LibraryIDForSource(sourceType, repo.ProjectKey, repo.Slug)
 	_, err := i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,enabled) VALUES(?,?,?,?,?,?,?,?,?,1) ON CONFLICT(id) DO UPDATE SET project_key=excluded.project_key,slug=excluded.slug,name=excluded.name,description=excluded.description,default_branch=excluded.default_branch,enabled=1`), repoID, repo.ProjectKey, repo.Slug, repo.Name, repo.Description, sourceType, fmt.Sprint(repo.ID), libraryID, repo.DefaultBranch)
 	if err != nil {
 		return err
@@ -107,6 +115,7 @@ func (i *Indexer) syncRepository(ctx context.Context, adapter source.RepositoryS
 }
 func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, repoID string, repo source.RepositoryRef, ref source.Reference, trackJob bool) error {
 	jobID := fmt.Sprintf("%d", time.Now().UnixNano())
+	generationID := repoID + ":" + ref.Name + ":" + jobID
 	if trackJob {
 		_, err := i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO index_jobs(id,repository_id,ref_name,kind,status,started_at,attempts) VALUES(?,?,?,'sync','running',?,1)`), jobID, repoID, ref.Name, time.Now().UTC())
 		if err != nil {
@@ -114,8 +123,11 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 		}
 	}
 	fail := func(e error) error {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = i.store.DB.ExecContext(cleanupCtx, i.store.Rebind(`DELETE FROM document_chunks_staging WHERE generation_id=?`), generationID)
 		if trackJob {
-			_, _ = i.store.DB.ExecContext(ctx, i.store.Rebind(`UPDATE index_jobs SET status='failed',error_message=?,completed_at=? WHERE id=?`), truncate(e.Error(), 1000), time.Now().UTC(), jobID)
+			_, _ = i.store.DB.ExecContext(cleanupCtx, i.store.Rebind(`UPDATE index_jobs SET status='failed',error_message=?,completed_at=? WHERE id=?`), truncate(e.Error(), 1000), time.Now().UTC(), jobID)
 		}
 		return e
 	}
@@ -123,14 +135,10 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 	if err != nil {
 		return fail(err)
 	}
-	tx, err := i.store.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return fail(err)
+	type securityEvent struct {
+		id, path, finding, action string
 	}
-	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM document_chunks WHERE repository_id=? AND ref_name=?`), repoID, ref.Name); err != nil {
-		return fail(err)
-	}
+	var securityEvents []securityEvent
 	processed := 0
 	for _, file := range files {
 		if !i.allowed(file) {
@@ -150,10 +158,7 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 				action = "blocked"
 			}
 			eventID := hash(repoID + "\x00" + ref.Name + "\x00" + file.Path + "\x00" + finding)
-			_, e = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO index_security_events(id,repository_id,ref_name,file_path,finding_type,action) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`), eventID, repoID, ref.Name, file.Path, finding, action)
-			if e != nil {
-				return fail(e)
-			}
+			securityEvents = append(securityEvents, securityEvent{id: eventID, path: file.Path, finding: finding, action: action})
 			if safeContent == "" {
 				continue
 			}
@@ -165,14 +170,40 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 				return fail(fmt.Errorf("embedding %s: %w", file.Path, embedErr))
 			}
 			vector := embedding.Encode(embedded)
-			_, e = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`), id, repoID, ref.Name, ref.LatestCommit, file.Path, chunk.Start, chunk.End, chunk.Heading, contentType(file.Path), chunk.Content, hash(chunk.Content), vector)
+			_, e = i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO document_chunks_staging(generation_id,id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`), generationID, id, repoID, ref.Name, ref.LatestCommit, file.Path, chunk.Start, chunk.End, chunk.Heading, contentType(file.Path), chunk.Content, hash(chunk.Content), vector)
 			if e != nil {
 				return fail(e)
 			}
 		}
 		processed++
 	}
+	tx, err := i.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fail(err)
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM document_chunks WHERE repository_id=? AND ref_name=?`), repoID, ref.Name); err != nil {
+		_ = tx.Rollback()
+		return fail(err)
+	}
+	if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding,indexed_at)
+SELECT id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding,indexed_at
+FROM document_chunks_staging WHERE generation_id=?`), generationID); err != nil {
+		_ = tx.Rollback()
+		return fail(err)
+	}
+	for _, event := range securityEvents {
+		if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO index_security_events(id,repository_id,ref_name,file_path,finding_type,action) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`), event.id, repoID, ref.Name, event.path, event.finding, event.action); err != nil {
+			_ = tx.Rollback()
+			return fail(err)
+		}
+	}
+	if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM document_chunks_staging WHERE generation_id=?`), generationID); err != nil {
+		_ = tx.Rollback()
+		return fail(err)
+	}
 	if err = tx.Commit(); err != nil {
+		_ = tx.Rollback()
 		return fail(err)
 	}
 	if trackJob {

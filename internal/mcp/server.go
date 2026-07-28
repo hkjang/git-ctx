@@ -3,11 +3,13 @@ package mcp
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -72,7 +74,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := r.Header.Get("Mcp-Session-Id")
-	if sessionID != "" && !s.validSession(sessionID) {
+	if sessionID != "" && !s.validSession(r.Context(), sessionID) {
 		http.Error(w, "MCP session not found", http.StatusNotFound)
 		return
 	}
@@ -85,7 +87,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Accept must include text/event-stream", http.StatusNotAcceptable)
 			return
 		}
-		done, ok := s.sessionDone(sessionID)
+		done, ok := s.sessionDone(r.Context(), sessionID)
 		if !ok {
 			http.Error(w, "MCP session not found", http.StatusNotFound)
 			return
@@ -111,6 +113,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			case <-done:
 				return
 			case <-ticker.C:
+				if !s.validSession(r.Context(), sessionID) {
+					return
+				}
 				if _, err := w.Write([]byte(": keepalive\n\n")); err != nil {
 					return
 				}
@@ -120,7 +125,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodDelete {
 		if sessionID != "" {
-			s.closeSession(sessionID)
+			s.closeSession(r.Context(), sessionID)
 		}
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -152,7 +157,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if params.ProtocolVersion == "2024-11-05" {
 			protocol = params.ProtocolVersion
 		}
-		sessionID = s.newSession()
+		var err error
+		sessionID, err = s.newSession(r.Context())
+		if err != nil {
+			write(w, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32603, Message: "Unable to create MCP session"}})
+			return
+		}
 		w.Header().Set("Mcp-Session-Id", sessionID)
 		write(w, response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{
 			"protocolVersion": protocol, "capabilities": map[string]any{"tools": map[string]any{"listChanged": false}},
@@ -179,60 +189,74 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		write(w, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32601, Message: "Method not found"}})
 	}
 }
-func (s *Server) newSession() string {
+func (s *Server) newSession(ctx context.Context) (string, error) {
 	raw := make([]byte, 24)
-	_, _ = rand.Read(raw)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
 	id := hex.EncodeToString(raw)
+	now := time.Now().UTC()
+	expires := now.Add(30 * time.Minute)
+	if _, err := s.store.DB.ExecContext(ctx, s.store.Rebind(`INSERT INTO mcp_sessions(id_hash,expires_at,last_seen_at) VALUES(?,?,?)`), mcpSessionHash(id), expires, now); err != nil {
+		return "", err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	now := time.Now()
 	for key, current := range s.sessions {
 		if now.After(current.expires) {
 			close(current.done)
 			delete(s.sessions, key)
 		}
 	}
-	s.sessions[id] = &session{expires: now.Add(30 * time.Minute), done: make(chan struct{})}
-	return id
+	s.sessions[id] = &session{expires: expires, done: make(chan struct{})}
+	return id, nil
 }
-func (s *Server) validSession(id string) bool {
+func (s *Server) validSession(ctx context.Context, id string) bool {
+	now := time.Now().UTC()
+	expires := now.Add(30 * time.Minute)
+	result, err := s.store.DB.ExecContext(ctx, s.store.Rebind(`UPDATE mcp_sessions SET expires_at=?,last_seen_at=? WHERE id_hash=? AND expires_at>?`), expires, now, mcpSessionHash(id), now)
+	if err != nil {
+		return false
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected != 1 {
+		return false
+	}
+	s.mu.Lock()
+	if current, ok := s.sessions[id]; ok {
+		current.expires = expires
+	}
+	s.mu.Unlock()
+	return true
+}
+
+func (s *Server) sessionDone(ctx context.Context, id string) (<-chan struct{}, bool) {
+	if !s.validSession(ctx, id) {
+		return nil, false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	current, ok := s.sessions[id]
 	if !ok {
-		return false
+		current = &session{expires: time.Now().UTC().Add(30 * time.Minute), done: make(chan struct{})}
+		s.sessions[id] = current
 	}
-	if time.Now().After(current.expires) {
-		close(current.done)
-		delete(s.sessions, id)
-		return false
-	}
-	current.expires = time.Now().Add(30 * time.Minute)
-	return true
-}
-
-func (s *Server) sessionDone(id string) (<-chan struct{}, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	current, ok := s.sessions[id]
-	if !ok || time.Now().After(current.expires) {
-		if ok {
-			close(current.done)
-			delete(s.sessions, id)
-		}
-		return nil, false
-	}
-	current.expires = time.Now().Add(30 * time.Minute)
 	return current.done, true
 }
 
-func (s *Server) closeSession(id string) {
+func (s *Server) closeSession(ctx context.Context, id string) {
+	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`DELETE FROM mcp_sessions WHERE id_hash=?`), mcpSessionHash(id))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if current, ok := s.sessions[id]; ok {
 		close(current.done)
 		delete(s.sessions, id)
 	}
+}
+
+func mcpSessionHash(id string) []byte {
+	sum := sha256.Sum256([]byte(id))
+	return sum[:]
 }
 
 func Catalog() []map[string]any {
@@ -304,7 +328,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 	if params.Name == "query-docs" || params.Name == "reindex-repository" {
 		libraryID = stringArg(params.Arguments, "libraryId")
 	}
-	cacheKey := s.cacheKey(p, params.Name, params.Arguments)
+	cacheKey := s.cacheKey(r.Context(), p, params.Name, params.Arguments)
 	if cached, ok := s.cached(cacheKey); ok {
 		span.SetAttributes(attribute.Bool("git_ctx.cache.hit", true))
 		s.finishCall(w, r, req, p, params.Name, libraryID, start, cached, nil)
@@ -534,9 +558,43 @@ func (s *Server) reindexRepository(ctx context.Context, p auth.Principal, librar
 	}
 	return fmt.Sprintf("Reindex queued.\n\n- Job: %s\n- Library ID: %s\n- Ref: %s\n", jobID, base, ref), nil
 }
-func (s *Server) cacheKey(p auth.Principal, tool string, args map[string]any) string {
+func (s *Server) cacheKey(ctx context.Context, p auth.Principal, tool string, args map[string]any) string {
 	raw, _ := json.Marshal(args)
-	return tool + "|" + p.ACLPrincipal + "|" + strings.Join(p.AllowedRepositories, ",") + "|" + string(raw)
+	principals := principalACLs(p)
+	sort.Strings(principals)
+	repositories := append([]string(nil), p.AllowedRepositories...)
+	sort.Strings(repositories)
+	aclRevision := s.aclRevision(ctx, principals)
+	return tool + "|" + strings.Join(principals, ",") + "|" + strings.Join(repositories, ",") + "|" + aclRevision + "|" + string(raw)
+}
+
+func (s *Server) aclRevision(ctx context.Context, principals []string) string {
+	if len(principals) == 0 {
+		return "none"
+	}
+	placeholders := make([]string, len(principals))
+	args := make([]any, 0, len(principals))
+	for index, principal := range principals {
+		placeholders[index] = "?"
+		args = append(args, principal)
+	}
+	query := `SELECT p.repository_id,p.principal,p.permission,COALESCE(CAST(r.indexed_at AS TEXT),'')
+FROM repository_permissions p JOIN repositories r ON r.id=p.repository_id
+WHERE p.principal IN (` + strings.Join(placeholders, ",") + `) OR p.principal='*'
+ORDER BY p.repository_id,p.principal`
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(query), args...)
+	if err != nil {
+		return "unavailable"
+	}
+	defer rows.Close()
+	digest := sha256.New()
+	for rows.Next() {
+		var repositoryID, principal, permission, indexedAt string
+		if rows.Scan(&repositoryID, &principal, &permission, &indexedAt) == nil {
+			_, _ = fmt.Fprintf(digest, "%s\x00%s\x00%s\x00%s\n", repositoryID, principal, permission, indexedAt)
+		}
+	}
+	return hex.EncodeToString(digest.Sum(nil))
 }
 func (s *Server) cached(key string) (string, bool) {
 	s.cacheMu.Lock()

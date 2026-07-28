@@ -21,6 +21,12 @@ type Store struct {
 	driver string
 }
 
+type migrationExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+}
+
 func (s *Store) Driver() string { return s.driver }
 
 func DriverForDSN(dsn string) string {
@@ -80,13 +86,23 @@ func Open(ctx context.Context, driver, dsn string) (*Store, error) {
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
+	var executor migrationExecutor = s.DB
 	if s.driver == "postgres" {
-		if _, err := s.DB.ExecContext(ctx, `SELECT pg_advisory_lock(1735358461)`); err != nil {
+		conn, err := s.DB.Conn(ctx)
+		if err != nil {
 			return err
 		}
-		defer s.DB.ExecContext(context.Background(), `SELECT pg_advisory_unlock(1735358461)`)
+		if _, err = conn.ExecContext(ctx, `SELECT pg_advisory_lock(1735358461)`); err != nil {
+			conn.Close()
+			return err
+		}
+		executor = conn
+		defer func() {
+			_, _ = conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock(1735358461)`)
+			_ = conn.Close()
+		}()
 	}
-	if _, err := s.DB.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations(version TEXT PRIMARY KEY, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)`); err != nil {
+	if _, err := executor.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations(version TEXT PRIMARY KEY, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)`); err != nil {
 		return err
 	}
 	entries, err := fs.ReadDir(migrations, "migrations")
@@ -102,11 +118,17 @@ func (s *Store) Migrate(ctx context.Context) error {
 	sort.Strings(names)
 	for _, name := range names {
 		var exists int
-		err := s.DB.QueryRowContext(ctx, s.Rebind(`SELECT COUNT(*) FROM schema_migrations WHERE version=?`), name).Scan(&exists)
+		err := executor.QueryRowContext(ctx, s.Rebind(`SELECT COUNT(*) FROM schema_migrations WHERE version=?`), name).Scan(&exists)
 		if err != nil {
 			return err
 		}
 		if exists > 0 {
+			continue
+		}
+		if name == "020_repository_source_uniqueness.sql" {
+			if err := s.migrateRepositorySourceUniqueness(ctx, executor); err != nil {
+				return fmt.Errorf("migrate %s: %w", name, err)
+			}
 			continue
 		}
 		body, err := migrations.ReadFile("migrations/" + name)
@@ -117,7 +139,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if s.driver == "postgres" {
 			sqlText = strings.ReplaceAll(sqlText, "BLOB", "BYTEA")
 		}
-		tx, err := s.DB.BeginTx(ctx, nil)
+		tx, err := executor.BeginTx(ctx, nil)
 		if err != nil {
 			return err
 		}
@@ -135,8 +157,58 @@ func (s *Store) Migrate(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) Rebind(query string) string {
-	if s.driver != "postgres" {
+func (s *Store) migrateRepositorySourceUniqueness(ctx context.Context, executor migrationExecutor) error {
+	if s.driver == "postgres" {
+		tx, err := executor.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if _, err = tx.ExecContext(ctx, `ALTER TABLE repositories DROP CONSTRAINT IF EXISTS repositories_project_key_slug_key`); err == nil {
+			_, err = tx.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS uq_repositories_source_project_slug ON repositories(source_type,project_key,slug)`)
+		}
+		if err == nil {
+			_, err = tx.ExecContext(ctx, RebindForDriver(`INSERT INTO schema_migrations(version) VALUES(?)`, "postgres"), "020_repository_source_uniqueness.sql")
+		}
+		if err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	if _, err := executor.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+		return err
+	}
+	defer executor.ExecContext(context.Background(), `PRAGMA foreign_keys=ON`)
+	tx, err := executor.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	script := `
+CREATE TABLE repositories_source_v2 (
+  id TEXT PRIMARY KEY, project_key TEXT NOT NULL, slug TEXT NOT NULL,
+  name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+  source_type TEXT NOT NULL DEFAULT 'bitbucket',
+  source_external_id TEXT NOT NULL DEFAULT '',
+  library_id TEXT NOT NULL UNIQUE, default_branch TEXT NOT NULL DEFAULT 'main',
+  reputation TEXT NOT NULL DEFAULT 'Medium', enabled INTEGER NOT NULL DEFAULT 1,
+  indexed_at TIMESTAMP, UNIQUE(source_type, project_key, slug)
+);
+INSERT INTO repositories_source_v2 SELECT id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,reputation,enabled,indexed_at FROM repositories;
+DROP TABLE repositories;
+ALTER TABLE repositories_source_v2 RENAME TO repositories;
+CREATE INDEX IF NOT EXISTS idx_repositories_source_project_slug ON repositories(source_type,project_key,slug);`
+	if _, err = tx.ExecContext(ctx, script); err == nil {
+		_, err = tx.ExecContext(ctx, `INSERT INTO schema_migrations(version) VALUES(?)`, "020_repository_source_uniqueness.sql")
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func RebindForDriver(query, driver string) string {
+	if driver != "postgres" {
 		return query
 	}
 	var n int
@@ -145,4 +217,8 @@ func (s *Store) Rebind(query string) string {
 		query = strings.Replace(query, "?", fmt.Sprintf("$%d", n), 1)
 	}
 	return query
+}
+
+func (s *Store) Rebind(query string) string {
+	return RebindForDriver(query, s.driver)
 }
