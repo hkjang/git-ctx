@@ -402,6 +402,7 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/tools/query/test", a.authenticate(http.HandlerFunc(a.testQuery)))
 	a.mux.Handle("POST /api/v1/tools/search-code/test", a.authenticate(http.HandlerFunc(a.testSearchCode)))
 	a.mux.Handle("POST /api/v1/tools/find-file/test", a.authenticate(http.HandlerFunc(a.testFindFile)))
+	a.mux.Handle("POST /api/v1/tools/read-file/test", a.authenticate(http.HandlerFunc(a.testReadFile)))
 	a.mux.Handle("POST /api/v1/tools/repository-map/test", a.authenticate(http.HandlerFunc(a.testRepositoryMap)))
 	a.mux.Handle("POST /api/v1/tools/symbols/test", a.authenticate(http.HandlerFunc(a.testSymbols)))
 	a.mux.Handle("POST /api/v1/tools/symbol-context/test", a.authenticate(http.HandlerFunc(a.testSymbolContext)))
@@ -1463,6 +1464,36 @@ func (a *App) testFindFile(w http.ResponseWriter, r *http.Request) {
 		result.Files = files
 	}
 	jsonOut(w, http.StatusOK, result)
+}
+
+func (a *App) testReadFile(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	if p.KeyID != "" && !stringContains(p.Scopes, "read-file") {
+		problem(w, http.StatusForbidden, "forbidden", "API key is not allowed to call read-file")
+		return
+	}
+	var in struct {
+		Path       string `json:"path"`
+		LibraryID  string `json:"libraryId"`
+		Repository string `json:"repository"`
+		Ref        string `json:"ref"`
+		StartLine  int    `json:"startLine"`
+		EndLine    int    `json:"endLine"`
+	}
+	if decode(r, &in) != nil || strings.TrimSpace(in.Path) == "" {
+		problem(w, http.StatusBadRequest, "invalid_request", "path is required")
+		return
+	}
+	file, err := a.search.ReadFile(r.Context(), searchPrincipals(p), in.LibraryID, in.Repository, in.Path, in.Ref, in.StartLine, in.EndLine)
+	if err != nil {
+		problem(w, http.StatusBadRequest, "read_failed", err.Error())
+		return
+	}
+	if p.KeyID != "" && !repositoryAllowed(file.LibraryID, p.AllowedRepositories) {
+		problem(w, http.StatusForbidden, "forbidden", "File is unavailable or access is denied")
+		return
+	}
+	jsonOut(w, http.StatusOK, file)
 }
 
 func (a *App) testRepositoryMap(w http.ResponseWriter, r *http.Request) {

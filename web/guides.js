@@ -816,6 +816,7 @@
         {
           title: "1. 검색 팁",
           steps: [
+            "찾은 파일은 read-file로 전체 또는 줄 범위를 읽습니다. 색인된 파일은 저장된 청크에서, 정책에서 제외된 파일은 소스 서버에서 즉시 읽어 옵니다.",
             "파일 위치는 find-file로 찾습니다. 슬래시가 없으면 파일명, 있으면 전체 경로와 비교하며 *, ?, ** 글롭을 지원합니다. 예: Dockerfile, *.tf, auth*.py, **/migrations/*.sql, db/migrations/",
             "저장소를 찾을 때는 이름만 입력합니다. 예: dify",
             "코드 본문을 찾을 때는 식별자나 문자열을 그대로 입력합니다. 예: NewOIDCVerifier",
@@ -830,6 +831,7 @@
             rows: [
               ["search-code", "코드·심볼·설정 위치를 찾을 때 (기본)", "저장소 + 파일 내용 + 실행 경로 Notes"],
               ["find-file", "파일 위치를 물을 때 (Dockerfile, *.tf, **/migrations/*.sql)", "저장소별 경로 목록과 본문 색인 여부"],
+              ["read-file", "찾은 파일 전체 또는 특정 줄 범위를 볼 때", "파일 본문(코드 블록)과 출처 인용, 필요 시 마스킹·잘림 안내"],
               ["search-repositories", "저장소 이름만 찾을 때", "저장소 목록 (파일 내용 없음)"],
               ["query-docs", "특정 Library ID의 문서를 물을 때", "색인 결과, 없으면 소스 API failover"],
               ["find-symbol", "정확한 식별자를 알 때", "심볼 정의 위치"],

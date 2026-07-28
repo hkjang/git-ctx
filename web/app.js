@@ -708,6 +708,26 @@ function setupKnowledgeSearch() {
       reportError(error, "파일 검색");
     }
   };
+  $("#read-file-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.currentTarget));
+    output.textContent = "파일을 읽는 중…";
+    try {
+      const file = await api("/api/v1/tools/read-file/test", {
+        method: "POST",
+        body: JSON.stringify({
+          ...data,
+          startLine: Number(data.startLine) || 0,
+          endLine: Number(data.endLine) || 0,
+        }),
+      });
+      const header = `${file.Path} · ${file.LibraryID} · ref ${file.Ref} · ${file.StartLine}-${file.EndLine}/${file.TotalLines}줄 · ${file.Origin}`;
+      output.textContent = [header, "", file.Content, "", ...rows(file.Diagnostics).map((item) => `· ${item}`)].join("\n");
+    } catch (error) {
+      output.textContent = error.message;
+      reportError(error, "파일 열기");
+    }
+  };
   $("#repository-map-form").onsubmit = async (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.currentTarget));
@@ -777,7 +797,7 @@ let currentRoleSet = new Set();
 let activeScopeEditor = null;
 const userMCPScopes = [
   "resolve-library-id", "query-docs", "search-repositories", "search-source",
-  "search-code", "find-file", "get-repository-map", "find-symbol", "get-symbol-context",
+  "search-code", "find-file", "read-file", "get-repository-map", "find-symbol", "get-symbol-context",
   "trace-dependencies", "compare-refs", "get-change-impact", "get-context-pack",
   "find-runbook", "export-context", "explain-search-result",
 ];

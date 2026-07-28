@@ -126,6 +126,8 @@ assert.match(script, /function markEmptyTables/);
 assert.match(script, /registerSelected/);
 assert.match(script, /api\/v1\/admin\/index-diagnostics/);
 assert.match(script, /indexStateLabels/);
+assert.match(script, /api\/v1\/tools\/find-file\/test/);
+assert.match(script, /api\/v1\/tools\/read-file\/test/);
 // 새로고침해도 화면이 유지되어야 하므로 위치를 주소에 기록하고 복원한다.
 assert.match(script, /function rememberView/);
 assert.match(script, /function parseViewHash/);

@@ -454,6 +454,10 @@ type treeSource struct {
 	calls int
 }
 
+func (t *treeSource) GetFile(_ context.Context, _ source.RepositoryRef, _ string, path string) ([]byte, error) {
+	return []byte("replicaCount: 2\nimage:\n  tag: v1\n"), nil
+}
+
 func (t *treeSource) ListFiles(context.Context, source.RepositoryRef, string) ([]source.File, error) {
 	t.calls++
 	out := make([]source.File, 0, len(t.files))
@@ -568,6 +572,84 @@ func TestFindFilesFallsBackToRemoteTreeListing(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("the live listing must be stated: %v", result.Diagnostics)
+	}
+}
+
+// Finding a file only helps if the agent can then read it. Indexed files come
+// from the stored chunks, everything else is read live, and both paths mask
+// credentials and bound the response.
+func TestReadFileServesIndexedAndUnindexedFiles(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:read-file?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r','core','demo','Demo','gitlab','1','/core/demo','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r','alice','read')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_files(repository_id,ref_name,path,base_name,size_bytes,content_indexed,commit_id) VALUES('r','main','docs/gpu.md','gpu.md',40,1,'abc')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_files(repository_id,ref_name,path,base_name,size_bytes,content_indexed,commit_id) VALUES('r','main','charts/values.yaml','values.yaml',20,0,'abc')`)
+	_, _ = db.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('c1','r','main','abc','docs/gpu.md',1,2,'GPU','document','# GPU\nfirst chunk','h1')`)
+	_, _ = db.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('c2','r','main','abc','docs/gpu.md',3,4,'GPU','document','second chunk','h2')`)
+	remote := &treeSource{}
+	service := New(db)
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) { return remote, nil })
+
+	indexed, err := service.ReadFile(ctx, []string{"alice"}, "", "", "docs/gpu.md", "", 0, 0)
+	if err != nil || indexed.Origin != "index" || !strings.Contains(indexed.Content, "second chunk") {
+		t.Fatalf("indexed read=%#v err=%v", indexed, err)
+	}
+	if indexed.TotalLines != 2 || indexed.StartLine != 1 {
+		t.Fatalf("line accounting=%#v", indexed)
+	}
+
+	// A line range must narrow the response.
+	ranged, err := service.ReadFile(ctx, []string{"alice"}, "", "", "docs/gpu.md", "", 2, 2)
+	if err != nil || ranged.StartLine != 2 || ranged.EndLine != 2 || strings.Contains(ranged.Content, "# GPU") {
+		t.Fatalf("ranged read=%#v err=%v", ranged, err)
+	}
+
+	// A file the policy skipped is read live and marked as such.
+	live, err := service.ReadFile(ctx, []string{"alice"}, "", "", "charts/values.yaml", "", 0, 0)
+	if err != nil || live.Origin != "remote" || live.Content == "" {
+		t.Fatalf("remote read=%#v err=%v", live, err)
+	}
+
+	if _, err = service.ReadFile(ctx, []string{"mallory"}, "", "", "docs/gpu.md", "", 0, 0); err == nil {
+		t.Fatal("ACL leak")
+	}
+	if _, err = service.ReadFile(ctx, []string{"alice"}, "", "", "nope.md", "", 0, 0); err == nil {
+		t.Fatal("unknown path must fail")
+	}
+}
+
+// The same path can exist in several repositories; the caller must be asked
+// rather than served a random one.
+func TestReadFileAsksWhichRepositoryWhenAmbiguous(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:read-file-ambiguous?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	for _, id := range []string{"a", "b"} {
+		_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES(?,?,?,?,'gitlab',?,?,'main')`,
+			id, "core", "repo-"+id, "Repo "+id, id, "/core/repo-"+id)
+		_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES(?,'alice','read')`, id)
+		_, _ = db.DB.Exec(`INSERT INTO repository_files(repository_id,ref_name,path,base_name,size_bytes,content_indexed,commit_id) VALUES(?,'main','Dockerfile','dockerfile',10,1,'abc')`, id)
+		_, _ = db.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES(?,?,'main','abc','Dockerfile',1,1,'Dockerfile','code','FROM alpine',?)`, "chunk-"+id, id, "h-"+id)
+	}
+	service := New(db)
+	result, err := service.ReadFile(ctx, []string{"alice"}, "", "", "Dockerfile", "", 0, 0)
+	if err == nil || len(result.Candidates) != 2 {
+		t.Fatalf("ambiguous read must list candidates: %#v err=%v", result, err)
+	}
+	if !strings.Contains(err.Error(), "libraryId") {
+		t.Fatalf("the error must say how to disambiguate: %v", err)
+	}
+	chosen, err := service.ReadFile(ctx, []string{"alice"}, "/core/repo-a", "", "Dockerfile", "", 0, 0)
+	if err != nil || chosen.LibraryID != "/core/repo-a" {
+		t.Fatalf("scoped read=%#v err=%v", chosen, err)
 	}
 }
 

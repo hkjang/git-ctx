@@ -1245,6 +1245,183 @@ func longestLiteralRun(pattern string) string {
 	return strings.Trim(longest, "/")
 }
 
+// FileContent is a whole file, or a line range of it, prepared for a client.
+type FileContent struct {
+	LibraryID, SourceType, ProjectKey, RepositorySlug, Ref, Path, CommitID string
+	Content                                                                string
+	StartLine, EndLine, TotalLines                                         int
+	// Origin is "index" when the stored chunks were reassembled and "remote"
+	// when the file was read live from the source server.
+	Origin      string
+	Truncated   bool
+	Redacted    bool
+	Candidates  []string
+	Diagnostics []string
+}
+
+// readFileLineBudget and readFileByteBudget bound one response. A coding agent
+// pays for every returned line, and an unbounded read of a generated file would
+// flood its context window.
+const (
+	readFileLineBudget = 1200
+	readFileByteBudget = 192 << 10
+)
+
+// ReadFile returns the content of one file. Finding a file is only useful if it
+// can then be read, and neither query-docs (chunks) nor get-symbol-context (one
+// symbol) can return a whole configuration file or manifest.
+//
+// The stored index is preferred because it is already secret-masked; files the
+// index policy skipped are fetched live, sanitized and capped.
+func (s *Service) ReadFile(ctx context.Context, principals []string, libraryID, repository, filePath, ref string, startLine, endLine int) (FileContent, error) {
+	filePath = strings.TrimPrefix(strings.TrimSpace(filepath.ToSlash(filePath)), "./")
+	if filePath == "" {
+		return FileContent{}, errors.New("path is required")
+	}
+	if len(principals) == 0 {
+		return FileContent{}, errors.New("file is unavailable or access is denied")
+	}
+	join, predicate, args := repositoryACL(principals)
+	statement := `SELECT DISTINCT r.id,r.library_id,r.source_type,r.project_key,r.slug,f.ref_name,f.path,f.commit_id,f.content_indexed
+FROM repository_files f JOIN repositories r ON r.id=f.repository_id ` + join + `
+WHERE r.enabled=1 AND ` + predicate + ` AND LOWER(f.path)=LOWER(?)`
+	args = append(args, filePath)
+	if libraryID != "" {
+		base, version, ok := splitLibraryID(libraryID)
+		if !ok {
+			return FileContent{}, errors.New("libraryId must use /organization/project[/version]")
+		}
+		statement += ` AND r.library_id=?`
+		args = append(args, base)
+		if ref == "" {
+			ref = version
+		}
+	}
+	if repository != "" {
+		statement += ` AND (LOWER(r.slug)=LOWER(?) OR LOWER(r.library_id)=LOWER(?))`
+		args = append(args, repository, repository)
+	}
+	if ref != "" {
+		statement += ` AND f.ref_name=?`
+		args = append(args, ref)
+	}
+	statement += ` ORDER BY r.library_id,f.ref_name LIMIT 25`
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
+	if err != nil {
+		return FileContent{}, err
+	}
+	type match struct {
+		repositoryID, libraryID, sourceType, project, slug, refName, path, commit string
+		indexed                                                                   bool
+	}
+	var matches []match
+	for rows.Next() {
+		var item match
+		var indexed int
+		if err = rows.Scan(&item.repositoryID, &item.libraryID, &item.sourceType, &item.project, &item.slug, &item.refName, &item.path, &item.commit, &indexed); err != nil {
+			rows.Close()
+			return FileContent{}, err
+		}
+		item.indexed = indexed == 1
+		matches = append(matches, item)
+	}
+	rows.Close()
+	if len(matches) == 0 {
+		return FileContent{}, fmt.Errorf("no accessible repository contains %q; run find-file first or pass libraryId", filePath)
+	}
+	// Several repositories can hold the same path. Ask instead of guessing.
+	distinct := map[string]bool{}
+	for _, item := range matches {
+		distinct[item.libraryID] = true
+	}
+	if len(distinct) > 1 {
+		candidates := make([]string, 0, len(distinct))
+		for id := range distinct {
+			candidates = append(candidates, id)
+		}
+		sort.Strings(candidates)
+		return FileContent{Path: filePath, Candidates: candidates}, fmt.Errorf("%q exists in %d repositories; pass libraryId to choose one", filePath, len(candidates))
+	}
+	selected := matches[0]
+	out := FileContent{
+		LibraryID: selected.libraryID, SourceType: selected.sourceType, ProjectKey: selected.project,
+		RepositorySlug: selected.slug, Ref: selected.refName, Path: selected.path, CommitID: selected.commit,
+	}
+	content, origin, diagnostics := s.fileBody(ctx, selected.repositoryID, selected.sourceType, selected.project, selected.slug, selected.refName, selected.path, selected.indexed)
+	out.Origin, out.Diagnostics = origin, diagnostics
+	if content == "" {
+		return out, fmt.Errorf("%q could not be read from the index or the %s API", filePath, selected.sourceType)
+	}
+	safe, finding := contentsecurity.Sanitize(content)
+	if finding == "private_key" || safe == "" {
+		return out, fmt.Errorf("%q was blocked because it contains a private key", filePath)
+	}
+	out.Redacted = finding != ""
+	lines := strings.Split(strings.ReplaceAll(safe, "\r\n", "\n"), "\n")
+	out.TotalLines = len(lines)
+	from, to := 1, len(lines)
+	if startLine > 0 {
+		from = min(startLine, len(lines))
+	}
+	if endLine > 0 {
+		to = min(endLine, len(lines))
+	}
+	if to < from {
+		to = from
+	}
+	if to-from+1 > readFileLineBudget {
+		to = from + readFileLineBudget - 1
+		out.Truncated = true
+	}
+	body := strings.Join(lines[from-1:to], "\n")
+	if len(body) > readFileByteBudget {
+		body = body[:readFileByteBudget]
+		out.Truncated = true
+	}
+	out.Content, out.StartLine, out.EndLine = body, from, to
+	if out.Truncated {
+		out.Diagnostics = append(out.Diagnostics, fmt.Sprintf("truncated: returned lines %d-%d of %d; request a narrower range with startLine and endLine.", from, to, len(lines)))
+	}
+	if out.Redacted {
+		out.Diagnostics = append(out.Diagnostics, "security: a credential-like value was masked before returning this file.")
+	}
+	return out, nil
+}
+
+// fileBody reassembles the stored chunks and falls back to a live read for files
+// whose content the index policy skipped.
+func (s *Service) fileBody(ctx context.Context, repositoryID, sourceType, project, slug, ref, filePath string, indexed bool) (string, string, []string) {
+	if indexed {
+		rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(
+			`SELECT content FROM document_chunks WHERE repository_id=? AND ref_name=? AND file_path=? ORDER BY line_start`), repositoryID, ref, filePath)
+		if err == nil {
+			var parts []string
+			for rows.Next() {
+				var content string
+				if rows.Scan(&content) == nil {
+					parts = append(parts, content)
+				}
+			}
+			rows.Close()
+			if len(parts) > 0 {
+				return strings.Join(parts, "\n"), "index", []string{"index: reassembled from the stored chunks of this ref."}
+			}
+		}
+	}
+	if s.sources == nil {
+		return "", "index", []string{"remote: no source connector is configured, so an unindexed file cannot be read."}
+	}
+	adapter, adapterErr := s.sources(ctx, sourceType)
+	if adapterErr != nil {
+		return "", "remote", []string{"remote: " + adapterErr.Error()}
+	}
+	raw, readErr := adapter.GetFile(ctx, source.RepositoryRef{ProjectKey: project, Slug: slug}, ref, filePath)
+	if readErr != nil {
+		return "", "remote", []string{"remote: " + readErr.Error()}
+	}
+	return string(raw), "remote", []string{"remote: read live from the source server because this file has no indexed content."}
+}
+
 // SearchCode combines repository discovery with source query APIs so callers
 // can find a repository by name even when no library ID or local index exists.
 func (s *Service) SearchCode(ctx context.Context, principals []string, query, sourceType, project, repository, ref string, limit int) (CodeSearchResult, error) {

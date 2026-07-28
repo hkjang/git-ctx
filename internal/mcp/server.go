@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -299,6 +300,14 @@ func Catalog() []map[string]any {
 				"repository": map[string]string{"type": "string", "description": "Optional repository slug or library ID"},
 				"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"},
 				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 200}}}},
+		{"name": "read-file", "description": "Reads one file from a repository, optionally a line range. Use it after find-file or search-code to see the whole file instead of a snippet. Files without indexed content are read live from the source server; credentials are masked and long files are truncated with the range stated.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"path"}, "properties": map[string]any{
+				"path":       map[string]string{"type": "string", "description": "Repository-relative file path, for example charts/values.yaml"},
+				"libraryId":  map[string]string{"type": "string", "description": "Library ID; required when the path exists in more than one repository"},
+				"repository": map[string]string{"type": "string", "description": "Optional repository slug or library ID"},
+				"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"},
+				"startLine":  map[string]any{"type": "integer", "minimum": 1, "description": "Optional first line, 1-based"},
+				"endLine":    map[string]any{"type": "integer", "minimum": 1, "description": "Optional last line, inclusive"}}}},
 		{"name": "get-repository-map", "description": "Returns the indexed languages, directories, key files, and entry points for a repository.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId"}, "properties": map[string]any{
 				"libraryId": map[string]string{"type": "string", "description": "Context7-compatible library ID"},
@@ -393,6 +402,9 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 	r = r.WithContext(ctx)
 	text := ""
 	var err error
+	// empty marks a successful call that returned nothing, so the usage view can
+	// separate "the tool failed" from "the catalog had no answer".
+	empty := false
 	libraryID := ""
 	if params.Name == "query-docs" || params.Name == "reindex-repository" || params.Name == "get-repository-map" || params.Name == "get-symbol-context" || params.Name == "trace-dependencies" || params.Name == "compare-refs" || params.Name == "get-change-impact" || params.Name == "explain-search-result" {
 		libraryID = stringArg(params.Arguments, "libraryId")
@@ -400,7 +412,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 	cacheKey := s.cacheKey(r.Context(), p, params.Name, params.Arguments)
 	if cached, ok := s.cached(cacheKey); ok {
 		span.SetAttributes(attribute.Bool("git_ctx.cache.hit", true))
-		s.finishCall(w, r, req, p, params.Name, libraryID, start, cached, nil)
+		s.finishCall(w, r, req, p, params.Name, libraryID, start, cached, nil, false)
 		return
 	}
 	span.SetAttributes(attribute.Bool("git_ctx.cache.hit", false))
@@ -412,6 +424,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 			if len(p.AllowedRepositories) > 0 {
 				items = filterLibraries(items, p.AllowedRepositories)
 			}
+			empty = len(items) == 0
 			text = formatLibraries(items)
 		}
 	case "query-docs":
@@ -433,6 +446,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 				}
 				items = filtered
 			}
+			empty = len(items) == 0
 			text = formatRepositorySearch(items, stringArg(params.Arguments, "query"))
 		}
 	case "search-source":
@@ -448,6 +462,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 				}
 				hits = filtered
 			}
+			empty = len(hits) == 0
 			text = formatSourceResults(hits)
 		}
 	case "search-code":
@@ -470,6 +485,7 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 				}
 				result.Hits = hits
 			}
+			empty = len(result.Repositories) == 0 && len(result.Hits) == 0
 			text = formatCodeSearch(result)
 		}
 	case "find-file":
@@ -487,7 +503,18 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 				}
 				files.Files = allowed
 			}
+			empty = len(files.Files) == 0
 			text = formatFileResults(files)
+		}
+	case "read-file":
+		var file search.FileContent
+		file, err = s.search.ReadFile(r.Context(), principalACLs(p), stringArg(params.Arguments, "libraryId"), stringArg(params.Arguments, "repository"),
+			stringArg(params.Arguments, "path"), stringArg(params.Arguments, "ref"), intArg(params.Arguments, "startLine", 0), intArg(params.Arguments, "endLine", 0))
+		if err == nil && p.KeyID != "" && !libraryAllowed(file.LibraryID, p.AllowedRepositories) {
+			err = errors.New("file is unavailable or access is denied")
+		}
+		if err == nil {
+			text = formatFileContent(file)
 		}
 	case "get-repository-map":
 		if p.KeyID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
@@ -607,12 +634,16 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 		text, err = s.reindexRepository(r.Context(), p, libraryID, stringArg(params.Arguments, "ref"))
 	}
 	if err == nil {
-		s.storeCache(r.Context(), params.Name, cacheKey, text)
+		if !empty {
+			// An empty answer is often a transient state while indexing runs, so it
+			// is never cached.
+			s.storeCache(r.Context(), params.Name, cacheKey, text)
+		}
 	} else {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "MCP tool call failed")
 	}
-	s.finishCall(w, r, req, p, params.Name, libraryID, start, text, err)
+	s.finishCall(w, r, req, p, params.Name, libraryID, start, text, err, empty)
 }
 
 func catalogContains(name string) bool {
@@ -844,11 +875,14 @@ func (s *Server) storeCache(ctx context.Context, tool, key, text string) {
 	}
 	s.cache[key] = cacheEntry{text: text, expires: time.Now().Add(time.Duration(seconds) * time.Second)}
 }
-func (s *Server) finishCall(w http.ResponseWriter, r *http.Request, req request, p auth.Principal, tool, libraryID string, start time.Time, text string, err error) {
+func (s *Server) finishCall(w http.ResponseWriter, r *http.Request, req request, p auth.Principal, tool, libraryID string, start time.Time, text string, err error, empty bool) {
 	outcome := "success"
-	if err != nil {
+	switch {
+	case err != nil:
 		outcome = "error"
 		text = err.Error()
+	case empty:
+		outcome = "empty"
 	}
 	_, _ = s.store.DB.ExecContext(r.Context(), s.store.Rebind(`INSERT INTO mcp_calls(id,user_id,api_key_prefix,tool,library_id,outcome,duration_ms,client_ip) VALUES(?,?,?,?,?,?,?,?)`),
 		fmt.Sprintf("%d", time.Now().UnixNano()), p.UserID, p.KeyPrefix, tool, libraryID, outcome, time.Since(start).Milliseconds(), clientIP(r))
@@ -983,6 +1017,53 @@ func formatFileResults(result search.FileSearchResult) string {
 		}
 	}
 	return b.String()
+}
+
+// formatFileContent returns the file in a fenced block with a citation header,
+// so an agent can quote it and link back to the exact ref and lines.
+func formatFileContent(file search.FileContent) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "## %s\n\n`%s` · ref `%s` · lines %d-%d of %d · %s\n\n",
+		file.Path, file.LibraryID, file.Ref, file.StartLine, file.EndLine, file.TotalLines, file.Origin)
+	fence := "```"
+	if strings.Contains(file.Content, "```") {
+		fence = "````"
+	}
+	fmt.Fprintf(&b, "%s%s\n%s\n%s\n", fence, languageHint(file.Path), file.Content, fence)
+	fmt.Fprintf(&b, "\nSource: `%s://%s/%s@%s/%s#L%d-L%d`\n", file.SourceType, file.ProjectKey, file.RepositorySlug,
+		firstNonEmpty(file.CommitID, file.Ref), file.Path, file.StartLine, file.EndLine)
+	if len(file.Diagnostics) > 0 {
+		b.WriteString("\n### Notes\n")
+		for _, diagnostic := range file.Diagnostics {
+			fmt.Fprintf(&b, "- %s\n", diagnostic)
+		}
+	}
+	return b.String()
+}
+
+// languageHint labels the fenced block so clients highlight it correctly.
+func languageHint(path string) string {
+	switch strings.ToLower(strings.TrimPrefix(filepath.Ext(path), ".")) {
+	case "":
+		return ""
+	case "yml":
+		return "yaml"
+	case "tf", "tfvars":
+		return "hcl"
+	case "mod", "sum":
+		return ""
+	default:
+		return strings.ToLower(strings.TrimPrefix(filepath.Ext(path), "."))
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func formatRepositoryMap(item search.RepositoryMap) string {

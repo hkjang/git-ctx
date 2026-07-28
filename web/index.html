@@ -112,8 +112,8 @@
                   <dd>Bitbucket·GitLab Query API 기반 소스 검색</dd>
                   <dt>search-code</dt>
                   <dd>저장소 이름과 코드 본문을 한 번에 검색</dd>
-                  <dt>find-file</dt>
-                  <dd>파일명·경로 패턴으로 파일 위치 검색 (glob 지원)</dd>
+                  <dt>find-file / read-file</dt>
+                  <dd>파일명·경로 패턴 검색과 파일 본문(줄 범위) 조회</dd>
                   <dt>get-repository-map</dt>
                   <dd>저장소 언어·구조·진입점과 주요 설정 파일 조회</dd>
                   <dt>find-symbol / get-symbol-context</dt>
@@ -151,6 +151,7 @@
                   <label><input type="checkbox" name="scope" value="search-source" checked /> search-source</label>
                   <label><input type="checkbox" name="scope" value="search-code" checked /> search-code</label>
                   <label><input type="checkbox" name="scope" value="find-file" checked /> find-file</label>
+                  <label><input type="checkbox" name="scope" value="read-file" checked /> read-file</label>
                   <label><input type="checkbox" name="scope" value="get-repository-map" checked /> get-repository-map</label>
                   <label><input type="checkbox" name="scope" value="find-symbol" checked /> find-symbol</label>
                   <label><input type="checkbox" name="scope" value="get-symbol-context" checked /> get-symbol-context</label>
@@ -208,6 +209,17 @@
                   <label>Library ID (선택)<input name="libraryId" placeholder="/kcb/clustara" /></label>
                   <label>Ref (선택)<input name="ref" placeholder="main" /></label>
                   <div class="wide button-row"><button type="submit">파일 찾기</button></div>
+                </form>
+              </article>
+              <article class="card">
+                <h3>File Read</h3>
+                <form id="read-file-form" class="form-row">
+                  <label class="wide">파일 경로<input name="path" required placeholder="charts/values.yaml" /></label>
+                  <label>Library ID (선택)<input name="libraryId" placeholder="/kcb/clustara" /></label>
+                  <label>Ref (선택)<input name="ref" placeholder="main" /></label>
+                  <label>시작 줄<input name="startLine" type="number" min="1" /></label>
+                  <label>끝 줄<input name="endLine" type="number" min="1" /></label>
+                  <div class="wide button-row"><button type="submit">파일 열기</button></div>
                 </form>
               </article>
               <article class="card">
