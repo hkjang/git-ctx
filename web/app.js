@@ -784,6 +784,29 @@ function setupKnowledgeSearch() {
       reportError(error, "MR·PR 검색");
     }
   };
+  $("#dependents-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.currentTarget));
+    output.textContent = "사용처를 찾는 중…";
+    try {
+      const result = await api("/api/v1/tools/dependents/test", { method: "POST", body: JSON.stringify({ ...data, limit: 200 }) });
+      const items = rows(result.Dependents);
+      const lines = [`대상: ${result.Target} · ${items.length}건 · 저장소 ${rows(result.Repositories).length}개`, ""];
+      let current = "";
+      for (const item of items) {
+        if (item.LibraryID !== current) {
+          current = item.LibraryID;
+          lines.push(`── ${item.LibraryID} (${item.Ref}) ──`);
+        }
+        lines.push(`  ${item.FilePath}:${item.LineNumber}  ${item.FromSymbol || "(파일)"} ${item.Kind} → ${item.Target}`);
+      }
+      for (const diagnostic of rows(result.Diagnostics)) lines.push(`· ${diagnostic}`);
+      output.textContent = lines.join("\n");
+    } catch (error) {
+      output.textContent = error.message;
+      reportError(error, "사용처 역추적");
+    }
+  };
   $("#repository-map-form").onsubmit = async (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.currentTarget));
@@ -853,7 +876,7 @@ let currentRoleSet = new Set();
 let activeScopeEditor = null;
 const userMCPScopes = [
   "resolve-library-id", "query-docs", "search-repositories", "search-source",
-  "search-code", "find-file", "read-file", "get-file-history", "list-directory", "search-merge-requests", "get-repository-map", "find-symbol", "get-symbol-context",
+  "search-code", "find-file", "read-file", "get-file-history", "list-directory", "search-merge-requests", "find-dependents", "get-repository-map", "find-symbol", "get-symbol-context",
   "trace-dependencies", "compare-refs", "get-change-impact", "get-context-pack",
   "find-runbook", "export-context", "explain-search-result",
 ];

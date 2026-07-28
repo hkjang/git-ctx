@@ -575,6 +575,87 @@ func TestFindFilesFallsBackToRemoteTreeListing(t *testing.T) {
 	}
 }
 
+// Before changing shared code an agent must see every repository that uses it,
+// not only the one it happens to be reading.
+func TestFindDependentsCrossesRepositoriesAndRespectsACL(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:dependents?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	for _, repository := range []struct{ id, library, principal string }{
+		{"a", "/core/api", "alice"},
+		{"b", "/core/web", "alice"},
+		{"c", "/core/secret", "bob"},
+	} {
+		_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES(?,'core',?,?,'gitlab',?,?,'main')`,
+			repository.id, repository.id, repository.id, repository.id, repository.library)
+		_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES(?,?,'read')`, repository.id, repository.principal)
+		_, _ = db.DB.Exec(`INSERT INTO code_dependencies(id,repository_id,ref_name,commit_id,file_path,from_symbol,target,dependency_kind,line_number) VALUES(?,?,'main','c1','main.go','Boot','internal/auth','import',7)`,
+			"dep-"+repository.id, repository.id)
+	}
+	// An incidental substring must rank below the exact target.
+	_, _ = db.DB.Exec(`INSERT INTO code_dependencies(id,repository_id,ref_name,commit_id,file_path,from_symbol,target,dependency_kind,line_number) VALUES('dep-extra','a','main','c1','extra.go','Extra','internal/authz','import',3)`)
+
+	service := New(db)
+	result, err := service.FindDependents(ctx, []string{"alice"}, "internal/auth", "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Repositories) != 2 {
+		t.Fatalf("expected the two readable repositories, got %v", result.Repositories)
+	}
+	for _, item := range result.Dependents {
+		if item.LibraryID == "/core/secret" {
+			t.Fatalf("ACL leak: %#v", item)
+		}
+	}
+	if result.Dependents[0].Target != "internal/auth" {
+		t.Fatalf("exact target must rank first: %#v", result.Dependents[0])
+	}
+	if len(result.Diagnostics) == 0 || !strings.Contains(result.Diagnostics[0], "still indexing") {
+		t.Fatalf("the coverage caveat must be stated: %v", result.Diagnostics)
+	}
+	if empty, _ := service.FindDependents(ctx, nil, "internal/auth", "", 50); len(empty.Dependents) != 0 {
+		t.Fatalf("unmapped identity leak: %#v", empty)
+	}
+}
+
+// An agent that reads a repository's own rules writes code that fits the
+// project, so the map points at them.
+func TestRepositoryMapListsProjectConventions(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:conventions?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r','core','demo','Demo','gitlab','1','/core/demo','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r','alice','read')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_maps(repository_id,ref_name,commit_id,summary_json) VALUES('r','main','c1','{"languages":{"go":3}}')`)
+	for _, path := range []string{"CONTRIBUTING.md", "AGENTS.md", "docs/adr/0001-auth.md", "internal/app/app.go", "vendor/lib/README.md"} {
+		base := path
+		if index := strings.LastIndex(base, "/"); index >= 0 {
+			base = base[index+1:]
+		}
+		_, _ = db.DB.Exec(`INSERT INTO repository_files(repository_id,ref_name,path,base_name,size_bytes,content_indexed,commit_id) VALUES('r','main',?,?,10,1,'c1')`, path, strings.ToLower(base))
+	}
+	result, err := New(db).RepositoryMap(ctx, []string{"alice"}, "/core/demo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(result.Conventions, ",")
+	for _, expected := range []string{"CONTRIBUTING.md", "AGENTS.md", "docs/adr/0001-auth.md"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("conventions must include %s: %v", expected, result.Conventions)
+		}
+	}
+	if strings.Contains(joined, "internal/app/app.go") {
+		t.Fatalf("ordinary source files are not conventions: %v", result.Conventions)
+	}
+}
+
 // Finding a file only helps if the agent can then read it. Indexed files come
 // from the stored chunks, everything else is read live, and both paths mask
 // credentials and bound the response.

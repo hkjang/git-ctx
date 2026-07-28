@@ -403,6 +403,7 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/tools/search-code/test", a.authenticate(http.HandlerFunc(a.testSearchCode)))
 	a.mux.Handle("POST /api/v1/tools/find-file/test", a.authenticate(http.HandlerFunc(a.testFindFile)))
 	a.mux.Handle("POST /api/v1/tools/read-file/test", a.authenticate(http.HandlerFunc(a.testReadFile)))
+	a.mux.Handle("POST /api/v1/tools/dependents/test", a.authenticate(http.HandlerFunc(a.testDependents)))
 	a.mux.Handle("POST /api/v1/tools/merge-requests/test", a.authenticate(http.HandlerFunc(a.testMergeRequests)))
 	a.mux.Handle("POST /api/v1/tools/file-history/test", a.authenticate(http.HandlerFunc(a.testFileHistory)))
 	a.mux.Handle("POST /api/v1/tools/directory/test", a.authenticate(http.HandlerFunc(a.testDirectory)))
@@ -1499,6 +1500,38 @@ func (a *App) testReadFile(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, http.StatusOK, file)
 }
 
+func (a *App) testDependents(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	if p.KeyID != "" && !stringContains(p.Scopes, "find-dependents") {
+		problem(w, http.StatusForbidden, "forbidden", "API key is not allowed to call find-dependents")
+		return
+	}
+	var in struct {
+		Target     string `json:"target"`
+		SourceType string `json:"sourceType"`
+		Limit      int    `json:"limit"`
+	}
+	if decode(r, &in) != nil || strings.TrimSpace(in.Target) == "" {
+		problem(w, http.StatusBadRequest, "invalid_request", "target is required")
+		return
+	}
+	result, err := a.search.FindDependents(r.Context(), searchPrincipals(p), in.Target, in.SourceType, in.Limit)
+	if err != nil {
+		problem(w, http.StatusBadRequest, "search_failed", err.Error())
+		return
+	}
+	if p.KeyID != "" && len(p.AllowedRepositories) > 0 {
+		dependents := result.Dependents[:0]
+		for _, item := range result.Dependents {
+			if repositoryAllowed(item.LibraryID, p.AllowedRepositories) {
+				dependents = append(dependents, item)
+			}
+		}
+		result.Dependents = dependents
+	}
+	jsonOut(w, http.StatusOK, result)
+}
+
 func (a *App) testMergeRequests(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
 	if p.KeyID != "" && !stringContains(p.Scopes, "search-merge-requests") {
@@ -1615,7 +1648,7 @@ func (a *App) testRepositoryMap(w http.ResponseWriter, r *http.Request) {
 	}
 	var summary any
 	_ = json.Unmarshal([]byte(item.SummaryJSON), &summary)
-	jsonOut(w, 200, map[string]any{"libraryId": item.LibraryID, "ref": item.Ref, "commitId": item.CommitID, "summary": summary})
+	jsonOut(w, 200, map[string]any{"libraryId": item.LibraryID, "ref": item.Ref, "commitId": item.CommitID, "summary": summary, "conventions": item.Conventions})
 }
 func (a *App) testSymbols(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())

@@ -204,6 +204,7 @@ Choosing a tool:
 - Orienting in an unknown repository: list-directory, then get-repository-map.
 - "Why is this like this", "when did this change": get-file-history for commits, search-merge-requests for the reasoning behind them.
 - Exact identifier: find-symbol, then get-symbol-context.
+- Before changing shared code: find-dependents shows every repository that uses it.
 - Documentation for a known library id: query-docs.
 - search-repositories returns repository names only, never file contents.
 
@@ -330,6 +331,11 @@ func Catalog() []map[string]any {
 				"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"},
 				"startLine":  map[string]any{"type": "integer", "minimum": 1, "description": "Optional first line, 1-based"},
 				"endLine":    map[string]any{"type": "integer", "minimum": 1, "description": "Optional last line, inclusive"}}}},
+		{"name": "find-dependents", "description": "Finds every accessible repository that imports, calls or otherwise depends on a symbol, module, table or service. Use it before changing shared code to see who breaks; trace-dependencies only covers one repository.",
+			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"target"}, "properties": map[string]any{
+				"target":     map[string]string{"type": "string", "description": "Imported module, called symbol, table or service name"},
+				"sourceType": map[string]any{"type": "string", "enum": []string{"bitbucket", "gitlab", "confluence", "jira"}},
+				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 300}}}},
 		{"name": "search-merge-requests", "description": "Searches GitLab merge requests and Bitbucket pull requests. Use it for why-questions: the reasoning, trade-offs and rollout notes live in the request description, not in the code or the commit subject.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
 				"query":      map[string]string{"type": "string", "description": "Text matched against title and description"},
@@ -557,6 +563,23 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 		}
 		if err == nil {
 			text = formatFileContent(file)
+		}
+	case "find-dependents":
+		var dependents search.DependentSearch
+		dependents, err = s.search.FindDependents(r.Context(), principalACLs(p), stringArg(params.Arguments, "target"),
+			stringArg(params.Arguments, "sourceType"), intArg(params.Arguments, "limit", 100))
+		if err == nil {
+			if len(p.AllowedRepositories) > 0 {
+				allowed := dependents.Dependents[:0]
+				for _, item := range dependents.Dependents {
+					if libraryAllowed(item.LibraryID, p.AllowedRepositories) {
+						allowed = append(allowed, item)
+					}
+				}
+				dependents.Dependents = allowed
+			}
+			empty = len(dependents.Dependents) == 0
+			text = formatDependents(dependents)
 		}
 	case "search-merge-requests":
 		var requests search.ChangeRequestSearch
@@ -1148,6 +1171,33 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func formatDependents(result search.DependentSearch) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Dependents of %s\n\n%d reference(s) in %d repository(ies)\n", result.Target, len(result.Dependents), len(result.Repositories))
+	current := ""
+	for _, item := range result.Dependents {
+		if item.LibraryID != current {
+			current = item.LibraryID
+			fmt.Fprintf(&b, "\n### %s (ref `%s`)\n", item.LibraryID, item.Ref)
+		}
+		from := item.FromSymbol
+		if from == "" {
+			from = "(file scope)"
+		}
+		fmt.Fprintf(&b, "- `%s:%d` %s %s → `%s`\n", item.FilePath, item.LineNumber, from, item.Kind, item.Target)
+	}
+	if len(result.Dependents) == 0 {
+		b.WriteString("\nNothing depends on it in the indexed refs, or the dependency is expressed in a way the parser does not capture. Confirm with search-code before assuming it is unused.\n")
+	}
+	if len(result.Diagnostics) > 0 {
+		b.WriteString("\n### Notes\n")
+		for _, diagnostic := range result.Diagnostics {
+			fmt.Fprintf(&b, "- %s\n", diagnostic)
+		}
+	}
+	return b.String()
+}
+
 func formatChangeRequests(result search.ChangeRequestSearch) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "## Merge and Pull Requests\n\nQuery: `%s`\nMatches: %d\n", result.Query, len(result.Requests))
@@ -1227,7 +1277,14 @@ func formatRepositoryMap(item search.RepositoryMap) string {
 		decoded = map[string]any{}
 	}
 	pretty, _ := json.MarshalIndent(decoded, "", "  ")
-	return fmt.Sprintf("## Repository Map\n\n- Library ID: %s\n- Ref: %s\n- Commit: %s\n\n```json\n%s\n```\n", item.LibraryID, item.Ref, item.CommitID, pretty)
+	text := fmt.Sprintf("## Repository Map\n\n- Library ID: %s\n- Ref: %s\n- Commit: %s\n\n```json\n%s\n```\n", item.LibraryID, item.Ref, item.CommitID, pretty)
+	if len(item.Conventions) > 0 {
+		text += "\n### Project conventions\n\nRead these before writing code for this repository; use read-file.\n"
+		for _, path := range item.Conventions {
+			text += fmt.Sprintf("- `%s`\n", path)
+		}
+	}
+	return text
 }
 
 func formatSymbols(items []search.SymbolResult) string {

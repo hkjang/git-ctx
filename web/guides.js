@@ -816,6 +816,7 @@
         {
           title: "1. 검색 팁",
           steps: [
+            "get-repository-map 결과의 '프로젝트 규약' 목록(AGENTS.md, CONTRIBUTING.md, ADR 등)을 먼저 읽으면 프로젝트 관례에 맞는 코드를 작성할 수 있습니다.",
             "찾은 파일은 read-file로 전체 또는 줄 범위를 읽습니다. 색인된 파일은 저장된 청크에서, 정책에서 제외된 파일은 소스 서버에서 즉시 읽어 옵니다.",
             "파일 위치는 find-file로 찾습니다. 슬래시가 없으면 파일명, 있으면 전체 경로와 비교하며 *, ?, ** 글롭을 지원합니다. 예: Dockerfile, *.tf, auth*.py, **/migrations/*.sql, db/migrations/",
             "저장소를 찾을 때는 이름만 입력합니다. 예: dify",
@@ -835,6 +836,7 @@
               ["list-directory", "낯선 저장소 구조를 훑을 때", "폴더 우선 정렬된 하위 항목과 본문 색인 여부"],
               ["get-file-history", "왜 이렇게 됐는지·언제 바뀌었는지 물을 때", "커밋 해시·작성자·시각·메시지"],
               ["search-merge-requests", "결정 배경·트레이드오프를 물을 때", "GitLab MR·Bitbucket PR 제목·설명·상태·링크"],
+              ["find-dependents", "공유 코드를 바꾸기 전 영향 범위를 볼 때", "저장소 전 범위의 import·호출 위치"],
               ["search-repositories", "저장소 이름만 찾을 때", "저장소 목록 (파일 내용 없음)"],
               ["query-docs", "특정 Library ID의 문서를 물을 때", "색인 결과, 없으면 소스 API failover"],
               ["find-symbol", "정확한 식별자를 알 때", "심볼 정의 위치"],

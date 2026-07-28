@@ -175,6 +175,10 @@ type SymbolResult struct {
 
 type RepositoryMap struct {
 	LibraryID, Ref, CommitID, SummaryJSON string
+	// Conventions are the files that tell a contributor how this repository
+	// expects to be worked in. An agent that reads them writes code that fits
+	// the project instead of code that merely compiles.
+	Conventions []string
 }
 
 type DependencyResult struct {
@@ -243,7 +247,43 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 	if errors.Is(err, sql.ErrNoRows) {
 		return RepositoryMap{}, errors.New("repository map is unavailable; reindex this ref")
 	}
-	return result, err
+	if err != nil {
+		return RepositoryMap{}, err
+	}
+	result.Conventions = s.conventionFiles(ctx, repositoryID, ref)
+	return result, nil
+}
+
+// conventionFileNames are the files that describe how to contribute to a
+// repository. They are matched case-insensitively on the base name.
+var conventionFileNames = map[string]bool{
+	"agents.md": true, "claude.md": true, "contributing.md": true, "codeowners": true,
+	"readme.md": true, "architecture.md": true, "adr.md": true, "conventions.md": true,
+	"style-guide.md": true, "styleguide.md": true, "makefile": true, "dockerfile": true,
+	".editorconfig": true, ".golangci.yml": true, ".golangci.yaml": true, ".eslintrc.json": true,
+}
+
+func (s *Service) conventionFiles(ctx context.Context, repositoryID, ref string) []string {
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(
+		`SELECT path,base_name FROM repository_files WHERE repository_id=? AND ref_name=? ORDER BY LENGTH(path),path LIMIT 5000`), repositoryID, ref)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var path, base string
+		if rows.Scan(&path, &base) != nil {
+			continue
+		}
+		if conventionFileNames[strings.ToLower(base)] || strings.Contains(strings.ToLower(path), "/adr/") || strings.Contains(strings.ToLower(path), "docs/architecture") {
+			out = append(out, path)
+		}
+		if len(out) == 20 {
+			break
+		}
+	}
+	return out
 }
 
 func (s *Service) FindSymbols(ctx context.Context, principals []string, libraryID, ref, query, kind string, limit int) ([]SymbolResult, error) {
@@ -1421,6 +1461,75 @@ func (s *Service) fileBody(ctx context.Context, repositoryID, sourceType, projec
 		return "", "remote", []string{"remote: " + readErr.Error()}
 	}
 	return string(raw), "remote", []string{"remote: read live from the source server because this file has no indexed content."}
+}
+
+// DependentResult is one place, in any accessible repository, that uses a
+// symbol, module or service.
+type DependentResult struct {
+	LibraryID, SourceType, Ref, CommitID, FilePath, FromSymbol, Target, Kind string
+	LineNumber                                                               int
+}
+
+type DependentSearch struct {
+	Target       string
+	Dependents   []DependentResult
+	Repositories []string
+	Diagnostics  []string
+}
+
+// FindDependents answers "who uses this" across every accessible repository.
+// trace-dependencies stays inside one repository, so a platform team could not
+// tell who consumes a shared client, a database table or an internal API before
+// changing it.
+func (s *Service) FindDependents(ctx context.Context, principals []string, target, sourceType string, limit int) (DependentSearch, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return DependentSearch{}, errors.New("target is required")
+	}
+	if limit < 1 || limit > 300 {
+		limit = 100
+	}
+	result := DependentSearch{Target: target, Dependents: []DependentResult{}}
+	if len(principals) == 0 {
+		result.Diagnostics = append(result.Diagnostics, "acl: no source principal is mapped to this account, so no repository can be authorized.")
+		return result, nil
+	}
+	join, predicate, args := repositoryACL(principals)
+	statement := `SELECT r.library_id,r.source_type,d.ref_name,d.commit_id,d.file_path,d.from_symbol,d.target,d.dependency_kind,d.line_number
+FROM code_dependencies d JOIN repositories r ON r.id=d.repository_id ` + join + `
+WHERE r.enabled=1 AND ` + predicate + ` AND LOWER(d.target) LIKE LOWER(?)`
+	args = append(args, "%"+target+"%")
+	if sourceType != "" {
+		statement += ` AND r.source_type=?`
+		args = append(args, sourceType)
+	}
+	// Exact targets first: an exact import beats an incidental substring.
+	statement += ` ORDER BY CASE WHEN LOWER(d.target)=LOWER(?) THEN 0 ELSE 1 END,r.library_id,d.file_path,d.line_number LIMIT ?`
+	args = append(args, target, limit)
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
+	if err != nil {
+		return DependentSearch{}, err
+	}
+	defer rows.Close()
+	repositories := map[string]bool{}
+	for rows.Next() {
+		var item DependentResult
+		if err = rows.Scan(&item.LibraryID, &item.SourceType, &item.Ref, &item.CommitID, &item.FilePath, &item.FromSymbol, &item.Target, &item.Kind, &item.LineNumber); err != nil {
+			return DependentSearch{}, err
+		}
+		repositories[item.LibraryID] = true
+		result.Dependents = append(result.Dependents, item)
+	}
+	if err = rows.Err(); err != nil {
+		return DependentSearch{}, err
+	}
+	for library := range repositories {
+		result.Repositories = append(result.Repositories, library)
+	}
+	sort.Strings(result.Repositories)
+	result.Diagnostics = append(result.Diagnostics,
+		fmt.Sprintf("index: %d dependency edge(s) in %d repository(ies); only indexed refs are covered, so a repository that is still indexing cannot appear.", len(result.Dependents), len(result.Repositories)))
+	return result, nil
 }
 
 // ChangeRequestResult is one merge or pull request with the repository it
