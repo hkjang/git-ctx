@@ -8,6 +8,8 @@ fi
 
 version=${1#v}
 image=${2:-git-ctx:v${version}}
+canonical="git-ctx:v${version}"
+compatible="git-ctx:${version}"
 archive="dist/git-ctx-v${version}.tar.gz"
 checksum="${archive}.sha256"
 
@@ -31,12 +33,16 @@ fi
 reported=$(docker run --rm --entrypoint /app/git-ctx "$image" -version 2>/dev/null | head -1 || true)
 case "$reported" in
   *"$version"*) : ;;
-  '') echo "warning: 이미지에서 버전을 확인하지 못했습니다(구버전 이미지일 수 있음)" >&2 ;;
+  '') echo "이미지에서 버전을 확인하지 못했습니다" >&2; exit 1 ;;
   *) echo "이미지가 보고한 버전($reported)이 요청한 버전($version)과 다릅니다" >&2; exit 1 ;;
 esac
 
 mkdir -p dist
-docker save "$image" | gzip -9 > "$archive"
+# 문서와 과거 배포 구성에서 사용된 두 태그를 모두 보존합니다. 동일 이미지에 붙인
+# 별칭이므로 layer 용량은 중복되지 않습니다.
+docker tag "$image" "$canonical"
+docker tag "$image" "$compatible"
+docker save "$canonical" "$compatible" | gzip -9 > "$archive"
 chmod 0644 "$archive"
 (
   cd dist
@@ -45,6 +51,13 @@ chmod 0644 "$archive"
   gzip -t "git-ctx-v${version}.tar.gz"
   sha256sum -c "git-ctx-v${version}.tar.gz.sha256"
 )
+
+canonical_id=$(docker image inspect "$canonical" --format '{{.Id}}')
+compatible_id=$(docker image inspect "$compatible" --format '{{.Id}}')
+if [ "$canonical_id" != "$compatible_id" ]; then
+  echo "릴리스 이미지 별칭이 서로 다른 이미지를 가리킵니다" >&2
+  exit 1
+fi
 
 echo "$archive"
 echo "$checksum"

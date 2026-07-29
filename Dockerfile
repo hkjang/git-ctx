@@ -18,6 +18,15 @@ RUN CGO_ENABLED=1 go test ./... && CGO_ENABLED=1 go build -trimpath \
       -o /out/git-ctx ./cmd/git-ctx
 
 FROM debian:bookworm-slim
+ARG VERSION=""
+ARG COMMIT=""
+ARG BUILD_TIME=""
+LABEL org.opencontainers.image.title="git-ctx" \
+      org.opencontainers.image.description="BitContext-compatible internal development knowledge platform" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${COMMIT}" \
+      org.opencontainers.image.created="${BUILD_TIME}" \
+      org.opencontainers.image.source="https://github.com/hkjang/git-ctx"
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10001 --home /app gitctx && mkdir -p /var/lib/git-ctx/backups && chown -R 10001:10001 /var/lib/git-ctx
 WORKDIR /var/lib/git-ctx
