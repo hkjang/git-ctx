@@ -205,5 +205,7 @@ assert.match(script, /"vector",\s*"observability"/);
 assert.match(script, /function applyVectorFieldState/);
 assert.match(script, /GitCtxRoles\.categoriesFor\(categories, roles\)\.map/);
 assert.match(script, /코드 지식 검색/);
+assert.match(script, /data-admin-category/);
+assert.match(script, /"벡터 DB", vectorAllowed/);
 assert.match(html, /class=["']status-row["']/);
 console.log("admin UI structure tests passed");

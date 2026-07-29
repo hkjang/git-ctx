@@ -2328,37 +2328,53 @@ function setupOps(capabilities) {
   setupAdminNavigation(capabilities);
 }
 function setupAdminNavigation(capabilities) {
+  const vectorAllowed = Boolean(
+    document.querySelector('[data-setting-tab="vector"]'),
+  );
   const entries = [
-    ["settings-admin", "설정", capabilities.settings, "⚙️"],
-    ["users-admin-section", "사용자", capabilities.users, "👥"],
-    ["mcp-admin-section", "MCP", capabilities.mcp, "🧩"],
-    ["source-admin-section", "소스·색인", capabilities.source, "📚"],
-    ["quality-admin-section", "검색 품질", capabilities.quality, "🎯"],
-    ["security-admin-section", "보안·Secret", capabilities.security || capabilities.securityEvents, "🛡️"],
-    ["audit-admin-section", "감사", capabilities.audit, "🧾"],
-    ["database-admin-section", "데이터베이스", capabilities.status, "🗄️"],
-    ["status-admin-section", "운영 상태", capabilities.status, "📊"],
-    ["backup-admin-section", "백업·복구", capabilities.backup, "💾"],
+    ["settings-admin", "설정", capabilities.settings, "⚙️", ""],
+    ["settings-admin", "벡터 DB", vectorAllowed, "🧠", "vector"],
+    ["users-admin-section", "사용자", capabilities.users, "👥", ""],
+    ["mcp-admin-section", "MCP", capabilities.mcp, "🧩", ""],
+    ["source-admin-section", "소스·색인", capabilities.source, "📚", ""],
+    ["quality-admin-section", "검색 품질", capabilities.quality, "🎯", ""],
+    ["security-admin-section", "보안·Secret", capabilities.security || capabilities.securityEvents, "🛡️", ""],
+    ["audit-admin-section", "감사", capabilities.audit, "🧾", ""],
+    ["database-admin-section", "데이터베이스", capabilities.status, "🗄️", ""],
+    ["status-admin-section", "운영 상태", capabilities.status, "📊", ""],
+    ["backup-admin-section", "백업·복구", capabilities.backup, "💾", ""],
   ].filter((entry) => entry[2]);
   $("#admin-menu").innerHTML =
     '<p class="side-nav-title">관리자</p>' +
     entries
-      .map(([id, label, , icon]) => `<button type="button" data-admin-target="${id}"><span class="nav-icon">${icon}</span>${label}</button>`)
+      .map(
+        ([id, label, , icon, category]) =>
+          `<button type="button" data-admin-target="${id}"${category ? ` data-admin-category="${category}"` : ""}><span class="nav-icon">${icon}</span>${label}</button>`,
+      )
       .join("");
-  const open = (target) => {
+  const open = (target, category = "") => {
     document.querySelectorAll(".admin-panel").forEach((panel) => (panel.hidden = panel.id !== target));
-    document.querySelectorAll("[data-admin-target]").forEach((button) => button.classList.toggle("active", button.dataset.adminTarget === target));
+    document.querySelectorAll("[data-admin-target]").forEach((button) =>
+      button.classList.toggle(
+        "active",
+        button.dataset.adminTarget === target &&
+          (button.dataset.adminCategory || "") === category,
+      ),
+    );
+    if (target === "settings-admin" && category) openSettingCategory(category);
     if (target === "database-admin-section") refreshDatabase();
     if (target === "users-admin-section") refreshAdminUsers();
-    rememberView({ panel: target });
+    rememberView({ panel: target, category });
   };
   openAdminPanel = (target) => {
     if (document.querySelector(`[data-admin-target="${target}"]`)) open(target);
   };
   document.querySelectorAll("[data-admin-target]").forEach(
-    (button) => (button.onclick = () => open(button.dataset.adminTarget)),
+    (button) =>
+      (button.onclick = () =>
+        open(button.dataset.adminTarget, button.dataset.adminCategory || "")),
   );
-  if (entries.length) open(entries[0][0]);
+  if (entries.length) open(entries[0][0], entries[0][4]);
 }
 
 let adminUserRoles = [];

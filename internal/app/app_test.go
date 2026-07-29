@@ -1267,6 +1267,28 @@ func TestPublicUIConfigExposesOnlyBranding(t *testing.T) {
 	}
 }
 
+func TestAdminAndStaticUIAreNeverCachedAcrossUpgrades(t *testing.T) {
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:ui-cache?mode=memory&cache=shared&_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	for _, path := range []string{"/admin", "/app.js", "/roles.js", "/app.css"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		response := httptest.NewRecorder()
+		a.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status=%d", path, response.Code)
+		}
+		if got := response.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("%s Cache-Control=%q, want no-store", path, got)
+		}
+	}
+}
+
 func TestSettingCRUDAndMaskPreservation(t *testing.T) {
 	a, err := New(context.Background(), config.Config{
 		ListenAddress: ":0", DatabaseDriver: "sqlite", DatabaseDSN: "file:app-settings?mode=memory&cache=shared&_foreign_keys=on",
