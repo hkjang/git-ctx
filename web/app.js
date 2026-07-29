@@ -506,6 +506,48 @@ function reportError(error, context = "") {
   toast(prefix + (error?.message || "알 수 없는 오류"), "error");
 }
 
+/* ---------------------------------------------------------------------------
+ * 배포 감지
+ * 화면 상단의 버전은 페이지를 연 시점의 값입니다. 관리 화면을 하루 종일 열어 두는
+ * 운영 습관에서는 업그레이드 후에도 예전 버전이 계속 표시되어, "배포했는데 버전이
+ * 안 바뀐다"로 보입니다. 주기적으로 서버 버전을 확인해 달라졌으면 새로고침을
+ * 권합니다.
+ * ------------------------------------------------------------------------- */
+let loadedBuild = null;
+let upgradeTimer = null;
+
+function watchForUpgrade(config) {
+  const current = `${config.version || ""}|${config.build || ""}`;
+  if (loadedBuild === null) loadedBuild = current;
+  if (upgradeTimer) return;
+  upgradeTimer = setInterval(checkForUpgrade, 5 * 60 * 1000);
+  // 탭으로 돌아왔을 때가 업그레이드를 알아채기 가장 좋은 순간입니다.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") checkForUpgrade();
+  });
+}
+
+async function checkForUpgrade() {
+  try {
+    const fresh = await api("/api/v1/public/config");
+    const current = `${fresh.version || ""}|${fresh.build || ""}`;
+    if (loadedBuild === null || current === loadedBuild) return;
+    showUpgradeNotice(fresh.version);
+  } catch {
+    /* 서버가 재기동 중일 수 있으므로 조용히 넘어갑니다. */
+  }
+}
+
+function showUpgradeNotice(version) {
+  const badge = $("#service-version");
+  if (!badge || badge.dataset.upgrade === version) return;
+  badge.dataset.upgrade = version;
+  badge.classList.add("upgraded");
+  badge.textContent = `v${version} 배포됨 · 새로고침`;
+  badge.title = "새 버전이 배포되었습니다. 클릭하면 새로고침합니다.";
+  badge.onclick = () => location.reload();
+}
+
 $("#endpoint").textContent = location.origin;
 async function loadBranding() {
   try {
@@ -517,7 +559,11 @@ async function loadBranding() {
     $("#brand-tagline").textContent = config.tagline || "사내 개발 지식 MCP";
     const versionText = `v${config.version || "unknown"}`;
     $("#service-version").textContent = versionText;
+    // 같은 버전 문자열이라도 다른 빌드일 수 있어, 커밋·빌드 시각을 툴팁으로 답니다.
+    $("#service-version").title = config.build ? `빌드 ${config.build}` : "";
     $("#login-version").textContent = `서비스 버전 ${versionText}`;
+    $("#login-version").title = config.build ? `빌드 ${config.build}` : "";
+    watchForUpgrade(config);
     bootstrapInfo = {
       required: Boolean(config.bootstrapRequired),
       tokenFile: config.bootstrapTokenFile || "backups/bootstrap-admin.token",

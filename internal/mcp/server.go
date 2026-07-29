@@ -1161,7 +1161,7 @@ func (s *Server) platformStatus(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	status := fmt.Sprintf("## git-ctx Platform Status\n\n- Version: %s\n- Metadata Database: connected\n- Enabled Repositories: %d\n- Bitbucket Repositories: %d\n- GitLab Repositories: %d\n- Index Jobs Pending: %d\n- Index Jobs Running: %d\n- Index Jobs Failed: %d\n", version.Version, repositories, bitbucket, gitlab, pending, running, failed)
+	status := fmt.Sprintf("## git-ctx Platform Status\n\n- Version: %s\n- Metadata Database: connected\n- Enabled Repositories: %d\n- Bitbucket Repositories: %d\n- GitLab Repositories: %d\n- Index Jobs Pending: %d\n- Index Jobs Running: %d\n- Index Jobs Failed: %d\n", version.Full(), repositories, bitbucket, gitlab, pending, running, failed)
 	// Connector health belongs in the status an operator asks an agent for: a
 	// paused source is the difference between "nothing matched" and "we are not
 	// currently able to look".

@@ -16,9 +16,16 @@ import (
 	"git-ctx/internal/config"
 	runtimelogging "git-ctx/internal/logging"
 	"git-ctx/internal/recovery"
+	"git-ctx/internal/version"
 )
 
 func main() {
+	// -version 은 DB 없이도 답해야 합니다. 배포 스크립트와 운영자가 "이 바이너리가
+	// 무슨 빌드인지" 를 확인하는 가장 짧은 경로입니다.
+	if len(os.Args) > 1 && (os.Args[1] == "-version" || os.Args[1] == "--version" || os.Args[1] == "version") {
+		fmt.Println(version.Full())
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "recovery-token" {
 		if err := runRecoveryToken(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "recovery-token:", err)
@@ -49,7 +56,8 @@ func main() {
 		IdleTimeout:       httpConfig.IdleTimeout,
 	}
 	go func() {
-		slog.Info("git-ctx listening", "address", httpConfig.ListenAddress)
+		// 업그레이드 후 "정말 새 빌드가 도는가" 를 로그 한 줄로 확인할 수 있어야 합니다.
+		slog.Info("git-ctx listening", "address", httpConfig.ListenAddress, "version", version.Version, "build", version.Full())
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server stopped", "error", err)
 			os.Exit(1)

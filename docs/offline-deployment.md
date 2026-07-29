@@ -7,7 +7,7 @@ AMD64 환경으로 반입할 수 있는 Docker/OCI 이미지 보관 파일이다
 ## 무결성 확인과 Docker 로드
 
 ```bash
-VERSION=0.35.0
+VERSION=0.35.1
 sha256sum -c "git-ctx-v${VERSION}.tar.gz.sha256"
 gzip -dc "git-ctx-v${VERSION}.tar.gz" | docker load
 docker image inspect "git-ctx:v${VERSION}" --format '{{.Id}} {{.Architecture}} {{.Os}}'
@@ -17,7 +17,7 @@ docker image inspect "git-ctx:v${VERSION}" --format '{{.Id}} {{.Architecture}} {
 별도로 준비한다. 기본 포트는 `4747`이며 PostgreSQL은 DSN 하나로 연결한다.
 
 ```bash
-VERSION=0.35.0
+VERSION=0.35.1
 docker run -d --name git-ctx \
   --restart unless-stopped \
   -p 4747:4747 \
@@ -39,7 +39,7 @@ Kubernetes Secret 또는 사내 Secret Store를 사용한다. 최초 관리자 �
 같다.
 
 ```bash
-VERSION=0.35.0
+VERSION=0.35.1
 gzip -dc "git-ctx-v${VERSION}.tar.gz" \
   | sudo ctr --namespace k8s.io images import -
 sudo ctr --namespace k8s.io images list | grep git-ctx
@@ -55,3 +55,23 @@ DSN Secret, 실제 egress CIDR과 Ingress는 환경 overlay에서 제공한다. 
 시작 시 DB migration이 자동 적용되므로 업그레이드 전에 PostgreSQL 백업을 생성한다.
 문제가 생기면 이전 이미지 태그로 workload를 되돌리고, migration 호환 여부에 따라
 백업 DB를 복원한다. 상세 점검 절차는 [operations.md](operations.md)를 따른다.
+
+## 배포된 버전 확인
+
+업그레이드 후 실제로 새 빌드가 도는지 확인하는 방법입니다. 태그만 바꾸고 컨테이너를
+교체하지 않은 경우가 가장 흔한 원인입니다.
+
+```bash
+# 1) 실행 중인 컨테이너가 보고하는 버전과 빌드
+curl -s http://localhost:4747/api/v1/public/config | jq -r '.version, .build'
+
+# 2) 기동 로그 한 줄로도 확인됩니다
+docker logs <container> | grep "git-ctx listening"
+
+# 3) 이미지와 컨테이너가 같은지
+docker inspect <container> --format '{{.Config.Image}}'
+```
+
+`build` 값에는 커밋과 빌드 시각이 포함되므로, 같은 버전 문자열이라도 다른 빌드인지
+구분할 수 있습니다. 이미지 빌드 시 `--build-arg VERSION=v0.35.1` 을 주면 소스의
+버전과 다를 때 빌드가 실패하므로, 태그와 코드가 어긋난 이미지가 만들어지지 않습니다.

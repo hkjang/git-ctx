@@ -61,6 +61,7 @@ import (
 	"git-ctx/internal/version"
 	"git-ctx/internal/webhook"
 	"git-ctx/internal/worker"
+	webfs "git-ctx/web"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -515,7 +516,10 @@ func (a *App) routes() {
 	a.mux.Handle("GET /api/v1/me/calls/{id}", a.authenticate(http.HandlerFunc(a.mcpCallTrace)))
 	a.mux.HandleFunc("GET /admin", a.serveWebApp)
 	a.mux.HandleFunc("GET /admin/", a.serveWebApp)
-	a.mux.Handle("/", http.FileServer(http.Dir("web")))
+	// 업그레이드 후 브라우저가 예전 화면을 계속 쓰지 않도록 항상 재검증하게 합니다.
+	// no-cache 는 캐시를 금지하는 것이 아니라 "쓰기 전에 물어보라" 이므로, 변경이
+	// 없으면 304 로 끝나 오프라인 환경에서도 비용이 늘지 않습니다.
+	a.mux.Handle("/", revalidate(http.FileServer(webRoot())))
 }
 
 func (a *App) serveWebApp(w http.ResponseWriter, r *http.Request) {
@@ -2906,6 +2910,9 @@ func validatePublicAssetURL(value string) error {
 	return nil
 }
 func (a *App) publicUIConfig(w http.ResponseWriter, r *http.Request) {
+	// This response carries the running version. A proxy that cached it would
+	// keep reporting the previous release long after an upgrade.
+	w.Header().Set("Cache-Control", "no-store")
 	bootstrapRequired, bootstrapPath := a.bootstrapStatus()
 	var ssoConfigured int
 	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM system_settings WHERE category='keycloak'`).Scan(&ssoConfigured)
@@ -2913,6 +2920,7 @@ func (a *App) publicUIConfig(w http.ResponseWriter, r *http.Request) {
 		"serviceName": "git-ctx", "tagline": "사내 개발 지식 MCP",
 		"logoUrl": "/logo.svg", "faviconUrl": "/favicon.svg", "notice": "",
 		"version":            version.Version,
+		"build":              version.Full(),
 		"bootstrapRequired":  bootstrapRequired,
 		"bootstrapTokenFile": bootstrapPath,
 		"ssoConfigured":      ssoConfigured > 0,
@@ -5840,7 +5848,7 @@ func (a *App) adminHealth(w http.ResponseWriter, r *http.Request) {
 	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM notification_deliveries WHERE status='dead'`).Scan(&notificationDead)
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
-	jsonOut(w, 200, map[string]any{"status": "ok", "version": version.Version, "database": "ok", "repositories": repositories, "chunks": chunks, "indexJobs": map[string]int64{"pending": pending, "failed": failed}, "notificationDeliveries": map[string]int64{"pending": notificationPending, "failed": notificationFailed, "dead": notificationDead}, "activeApiKeys": activeKeys, "activeManagedSecrets": activeSecrets, "observability": map[string]bool{"tracingEnabled": a.traces.Enabled()}, "go": map[string]any{"goroutines": runtime.NumGoroutine(), "allocatedBytes": memory.Alloc}})
+	jsonOut(w, 200, map[string]any{"status": "ok", "version": version.Version, "build": version.Full(), "database": "ok", "repositories": repositories, "chunks": chunks, "indexJobs": map[string]int64{"pending": pending, "failed": failed}, "notificationDeliveries": map[string]int64{"pending": notificationPending, "failed": notificationFailed, "dead": notificationDead}, "activeApiKeys": activeKeys, "activeManagedSecrets": activeSecrets, "observability": map[string]bool{"tracingEnabled": a.traces.Enabled()}, "go": map[string]any{"goroutines": runtime.NumGoroutine(), "allocatedBytes": memory.Alloc}})
 }
 
 // setupStatus reports how far the initial configuration has progressed. A fresh
@@ -6568,6 +6576,31 @@ func tracing(next http.Handler) http.Handler {
 		}
 	})
 }
+
+// revalidate marks static assets as always-revalidate. The version badge comes
+// from an API call, but the screens themselves are files: without this a
+// browser could keep serving the previous release's app.js after an upgrade and
+// the new UI would simply not appear.
+// webRoot returns the UI file system. The assets are embedded in the binary so
+// the screen can never be an older release than the program serving it, and a
+// volume mounted over the application directory cannot hide it. Setting
+// GIT_CTX_WEB_DIR points at a directory instead, which is how the UI is edited
+// without rebuilding.
+func webRoot() http.FileSystem {
+	if directory := strings.TrimSpace(os.Getenv(webfs.Directory)); directory != "" {
+		slog.Info("serving the web UI from disk", "directory", directory)
+		return http.Dir(directory)
+	}
+	return http.FS(webfs.Assets)
+}
+
+func revalidate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		next.ServeHTTP(w, r)
+	})
+}
+
 func requestLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := r.Header.Get("X-Request-ID")

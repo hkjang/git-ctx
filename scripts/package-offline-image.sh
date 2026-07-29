@@ -26,6 +26,15 @@ if [ "$platform" != "linux/amd64" ]; then
   exit 1
 fi
 
+# 이미지가 실제로 그 버전을 보고하는지 확인합니다. 태그만 새로 붙인 예전 이미지를
+# 릴리스 아티팩트로 내보내는 사고를 여기서 잡습니다.
+reported=$(docker run --rm --entrypoint /app/git-ctx "$image" -version 2>/dev/null | head -1 || true)
+case "$reported" in
+  *"$version"*) : ;;
+  '') echo "warning: 이미지에서 버전을 확인하지 못했습니다(구버전 이미지일 수 있음)" >&2 ;;
+  *) echo "이미지가 보고한 버전($reported)이 요청한 버전($version)과 다릅니다" >&2; exit 1 ;;
+esac
+
 mkdir -p dist
 docker save "$image" | gzip -9 > "$archive"
 chmod 0644 "$archive"

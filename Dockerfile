@@ -1,9 +1,21 @@
 FROM golang:1.26-bookworm AS build
 WORKDIR /src
+# VERSION 은 릴리스 태그입니다. 소스의 version.Version 과 다르면 빌드를 멈춰,
+# 태그만 올리고 코드 버전을 잊는 배포 사고를 원천 차단합니다.
+ARG VERSION=""
+ARG COMMIT=""
+ARG BUILD_TIME=""
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=1 go test ./... && CGO_ENABLED=1 go build -trimpath -ldflags="-s -w" -o /out/git-ctx ./cmd/git-ctx
+RUN set -eu; \
+    source_version=$(sed -n 's/.*Version = "\(.*\)".*/\1/p' internal/version/version.go); \
+    if [ -n "$VERSION" ] && [ "${VERSION#v}" != "$source_version" ]; then \
+      echo "이미지 태그($VERSION)와 소스 버전($source_version)이 다릅니다" >&2; exit 1; \
+    fi
+RUN CGO_ENABLED=1 go test ./... && CGO_ENABLED=1 go build -trimpath \
+      -ldflags="-s -w -X git-ctx/internal/version.Commit=${COMMIT} -X git-ctx/internal/version.BuildTime=${BUILD_TIME}" \
+      -o /out/git-ctx ./cmd/git-ctx
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*

@@ -295,6 +295,12 @@ legend {
   font-size: 12px;
   white-space: nowrap;
 }
+.version-badge.upgraded {
+  border-color: var(--warning);
+  background: var(--warning-soft);
+  color: var(--warning);
+  cursor: pointer;
+}
 .version-text {
   color: var(--text-muted);
   font-size: 13px;
