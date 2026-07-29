@@ -6,9 +6,10 @@ import (
 	"strings"
 )
 
-var secretAssignmentRE = regexp.MustCompile(`(?i)(api[_-]?key|access[_-]?token|client[_-]?secret|password|passwd)\s*[:=]\s*["']?([A-Za-z0-9_./+=-]{8,})`)
+var privateKeyRE = regexp.MustCompile(`(?i)-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----`)
+var secretAssignmentRE = regexp.MustCompile(`(?i)(api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|private[_-]?token|client[_-]?secret|secret[_-]?key|password|passwd)\s*[:=]\s*(?:"[^"\r\n]{4,}"|'[^'\r\n]{4,}'|[^\s,;#]{4,})`)
 var awsKeyRE = regexp.MustCompile(`\bAKIA[A-Z0-9]{16}\b`)
-var knownTokenRE = regexp.MustCompile(`\b(?:glpat-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|hvs\.[A-Za-z0-9_-]{20,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b`)
+var knownTokenRE = regexp.MustCompile(`\b(?:glpat-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}|hvs\.[A-Za-z0-9_-]{20,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b`)
 var credentialDSNRE = regexp.MustCompile(`(?i)\b(?:postgres(?:ql)?|mysql|mariadb)://[^/\s:@]+:[^@\s/]+@[^\s"'<>]+`)
 var entropyCandidateRE = regexp.MustCompile(`[A-Za-z0-9+/=_-]{32,}`)
 var commonHashRE = regexp.MustCompile(`(?i)^(?:[a-f0-9]{40}|[a-f0-9]{64})$`)
@@ -16,7 +17,7 @@ var commonHashRE = regexp.MustCompile(`(?i)^(?:[a-f0-9]{40}|[a-f0-9]{64})$`)
 // Sanitize masks secrets in untrusted repository content before indexing or
 // returning a snippet received directly from a remote source search API.
 func Sanitize(content string) (string, string) {
-	if strings.Contains(content, "-----BEGIN PRIVATE KEY-----") || strings.Contains(content, "-----BEGIN RSA PRIVATE KEY-----") || strings.Contains(content, "-----BEGIN OPENSSH PRIVATE KEY-----") {
+	if privateKeyRE.MatchString(content) {
 		return "", "private_key"
 	}
 	finding := ""

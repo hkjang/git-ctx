@@ -34,7 +34,7 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
-2026-07-29 로컬 검증 결과:
+2026-07-30 로컬 검증 결과:
 
 - Keycloak 26.3.3에서 별도 `groups` Client Scope나 ID Token 역할 Mapper 없이
   Authorization Code+PKCE 로그인, `/admin` 복귀, `/api/v1/me` 200,
@@ -53,7 +53,7 @@ PostgreSQL 16 notification outbox delivery  PASS
 pgvector extension activation·model revision filtering PASS
 SMTP protocol connection test               PASS
 Notification outbox 1,205-event paging      PASS
-PostgreSQL 16 DSN-only application startup PASS
+PostgreSQL 16 application bootstrap          PASS
 PostgreSQL 실패→SQLite 복구→PostgreSQL 논리 이전·재기동 PASS
 node test/web/admin-ui.test.js              PASS
 node test/web/guides.test.js                PASS

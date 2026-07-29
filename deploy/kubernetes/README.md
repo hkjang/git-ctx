@@ -1,14 +1,24 @@
 # Kubernetes 배포
 
 운영 Secret은 Git에 저장하지 않고 External Secrets, Vault 또는 사내 KMS 연동으로
-DB DSN 하나만 가진 `git-ctx-bootstrap`을 생성한다. 나머지 운영 설정은 관리자
-화면에서 암호화·버전 관리한다. `secret.example.yaml`은 그대로 적용하지 않는다.
+DB DSN과 독립된 장기 복구 키를 가진 `git-ctx-bootstrap`을 생성한다. 복구 키는 최소
+32자의 고엔트로피 값으로 최초 한 번만 만들고 모든 replica에 동일하게 주입한다.
+나머지 운영 설정은 관리자 화면에서 암호화·버전 관리한다. `secret.example.yaml`은
+그대로 적용하지 않는다.
 
 ```bash
+# 최초 한 번만 생성하고 이후 External Secrets/Vault/KMS에 보관한다.
+RECOVERY_KEY="$(openssl rand -base64 48)"
 kubectl -n git-ctx create secret generic git-ctx-bootstrap \
-  --from-literal=GIT_CTX_DB_DSN='postgres://...'
+  --from-literal=GIT_CTX_DB_DSN='postgres://...' \
+  --from-literal=GIT_CTX_RECOVERY_KEY="${RECOVERY_KEY}"
+unset RECOVERY_KEY
 kubectl -n git-ctx apply -k deploy/kubernetes/base
 ```
+
+복구 키를 rollout마다 재생성하지 않는다. DSN과 복구 키는 서로 독립된 Secret
+항목으로 External Secrets/Vault/KMS에 보관하고, DB와 backup PVC 외부의 DR 절차로
+둘 다 복구할 수 있어야 한다.
 
 기본 NetworkPolicy는 외부 사내 Keycloak·Bitbucket·GitLab과 PostgreSQL을 위해
 TCP 443/5432 및 DNS만 허용한다. 운영 overlay에서는 실제 사내망과 DB CIDR로
@@ -21,5 +31,6 @@ TCP 443/5432 및 DNS만 허용한다. 운영 overlay에서는 실제 사내망�
 
 기본 backup PVC는 여러 replica의 scheduler가 같은 아카이브를 읽을 수 있도록 RWX를
 요청한다. 클러스터의 StorageClass가 RWX를 지원하지 않으면 운영 overlay에서 NFS/CSI
-공유 볼륨 또는 승인된 백업 스토리지로 교체한다. 원래 DB DSN Secret은 이 PVC와
-분리된 Secret Store에 보관한다.
+공유 볼륨 또는 승인된 백업 스토리지로 교체한다. 원래 DB DSN과
+`GIT_CTX_RECOVERY_KEY`는 서로 독립된 항목으로 이 PVC와 분리된 Secret Store에
+보관한다.

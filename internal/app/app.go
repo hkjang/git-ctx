@@ -144,6 +144,19 @@ func (l *attemptLimiter) allow(key string, limit int, window time.Duration) bool
 }
 
 func New(ctx context.Context, c config.Config) (*App, error) {
+	c.RecoveryKey = strings.TrimSpace(c.RecoveryKey)
+	if c.RecoveryKey == "" {
+		// Configs assembled by an embedding program (rather than FromEnv) get
+		// an unguessable process-local key. Operational recovery intentionally
+		// requires the explicit, stable key enforced by config.FromEnv.
+		var err error
+		c.RecoveryKey, err = randomToken(32)
+		if err != nil {
+			return nil, fmt.Errorf("generate recovery signing key: %w", err)
+		}
+	} else if len(c.RecoveryKey) < 32 {
+		return nil, errors.New("recovery signing key must contain at least 32 characters")
+	}
 	block, err := aes.NewCipher([]byte(c.MasterKey))
 	if err != nil {
 		return nil, err
@@ -577,6 +590,10 @@ func (a *App) authenticate(next http.Handler) http.Handler {
 		}
 		if cookie, err := r.Cookie("git_ctx_session"); err == nil {
 			if principal, expires, ok := a.sessionPrincipal(r.Context(), cookie.Value); ok {
+				if !cookieMutationAllowed(r) {
+					problem(w, http.StatusForbidden, "csrf_check_failed", "Session-authenticated state changes require a same-origin request")
+					return
+				}
 				a.renewSession(w, r, cookie.Value, principal, expires)
 				next.ServeHTTP(w, r.WithContext(auth.WithPrincipal(r.Context(), principal)))
 				return
@@ -591,7 +608,7 @@ func (a *App) authenticate(next http.Handler) http.Handler {
 			return
 		}
 		if token != "" {
-			identity, err := a.oidc.Verify(r.Context(), token)
+			identity, err := a.oidc.VerifyAccessToken(r.Context(), token)
 			if err != nil {
 				problem(w, http.StatusUnauthorized, "invalid_token", "Keycloak access token validation failed")
 				return
@@ -613,6 +630,29 @@ func (a *App) authenticate(next http.Handler) http.Handler {
 		}
 		problem(w, http.StatusUnauthorized, "authentication_required", "Use a Keycloak bearer token or MCP API key")
 	})
+}
+
+func cookieMutationAllowed(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return true
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		// Session cookies are a browser credential. Non-browser clients use an
+		// API key or bearer token, so an unsafe cookie request without Origin is
+		// rejected instead of creating an ambiguous CSRF bypass.
+		return false
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	expectedScheme := "http"
+	if requestIsSecure(r) {
+		expectedScheme = "https"
+	}
+	return strings.EqualFold(parsed.Scheme, expectedScheme) && strings.EqualFold(parsed.Host, r.Host)
 }
 
 func (a *App) bootstrapLogin(w http.ResponseWriter, r *http.Request) {
@@ -681,7 +721,7 @@ func (a *App) recoveryLogin(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusUnauthorized, "invalid_recovery_token", "Recovery token is invalid, expired, or already used")
 		return
 	}
-	tokenHash, tokenExpires, err := recovery.Verify(strings.TrimSpace(in.Token), a.cfg.KeyPepper, time.Now().UTC())
+	tokenHash, tokenExpires, err := recovery.Verify(strings.TrimSpace(in.Token), a.cfg.RecoveryKey, time.Now().UTC())
 	if err != nil {
 		a.audit(r, auth.Principal{UserID: "anonymous"}, "recovery.login", "session", "break-glass", "failure", nil)
 		problem(w, http.StatusUnauthorized, "invalid_recovery_token", "Recovery token is invalid, expired, or already used")
@@ -881,6 +921,10 @@ func (a *App) callback(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie("git_ctx_session"); err == nil {
+		if !cookieMutationAllowed(r) {
+			problem(w, http.StatusForbidden, "csrf_check_failed", "Session-authenticated state changes require a same-origin request")
+			return
+		}
 		_, _ = a.store.DB.ExecContext(r.Context(), a.store.Rebind(`DELETE FROM user_sessions WHERE id_hash=?`), sessionHash(cookie.Value))
 	}
 	http.SetCookie(w, &http.Cookie{Name: "git_ctx_session", Path: "/", MaxAge: -1, HttpOnly: true, Secure: requestIsSecure(r), SameSite: http.SameSiteLaxMode})

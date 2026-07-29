@@ -79,11 +79,15 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 SQLite는 개발·평가용이며 운영 기본은 PostgreSQL입니다.
 
 ```bash
+# 최초 한 번만 생성하고 이후에는 Secret Store의 같은 값을 주입합니다.
+export GIT_CTX_RECOVERY_KEY="$(openssl rand -base64 48)"
 export GIT_CTX_DB_DSN='file:git-ctx.db?_foreign_keys=on&_busy_timeout=5000'
 go run ./cmd/git-ctx
 ```
 
-실제 Bootstrap 입력은 `GIT_CTX_DB_DSN` 하나뿐이며 driver는 DSN에서 자동 판별됩니다.
+`GIT_CTX_RECOVERY_KEY`는 최초 한 번만 생성해 이후에도 같은 값을 주입하는 32자 이상의
+고엔트로피 장기 비밀이며, DB DSN과 독립적으로 보관해야 합니다. 필수 Bootstrap 입력은
+이 키와 `GIT_CTX_DB_DSN` 두 개이고 driver는 DSN에서 자동 판별됩니다.
 Keycloak이 설정되지 않은 최초 기동에는 `backups/bootstrap-admin.token`이 권한 0600으로
 한 번 생성됩니다. 화면의 `최초 관리자 설정`에서 입력하면 되고 Keycloak 설정 저장
 후 실제 `platform-admin` Keycloak 로그인이 성공하면 토큰, 30분 HttpOnly 초기 설정
@@ -100,7 +104,9 @@ Keycloak 장애나 잘못된 설정으로 모든 관리자가 잠긴 경우 서�
 재사용할 수 없습니다.
 
 ```bash
-GIT_CTX_DB_DSN='postgres://...' ./git-ctx recovery-token --ttl 15m
+GIT_CTX_DB_DSN='postgres://...' \
+GIT_CTX_RECOVERY_KEY='<Secret Store의 기존 장기 복구 키>' \
+./git-ctx recovery-token --ttl 15m
 ```
 
 출력된 토큰을 `/admin?recovery=1`에서 입력하면 30분짜리 제한된 최고관리자 세션이
@@ -120,10 +126,12 @@ curl -X POST -H "Authorization: Bearer $(cat backups/bootstrap-admin.token)" \
 
 ## 데이터베이스
 
-PostgreSQL은 `GIT_CTX_DB_DSN` 하나만으로 최초 연결합니다.
+PostgreSQL 연결 정보는 `GIT_CTX_DB_DSN`으로 제공하고, 프로세스 기동에는 별도의
+`GIT_CTX_RECOVERY_KEY`도 필요합니다.
 
 ```bash
-GIT_CTX_DB_DSN='postgres://gitctx:password@db:5432/gitctx?sslmode=require'
+export GIT_CTX_RECOVERY_KEY='<Secret Store에서 주입>'
+export GIT_CTX_DB_DSN='postgres://gitctx:password@db:5432/gitctx?sslmode=require'
 ```
 
 마이그레이션은 시작할 때 멱등 실행됩니다. 연결에 실패하면
@@ -131,9 +139,11 @@ GIT_CTX_DB_DSN='postgres://gitctx:password@db:5432/gitctx?sslmode=require'
 PostgreSQL DSN을 읽기 전용으로 시험한 뒤 명시적 확인과 사유를 입력해 스키마·데이터를
 논리 이전할 수 있습니다. 성공 후 재시작하면 암호화 저장된 검증 DSN을 활성화합니다.
 
-설정 암호화 키와 API-key pepper는 최초 Bootstrap DSN을 도메인 분리해 파생합니다.
-따라서 관리자 전환 뒤에도 환경의 Bootstrap DSN 문자열을 임의 변경하지 말고 Secret
-Store에 보관해야 합니다. 관리자 DSN 원문은 조회·로그·감사 기록에 남지 않습니다.
+설정 암호화 키와 API-key pepper는 최초 Bootstrap DSN을 도메인 분리해 파생하지만,
+복구 토큰 서명키는 DSN이 아니라 `GIT_CTX_RECOVERY_KEY`를 사용합니다. Bootstrap DSN
+문자열과 복구 키를 서로 독립된 Secret 항목으로 보관하고, DB·애플리케이션 백업과
+분리해 함께 복구할 수 있어야 합니다. 여러 Pod에는 동일한 복구 키를 주입하며 배포 때
+임의로 재생성하지 않습니다. 관리자 DSN 원문은 조회·로그·감사 기록에 남지 않습니다.
 
 상세 설계와 구현 상태는 [docs/requirements.md](docs/requirements.md) 및
 [docs/operations.md](docs/operations.md)를 참고하십시오. 구현 증거, 미구현 범위와
@@ -171,6 +181,11 @@ Search API를 전역·저장소 범위로 모두 사용하며, 로컬 색인이 
 저장소를 검색하며, 이때 응답 `Diagnostics`에 ACL 우회 사실이 기록됩니다. 예를 들어 `dify 소스 검색해`는 검색 명령
 표현을 제거한 `dify`를 원격 API에 전달합니다. 기존 `search-source`와 `query-docs`도 같은 안전한 원격
 검색 결과 경로를 사용합니다.
+
+Bitbucket Server의 원격 Code Search는 기본 브랜치와 512 KiB 미만 파일만 검색합니다.
+비기본 branch/tag 요청은 기본 브랜치 결과로 바꿔 표시하지 않고, 해당 ref의 로컬
+색인을 사용하거나 지원 범위를 명시한 경고를 반환합니다. Bitbucket 자체 제한인
+쿼리 250자·최대 9개 표현식도 그대로 적용됩니다.
 
 발급된 MCP API 키의 도구 Scope는 사용자 키 관리 화면에서 변경할 수 있으며,
 관리자는 API 키 관리 API를 통해 Scope를 수정할 수 있습니다.

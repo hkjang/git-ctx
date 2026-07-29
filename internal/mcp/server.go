@@ -109,6 +109,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "streaming is unsupported", http.StatusInternalServerError)
 			return
 		}
+		// The process-wide HTTP WriteTimeout protects ordinary API responses,
+		// but an MCP SSE session is intentionally long lived. Clear only this
+		// response's deadline; disconnects and session deletion still cancel it.
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")

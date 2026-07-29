@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"git-ctx/internal/store"
+	"git-ctx/internal/worker"
 )
 
 type IntervalLoader func(context.Context) time.Duration
@@ -67,7 +68,7 @@ func (s *Scheduler) RunOnce(ctx context.Context) error {
 	}
 	threshold := now.Add(-interval)
 	// Recover work abandoned by a terminated worker. Attempts are preserved.
-	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`UPDATE index_jobs SET status='pending',next_run_at=?,error_message='worker lease expired' WHERE status='running' AND started_at<?`), now, now.Add(-15*time.Minute))
+	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`UPDATE index_jobs SET status='pending',next_run_at=?,error_message='worker lease expired' WHERE status='running' AND started_at<?`), now, now.Add(-worker.JobLeaseDuration))
 	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`DELETE FROM auth_flows WHERE expires_at<?`), now)
 	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`DELETE FROM user_sessions WHERE expires_at<?`), now)
 	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`DELETE FROM mcp_sessions WHERE expires_at<?`), now)

@@ -56,9 +56,9 @@ type Service struct {
 }
 
 type delivery struct {
-	ID, NotificationID, Channel, UserID, Email, Type, ResourceID, Title, Message string
-	Attempts                                                                     int
-	NextAttempt                                                                  time.Time
+	ID, NotificationID, Channel, DestinationHash, UserID, Email, Type, ResourceID, Title, Message string
+	Attempts                                                                                      int
+	NextAttempt                                                                                   time.Time
 }
 
 type payload struct {
@@ -102,16 +102,24 @@ func (s *Service) RunOnce(ctx context.Context) error {
 	if err = s.seed(ctx, cfg, now); err != nil {
 		return err
 	}
-	rows, err := s.store.DB.QueryContext(ctx, `SELECT d.id,d.notification_id,d.channel,d.attempts,d.next_attempt_at,n.user_id,u.email,n.notification_type,n.resource_id,n.title,n.message
+	duePredicate := "d.next_attempt_at<=?"
+	if s.store.Driver() == "sqlite" {
+		// sqlite3 stores time.Time values with their numeric offset. Lexical
+		// comparison misorders equivalent instants written in +09:00 and UTC;
+		// datetime() normalizes both operands before deciding whether a retry is
+		// due. PostgreSQL performs this conversion through the typed parameter.
+		duePredicate = "datetime(d.next_attempt_at)<=datetime(?)"
+	}
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT d.id,d.notification_id,d.channel,d.destination_hash,d.attempts,d.next_attempt_at,n.user_id,u.email,n.notification_type,n.resource_id,n.title,n.message
 FROM notification_deliveries d JOIN notifications n ON n.id=d.notification_id JOIN users u ON u.id=n.user_id
-WHERE d.status IN ('pending','failed') ORDER BY d.created_at LIMIT 100`)
+WHERE d.status IN ('pending','failed') AND `+duePredicate+` ORDER BY d.created_at LIMIT 100`), now)
 	if err != nil {
 		return err
 	}
 	var deliveries []delivery
 	for rows.Next() {
 		var item delivery
-		if err = rows.Scan(&item.ID, &item.NotificationID, &item.Channel, &item.Attempts, &item.NextAttempt, &item.UserID, &item.Email, &item.Type, &item.ResourceID, &item.Title, &item.Message); err != nil {
+		if err = rows.Scan(&item.ID, &item.NotificationID, &item.Channel, &item.DestinationHash, &item.Attempts, &item.NextAttempt, &item.UserID, &item.Email, &item.Type, &item.ResourceID, &item.Title, &item.Message); err != nil {
 			rows.Close()
 			return err
 		}
@@ -127,6 +135,14 @@ WHERE d.status IN ('pending','failed') ORDER BY d.created_at LIMIT 100`)
 		return err
 	}
 	for _, item := range deliveries {
+		if item.DestinationHash != destinationHash(item.Channel, currentDestination(cfg, item)) {
+			// Destinations are intentionally stored only as hashes. If an email
+			// address or webhook changes before delivery, the old row cannot be
+			// sent to its original destination and must not be duplicated onto
+			// the new one. The seeding pass creates the replacement row.
+			_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`UPDATE notification_deliveries SET status='superseded',last_error='destination changed before delivery',updated_at=? WHERE id=? AND status IN ('pending','failed')`), now, item.ID)
+			continue
+		}
 		result, claimErr := s.store.DB.ExecContext(ctx, s.store.Rebind(`UPDATE notification_deliveries SET status='sending',attempts=attempts+1,updated_at=? WHERE id=? AND status IN ('pending','failed')`), now, item.ID)
 		if claimErr != nil {
 			continue
@@ -149,6 +165,22 @@ WHERE d.status IN ('pending','failed') ORDER BY d.created_at LIMIT 100`)
 		_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`UPDATE notification_deliveries SET status=?,next_attempt_at=?,last_error=?,updated_at=? WHERE id=? AND status='sending'`), status, time.Now().UTC().Add(delay), truncate(sendErr.Error(), 500), time.Now().UTC(), item.ID)
 	}
 	return nil
+}
+
+func currentDestination(cfg Config, item delivery) string {
+	switch item.Channel {
+	case "webhook":
+		return cfg.WebhookURL
+	case "messenger":
+		return cfg.MessengerWebhookURL
+	case "email":
+		if cfg.SMTPEnabled {
+			return item.Email
+		}
+		return ""
+	default:
+		return ""
+	}
 }
 
 func (s *Service) seed(ctx context.Context, cfg Config, now time.Time) error {
@@ -218,41 +250,84 @@ func (s *Service) seedEmail(ctx context.Context, activeSince, now time.Time) err
 	if s.store.Driver() == "sqlite" {
 		activeSinceValue = activeSince.UTC().Truncate(time.Second).Format("2006-01-02 15:04:05")
 	}
-	for {
-		rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT n.id,u.email
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT DISTINCT u.id,u.email
 FROM notifications n JOIN users u ON u.id=n.user_id
-WHERE n.created_at>=? AND u.email<>'' AND NOT EXISTS (
+WHERE n.created_at>=? AND u.email<>''
+ORDER BY u.id,u.email`), activeSinceValue)
+	if err != nil {
+		return err
+	}
+	type destination struct {
+		userID, email, hash string
+	}
+	var destinations []destination
+	for rows.Next() {
+		var item destination
+		if err = rows.Scan(&item.userID, &item.email); err != nil {
+			rows.Close()
+			return err
+		}
+		item.hash = destinationHash("email", item.email)
+		destinations = append(destinations, item)
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+
+	// The destination hash is calculated in Go so SQLite and PostgreSQL use the
+	// exact same normalization and SHA-256 implementation. Feed those hashes
+	// back to the query in bounded batches: a dead delivery for an old address
+	// must not suppress a new delivery after the user's email changes.
+	const destinationBatchSize = 250
+	for start := 0; start < len(destinations); start += destinationBatchSize {
+		end := min(start+destinationBatchSize, len(destinations))
+		batch := destinations[start:end]
+		values := strings.TrimSuffix(strings.Repeat("(?,?,?),", len(batch)), ",")
+		args := make([]any, 0, len(batch)*3+1)
+		for _, item := range batch {
+			args = append(args, item.userID, item.email, item.hash)
+		}
+		args = append(args, activeSinceValue)
+		statement := `WITH email_destinations(user_id,email,destination_hash) AS (VALUES ` + values + `)
+SELECT n.id,e.email,e.destination_hash
+FROM notifications n
+JOIN users u ON u.id=n.user_id
+JOIN email_destinations e ON e.user_id=u.id AND e.email=u.email
+WHERE n.created_at>=? AND NOT EXISTS (
   SELECT 1 FROM notification_deliveries d
-  WHERE d.notification_id=n.id AND d.channel='email'
+  WHERE d.notification_id=n.id AND d.channel='email' AND d.destination_hash=e.destination_hash
 )
-ORDER BY n.created_at,n.id LIMIT 1000`), activeSinceValue)
-		if err != nil {
-			return err
-		}
-		type recipient struct{ notificationID, email string }
-		var recipients []recipient
-		for rows.Next() {
-			var item recipient
-			if err = rows.Scan(&item.notificationID, &item.email); err != nil {
-				rows.Close()
-				return err
+ORDER BY n.created_at,n.id LIMIT 1000`
+		for {
+			deliveryRows, queryErr := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
+			if queryErr != nil {
+				return queryErr
 			}
-			recipients = append(recipients, item)
-		}
-		if err = rows.Close(); err != nil {
-			return err
-		}
-		for _, item := range recipients {
-			hash := destinationHash("email", item.email)
-			id := deliveryID(item.notificationID, "email", hash)
-			if _, err = s.store.DB.ExecContext(ctx, s.store.Rebind(`INSERT INTO notification_deliveries(id,notification_id,channel,destination_hash,next_attempt_at) VALUES(?,?,?,?,?) ON CONFLICT(notification_id,channel,destination_hash) DO NOTHING`), id, item.notificationID, "email", hash, now); err != nil {
-				return err
+			type recipient struct{ notificationID, email, hash string }
+			var recipients []recipient
+			for deliveryRows.Next() {
+				var item recipient
+				if queryErr = deliveryRows.Scan(&item.notificationID, &item.email, &item.hash); queryErr != nil {
+					deliveryRows.Close()
+					return queryErr
+				}
+				recipients = append(recipients, item)
 			}
-		}
-		if len(recipients) < 1000 {
-			return nil
+			if queryErr = deliveryRows.Close(); queryErr != nil {
+				return queryErr
+			}
+			for _, item := range recipients {
+				id := deliveryID(item.notificationID, "email", item.hash)
+				if _, err = s.store.DB.ExecContext(ctx, s.store.Rebind(`INSERT INTO notification_deliveries(id,notification_id,channel,destination_hash,next_attempt_at) VALUES(?,?,?,?,?) ON CONFLICT(notification_id,channel,destination_hash) DO NOTHING`), id, item.notificationID, "email", item.hash, now); err != nil {
+					return err
+				}
+			}
+			if len(recipients) < 1000 {
+				break
+			}
 		}
 	}
+	return nil
 }
 
 func (s *Service) send(ctx context.Context, client *http.Client, cfg Config, item delivery) error {
@@ -464,7 +539,17 @@ func notificationTLSConfig(cfg Config) (*tls.Config, error) {
 }
 
 func destinationHash(channel, destination string) string {
-	sum := sha256.Sum256([]byte(channel + "\x00" + strings.ToLower(strings.TrimSpace(destination))))
+	normalized := strings.TrimSpace(destination)
+	if channel == "email" {
+		normalized = strings.ToLower(normalized)
+	} else if parsed, err := url.Parse(normalized); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		// URL scheme and host are case-insensitive; path and query are not.
+		// Lowercasing the whole URL conflates distinct webhook endpoints.
+		parsed.Scheme = strings.ToLower(parsed.Scheme)
+		parsed.Host = strings.ToLower(parsed.Host)
+		normalized = parsed.String()
+	}
+	sum := sha256.Sum256([]byte(channel + "\x00" + normalized))
 	return hex.EncodeToString(sum[:])
 }
 

@@ -328,7 +328,7 @@ func (v *OIDCVerifier) get(ctx context.Context, cfg OIDCConfig, accessToken bool
 	if accessToken && v.accessVerifier != nil && v.accessKey == key && time.Now().Before(v.accessExpires) {
 		return v.accessVerifier, nil
 	}
-	if v.verifier != nil && v.key == key && time.Now().Before(v.expires) {
+	if !accessToken && v.verifier != nil && v.key == key && time.Now().Before(v.expires) {
 		return v.verifier, nil
 	}
 	ctx, err := oidcContext(ctx, cfg)

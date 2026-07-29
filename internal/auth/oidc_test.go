@@ -76,7 +76,16 @@ func TestOIDCVerifierMapsKeycloakClaims(t *testing.T) {
 	if !contains(id.ACLGroups, "group:readonly") {
 		t.Fatalf("automatic ACL groups=%v", id.ACLGroups)
 	}
-	accessID, err := verifier.VerifyAccessToken(context.Background(), raw)
+	accessRaw, err := jwt.Signed(signer).Claims(jwt.Claims{Issuer: issuer, Subject: "kc-1", Audience: jwt.Audience{"account"}, Expiry: jwt.NewNumericDate(now.Add(time.Hour)), IssuedAt: jwt.NewNumericDate(now)}).Claims(map[string]any{
+		"azp": "git-ctx", "preferred_username": "alice", "email": "alice@example.test",
+		"realm_access": map[string]any{"roles": []string{"ctx-admin"}},
+	}).Serialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Verify the ID token first to ensure its audience-checking verifier cannot
+	// leak through the cache into the access-token path.
+	accessID, err := verifier.VerifyAccessToken(context.Background(), accessRaw)
 	if err != nil || !contains(accessID.Roles, "platform-admin") {
 		t.Fatalf("access token identity=%#v err=%v", accessID, err)
 	}

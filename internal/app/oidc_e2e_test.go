@@ -28,6 +28,7 @@ func TestKeycloakOIDCEndToEndSavePKCECallbackAndSession(t *testing.T) {
 	}
 	var issuer string
 	var sawVerifier bool
+	var accessToken string
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/.well-known/openid-configuration":
@@ -53,8 +54,16 @@ func TestKeycloakOIDCEndToEndSavePKCECallbackAndSession(t *testing.T) {
 				http.Error(w, signErr.Error(), http.StatusInternalServerError)
 				return
 			}
+			accessToken, signErr = jwt.Signed(signer).Claims(jwt.Claims{Issuer: issuer, Subject: "kc-e2e", Audience: jwt.Audience{"account"}, Expiry: jwt.NewNumericDate(now.Add(time.Hour)), IssuedAt: jwt.NewNumericDate(now)}).Claims(map[string]any{
+				"azp": "git-ctx", "preferred_username": "oidc-admin", "email": "admin@example.test", "bitbucket_user_slug": "oidc.bb",
+				"realm_access": map[string]any{"roles": []string{"platform-admin"}},
+			}).Serialize()
+			if signErr != nil {
+				http.Error(w, signErr.Error(), http.StatusInternalServerError)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"access_token": "access", "token_type": "Bearer", "expires_in": 3600, "id_token": raw})
+			json.NewEncoder(w).Encode(map[string]any{"access_token": accessToken, "token_type": "Bearer", "expires_in": 3600, "id_token": raw})
 		default:
 			http.NotFound(w, r)
 		}
@@ -125,6 +134,13 @@ func TestKeycloakOIDCEndToEndSavePKCECallbackAndSession(t *testing.T) {
 	a.Handler().ServeHTTP(meResult, me)
 	if meResult.Code != http.StatusOK || !strings.Contains(meResult.Body.String(), "oidc-admin") || !strings.Contains(meResult.Body.String(), "platform-admin") {
 		t.Fatalf("me=%d body=%s", meResult.Code, meResult.Body.String())
+	}
+	bearer := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+	bearer.Header.Set("Authorization", "Bearer "+accessToken)
+	bearerResult := httptest.NewRecorder()
+	a.Handler().ServeHTTP(bearerResult, bearer)
+	if bearerResult.Code != http.StatusOK || !strings.Contains(bearerResult.Body.String(), "oidc-admin") {
+		t.Fatalf("access-token me=%d body=%s", bearerResult.Code, bearerResult.Body.String())
 	}
 	if a.bootstrapAdminToken() != "" {
 		t.Fatal("bootstrap token remained active after verified platform-admin OIDC login")

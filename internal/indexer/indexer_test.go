@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"git-ctx/internal/embedding"
 	"git-ctx/internal/source"
@@ -15,6 +16,19 @@ type failingEmbedder struct{}
 
 func (failingEmbedder) Embed(context.Context, string) ([]float32, error) {
 	return nil, errors.New("model unavailable")
+}
+
+type failOnceEmbedder struct{ calls int }
+
+func (e *failOnceEmbedder) Embed(context.Context, string) ([]float32, error) {
+	e.calls++
+	if e.calls == 1 {
+		return nil, errors.New("temporary model outage")
+	}
+	return []float32{1, 0, 0}, nil
+}
+func (*failOnceEmbedder) EmbeddingMetadata() embedding.Metadata {
+	return embedding.Metadata{Provider: "test", Model: "flaky", Revision: "v1", Dimensions: 3}
 }
 
 type countingEmbedder struct {
@@ -39,6 +53,7 @@ type incrementalSource struct {
 	files       map[string]string
 	changes     []source.Change
 	changeErr   error
+	getErrs     map[string]error
 	listCalls   int
 	getFileCall int
 	getHook     func()
@@ -56,6 +71,9 @@ func (s *incrementalSource) GetFile(_ context.Context, _ source.RepositoryRef, _
 	s.getFileCall++
 	if s.getHook != nil {
 		s.getHook()
+	}
+	if err := s.getErrs[path]; err != nil {
+		return nil, err
 	}
 	return []byte(s.files[path]), nil
 }
@@ -192,40 +210,105 @@ func (e *batchEmbedder) EmbedBatch(_ context.Context, texts []string) ([][]float
 	return vectors, nil
 }
 
-// unreliableSource fails one file download the way a remote server does for LFS
-// pointers, permission edges or files removed between listing and fetching.
-type unreliableSource struct {
+// batchingSource returns the same multi-section document for each listed path.
+type batchingSource struct {
 	fakeSource
-	files  []string
-	broken string
+	files []string
 }
 
-func (s *unreliableSource) ListFiles(context.Context, source.RepositoryRef, string) ([]source.File, error) {
+func (s *batchingSource) ListFiles(context.Context, source.RepositoryRef, string) ([]source.File, error) {
 	out := make([]source.File, 0, len(s.files))
 	for _, path := range s.files {
 		out = append(out, source.File{Path: path})
 	}
 	return out, nil
 }
-func (s *unreliableSource) GetFile(_ context.Context, _ source.RepositoryRef, _ string, path string) ([]byte, error) {
-	if path == s.broken {
-		return nil, errors.New("404 file not found")
-	}
+func (s *batchingSource) GetFile(context.Context, source.RepositoryRef, string, string) ([]byte, error) {
 	return []byte("# Title\nbody text\n\n## Second\nmore text"), nil
 }
 
-func TestIndexBatchesEmbeddingsAndSurvivesOneUnreadableFile(t *testing.T) {
+type leaseStealingFilesSource struct {
+	batchingSource
+	steal func()
+	calls int
+}
+
+func (s *leaseStealingFilesSource) GetFile(context.Context, source.RepositoryRef, string, string) ([]byte, error) {
+	s.calls++
+	if s.calls == indexProgressInterval && s.steal != nil {
+		s.steal()
+	}
+	return []byte("# Title\nbody text"), nil
+}
+
+func TestProgressUpdateRejectsStaleWorkerLease(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file:index-progress-lease?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+
+	startedAt := time.Now().UTC().Add(-time.Minute)
+	newStartedAt := time.Now().UTC().Add(time.Minute)
+	repo := source.Repository{ID: 91, ProjectKey: "KCB", Slug: "lease", Name: "Lease", DefaultBranch: "main"}
+	_, err = s.DB.Exec(`INSERT INTO index_jobs(id,repository_id,ref_name,kind,status,started_at,attempts)
+VALUES('lease-progress','bitbucket:91','main','webhook','running',?,1)`, startedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := make([]string, indexProgressInterval+1)
+	for n := range paths {
+		paths[n] = "doc-" + string(rune('a'+n)) + ".md"
+	}
+	remote := &leaseStealingFilesSource{batchingSource: batchingSource{files: paths}}
+	remote.steal = func() {
+		if _, updateErr := s.DB.Exec(`UPDATE index_jobs
+SET started_at=?,error_message='new worker owns this lease'
+WHERE id='lease-progress'`, newStartedAt); updateErr != nil {
+			t.Errorf("steal lease: %v", updateErr)
+		}
+	}
+
+	err = New(s, DefaultPolicy()).ApplyPendingJob(ctx, remote, "bitbucket", repo,
+		[]source.Reference{{Name: "main", LatestCommit: "c1"}},
+		JobLease{ID: "lease-progress", StartedAt: startedAt})
+	if err == nil || !strings.Contains(err.Error(), "lease changed") {
+		t.Fatalf("ApplyPendingJob error=%v, want lease loss", err)
+	}
+	if remote.calls != indexProgressInterval {
+		t.Fatalf("remote reads=%d, want stale worker stopped at %d", remote.calls, indexProgressInterval)
+	}
+	var status, message string
+	var claimedAt time.Time
+	if err = s.DB.QueryRow(`SELECT status,error_message,started_at FROM index_jobs WHERE id='lease-progress'`).Scan(&status, &message, &claimedAt); err != nil {
+		t.Fatal(err)
+	}
+	if status != "running" || message != "new worker owns this lease" || !claimedAt.Equal(newStartedAt) {
+		t.Fatalf("new lease changed: status=%q message=%q started=%v want=%v", status, message, claimedAt, newStartedAt)
+	}
+	var staged, chunks, states, maps int
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks_staging`).Scan(&staged)
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id='bitbucket:91'`).Scan(&chunks)
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM repository_ref_states WHERE repository_id='bitbucket:91'`).Scan(&states)
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM repository_maps WHERE repository_id='bitbucket:91'`).Scan(&maps)
+	if staged != 0 || chunks != 0 || states != 0 || maps != 0 {
+		t.Fatalf("stale generation leaked: staged=%d chunks=%d states=%d maps=%d", staged, chunks, states, maps)
+	}
+}
+
+func TestIndexBatchesEmbeddings(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(ctx, "sqlite", "file:index-resilience?mode=memory&cache=shared&_foreign_keys=on")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.DB.Close()
-	remote := &unreliableSource{files: []string{"a.md", "b.md", "broken.md", "c.md"}, broken: "broken.md"}
+	remote := &batchingSource{files: []string{"a.md", "b.md", "c.md"}}
 	model := &batchEmbedder{}
 	repo := source.Repository{ID: 9, ProjectKey: "kcb", Slug: "docs", Name: "Docs", DefaultBranch: "main"}
 	if err = NewWithEmbedder(s, DefaultPolicy(), model).SyncRepository(ctx, remote, "gitlab", repo, []source.Reference{{Name: "main", LatestCommit: "c1"}}); err != nil {
-		t.Fatalf("one unreadable file must not fail the repository index: %v", err)
+		t.Fatal(err)
 	}
 	var status, warning string
 	var files int
@@ -235,8 +318,8 @@ func TestIndexBatchesEmbeddingsAndSurvivesOneUnreadableFile(t *testing.T) {
 	if status != "completed" || files != 3 {
 		t.Fatalf("job status=%s files=%d", status, files)
 	}
-	if !strings.Contains(warning, "broken.md") || !strings.Contains(warning, "1 file(s) skipped") {
-		t.Fatalf("skipped file was not reported: %q", warning)
+	if warning != "" {
+		t.Fatalf("unexpected warning: %q", warning)
 	}
 	var chunks int
 	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id='gitlab:9'`).Scan(&chunks)
@@ -247,12 +330,141 @@ func TestIndexBatchesEmbeddingsAndSurvivesOneUnreadableFile(t *testing.T) {
 	if model.batches != 1 || model.batchSizes[0] != 6 {
 		t.Fatalf("embeddings were not batched: batches=%d sizes=%v", model.batches, model.batchSizes)
 	}
+}
 
-	// Every file failing is a real failure, not a silently empty index.
-	broken := &unreliableSource{files: []string{"only.md"}, broken: "only.md"}
-	err = NewWithEmbedder(s, DefaultPolicy(), model).SyncRepository(ctx, broken, "gitlab", source.Repository{ID: 10, ProjectKey: "kcb", Slug: "empty", DefaultBranch: "main"}, []source.Reference{{Name: "main", LatestCommit: "c1"}})
-	if err == nil || !strings.Contains(err.Error(), "every indexable file failed") {
-		t.Fatalf("expected a hard failure when nothing could be downloaded, got %v", err)
+func TestPolicySkippedFilesDoNotTriggerRemoteReadFailures(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file:policy-skip?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+	src := &incrementalSource{
+		files: map[string]string{
+			"README.md":         "# Included\nbody",
+			"vendor/ignored.md": "# Excluded by path\nbody",
+			"diagram.png":       "not really an image",
+		},
+		getErrs: map[string]error{
+			"vendor/ignored.md": errors.New("excluded path must not be fetched"),
+			"diagram.png":       errors.New("excluded extension must not be fetched"),
+		},
+	}
+	repo := source.Repository{ID: 75, ProjectKey: "KCB", Slug: "policy", Name: "Policy", DefaultBranch: "main"}
+	if err = NewWithoutEmbeddings(s, DefaultPolicy()).SyncRepository(ctx, src, "bitbucket", repo,
+		[]source.Reference{{Name: "main", LatestCommit: "c1"}}); err != nil {
+		t.Fatalf("intentional policy skips must complete: %v", err)
+	}
+	if src.getFileCall != 1 {
+		t.Fatalf("remote reads=%d, want only the policy-accepted file", src.getFileCall)
+	}
+	var state, status string
+	var filesProcessed, listed, indexed int
+	if err = s.DB.QueryRow(`SELECT commit_id FROM repository_ref_states
+WHERE repository_id='bitbucket:75' AND ref_name='main'`).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DB.QueryRow(`SELECT status,files_processed FROM index_jobs
+WHERE repository_id='bitbucket:75' ORDER BY started_at DESC,id DESC LIMIT 1`).Scan(&status, &filesProcessed); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DB.QueryRow(`SELECT COUNT(*),COALESCE(SUM(content_indexed),0) FROM repository_files
+WHERE repository_id='bitbucket:75' AND ref_name='main'`).Scan(&listed, &indexed); err != nil {
+		t.Fatal(err)
+	}
+	if state != "c1" || status != "completed" || filesProcessed != 1 || listed != 3 || indexed != 1 {
+		t.Fatalf("state=%q status=%q processed=%d listed=%d indexed=%d", state, status, filesProcessed, listed, indexed)
+	}
+}
+
+func TestRemoteReadFailurePreservesActiveRefGeneration(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file:remote-read-atomicity?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+	src := &incrementalSource{files: map[string]string{
+		"a.go": "package demo\n\nfunc OldA() {}\n",
+		"b.go": "package demo\n\nfunc OldB() {}\n",
+	}}
+	repo := source.Repository{ID: 76, ProjectKey: "KCB", Slug: "atomic", Name: "Atomic", DefaultBranch: "main"}
+	idx := NewWithoutEmbeddings(s, DefaultPolicy())
+	if err = idx.SyncRepository(ctx, src, "bitbucket", repo,
+		[]source.Reference{{Name: "main", LatestCommit: "c1"}}); err != nil {
+		t.Fatal(err)
+	}
+	var beforeChunks, beforeSymbols, beforeFiles int
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id='bitbucket:76' AND ref_name='main'`).Scan(&beforeChunks)
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM code_symbols WHERE repository_id='bitbucket:76' AND ref_name='main'`).Scan(&beforeSymbols)
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM repository_files WHERE repository_id='bitbucket:76' AND ref_name='main'`).Scan(&beforeFiles)
+
+	src.files = map[string]string{
+		"a.go": "package demo\n\n" + strings.Repeat("func NewA() {}\n\n", embeddingBatchSize+1),
+		"b.go": "package demo\n\nfunc NewB() {}\n",
+	}
+	src.changes = []source.Change{
+		{Path: "a.go", OldPath: "a.go", Type: "modified"},
+		{Path: "b.go", OldPath: "b.go", Type: "modified"},
+	}
+	src.getErrs = map[string]error{"b.go": errors.New("upstream object read failed")}
+	err = idx.SyncRepository(ctx, src, "bitbucket", repo,
+		[]source.Reference{{Name: "main", LatestCommit: "c2"}})
+	if err == nil || !strings.Contains(err.Error(), "b.go") || !strings.Contains(err.Error(), "upstream object read failed") {
+		t.Fatalf("expected the accepted remote read to fail the generation, got %v", err)
+	}
+
+	var stateCommit, mapCommit string
+	if err = s.DB.QueryRow(`SELECT commit_id FROM repository_ref_states
+WHERE repository_id='bitbucket:76' AND ref_name='main'`).Scan(&stateCommit); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DB.QueryRow(`SELECT commit_id FROM repository_maps
+WHERE repository_id='bitbucket:76' AND ref_name='main'`).Scan(&mapCommit); err != nil {
+		t.Fatal(err)
+	}
+	var afterChunks, c2Chunks, newChunks int
+	if err = s.DB.QueryRow(`SELECT COUNT(*),
+COALESCE(SUM(CASE WHEN commit_id='c2' THEN 1 ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN content LIKE '%NewA%' OR content LIKE '%NewB%' THEN 1 ELSE 0 END),0)
+FROM document_chunks WHERE repository_id='bitbucket:76' AND ref_name='main'`).Scan(&afterChunks, &c2Chunks, &newChunks); err != nil {
+		t.Fatal(err)
+	}
+	var afterSymbols, c2Symbols, newSymbols int
+	if err = s.DB.QueryRow(`SELECT COUNT(*),
+COALESCE(SUM(CASE WHEN commit_id='c2' THEN 1 ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN name IN ('NewA','NewB') THEN 1 ELSE 0 END),0)
+FROM code_symbols WHERE repository_id='bitbucket:76' AND ref_name='main'`).Scan(&afterSymbols, &c2Symbols, &newSymbols); err != nil {
+		t.Fatal(err)
+	}
+	var afterFiles, c2Files, c2Changes int
+	_ = s.DB.QueryRow(`SELECT COUNT(*),COALESCE(SUM(CASE WHEN commit_id='c2' THEN 1 ELSE 0 END),0)
+FROM repository_files WHERE repository_id='bitbucket:76' AND ref_name='main'`).Scan(&afterFiles, &c2Files)
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM repository_ref_changes
+WHERE repository_id='bitbucket:76' AND ref_name='main' AND commit_id='c2'`).Scan(&c2Changes)
+	var stagedChunks, stagedSymbols, stagedDependencies int
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks_staging`).Scan(&stagedChunks)
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM code_symbols_staging`).Scan(&stagedSymbols)
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM code_dependencies_staging`).Scan(&stagedDependencies)
+	var failedJob int
+	_ = s.DB.QueryRow(`SELECT COUNT(*) FROM index_jobs
+WHERE repository_id='bitbucket:76' AND status='failed' AND error_message LIKE '%b.go%'`).Scan(&failedJob)
+
+	if stateCommit != "c1" || mapCommit != "c1" {
+		t.Fatalf("active metadata advanced after failed read: state=%q map=%q", stateCommit, mapCommit)
+	}
+	if afterChunks != beforeChunks || c2Chunks != 0 || newChunks != 0 {
+		t.Fatalf("active chunks changed: before=%d after=%d c2=%d new=%d", beforeChunks, afterChunks, c2Chunks, newChunks)
+	}
+	if afterSymbols != beforeSymbols || c2Symbols != 0 || newSymbols != 0 {
+		t.Fatalf("active symbols changed: before=%d after=%d c2=%d new=%d", beforeSymbols, afterSymbols, c2Symbols, newSymbols)
+	}
+	if afterFiles != beforeFiles || c2Files != 0 || c2Changes != 0 {
+		t.Fatalf("active file/ref history changed: before=%d after=%d c2 files=%d c2 changes=%d", beforeFiles, afterFiles, c2Files, c2Changes)
+	}
+	if stagedChunks != 0 || stagedSymbols != 0 || stagedDependencies != 0 || failedJob != 1 {
+		t.Fatalf("cleanup/job mismatch: staged chunks=%d symbols=%d dependencies=%d failed jobs=%d",
+			stagedChunks, stagedSymbols, stagedDependencies, failedJob)
 	}
 }
 
@@ -316,6 +528,66 @@ FROM repository_ref_states WHERE repository_id='bitbucket:71' AND ref_name='main
 	}
 	if embeddingStatus != "degraded" || totalChunks != chunks || embeddedChunks != 0 {
 		t.Fatalf("embedding status=%s coverage=%d/%d want degraded 0/%d", embeddingStatus, embeddedChunks, totalChunks, chunks)
+	}
+}
+
+func TestOptionalEmbeddingFailureDoesNotDisableLaterRepositories(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file:optional-embedding-recovery?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+	embedder := &failOnceEmbedder{}
+	idx := NewWithOptionalEmbedder(s, DefaultPolicy(), embedder)
+	first := source.Repository{ID: 73, ProjectKey: "KCB", Slug: "first", Name: "First", DefaultBranch: "main"}
+	if err = idx.SyncRepository(ctx, fakeSource{}, "bitbucket", first,
+		[]source.Reference{{Name: "main", LatestCommit: "first-commit"}}); err != nil {
+		t.Fatal(err)
+	}
+	second := source.Repository{ID: 74, ProjectKey: "KCB", Slug: "second", Name: "Second", DefaultBranch: "main"}
+	if err = idx.SyncRepository(ctx, fakeSource{}, "bitbucket", second,
+		[]source.Reference{{Name: "main", LatestCommit: "second-commit"}}); err != nil {
+		t.Fatal(err)
+	}
+	var chunks, vectors int
+	if err = s.DB.QueryRow(`SELECT COUNT(*),COUNT(embedding) FROM document_chunks WHERE repository_id='bitbucket:74'`).Scan(&chunks, &vectors); err != nil {
+		t.Fatal(err)
+	}
+	if embedder.calls < 2 || chunks == 0 || vectors != chunks {
+		t.Fatalf("provider calls=%d second repository vectors=%d/%d", embedder.calls, vectors, chunks)
+	}
+}
+
+func TestEmbeddingIdentityIsStoredConsistentlyOnChunksAndRefState(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file:embedding-identity?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+	embedder := &countingEmbedder{revision: "https://models.internal/v1/embeddings"}
+	repo := source.Repository{ID: 72, ProjectKey: "KCB", Slug: "identity", Name: "Identity", DefaultBranch: "main"}
+	if err = NewWithEmbedder(s, DefaultPolicy(), embedder).SyncRepository(ctx, fakeSource{}, "bitbucket", repo,
+		[]source.Reference{{Name: "main", LatestCommit: "abc123"}}); err != nil {
+		t.Fatal(err)
+	}
+	expected := embedder.EmbeddingMetadata().Identity()
+	var stateRevision string
+	if err = s.DB.QueryRow(`SELECT embedding_revision FROM repository_ref_states
+WHERE repository_id='bitbucket:72' AND ref_name='main'`).Scan(&stateRevision); err != nil {
+		t.Fatal(err)
+	}
+	var chunks, mismatches int
+	if err = s.DB.QueryRow(`SELECT COUNT(*),
+COALESCE(SUM(CASE WHEN c.embedding_revision<>s.embedding_revision THEN 1 ELSE 0 END),0)
+FROM document_chunks c JOIN repository_ref_states s
+  ON s.repository_id=c.repository_id AND s.ref_name=c.ref_name
+WHERE c.repository_id='bitbucket:72' AND c.ref_name='main' AND c.embedding IS NOT NULL`).Scan(&chunks, &mismatches); err != nil {
+		t.Fatal(err)
+	}
+	if chunks == 0 || stateRevision != expected || mismatches != 0 {
+		t.Fatalf("chunks=%d state revision=%q expected=%q mismatches=%d", chunks, stateRevision, expected, mismatches)
 	}
 }
 

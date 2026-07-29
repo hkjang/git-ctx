@@ -497,11 +497,19 @@ attribute에 기록하지 않는다.
 관리자 설정 탭은 Keycloak, Bitbucket, GitLab, MCP, 검색, 모델, OpenSearch,
 색인, 보안, Vault, 알림, 로깅, 관측성, 백업, 보존, 운영, UI의 실제 런타임 필드를
 전용 폼으로 제공한다. 그 밖의 확장 정책은 같은 탭의 고급 JSON에서 편집하며, 전용
-폼과 JSON은 양방향으로 동기화된다. Bootstrap 환경변수는 `GIT_CTX_DB_DSN` 하나뿐이다.
+폼과 JSON은 양방향으로 동기화된다. 필수 Bootstrap 환경변수는 DB 연결용
+`GIT_CTX_DB_DSN`과 복구 토큰 서명용 `GIT_CTX_RECOVERY_KEY` 두 개다. 복구 키는 다음과
+같이 최초 한 번 생성한 최소 32자의 고엔트로피 값을 사용한다.
 
-DB DSN을 제외한 운영 설정은 관리자 화면에서 자동 조회·시험·저장·삭제한다. Keycloak,
-Bitbucket, GitLab과 모델 영역은 URL, Client/Token/API Key, 모델, TLS, 사내 CA,
-Proxy와 Timeout 전용 필드를 제공하고 알 수 없는 확장 필드는 고급 JSON 편집기에
+```bash
+openssl rand -base64 48
+```
+
+출력은 DSN과 독립된 장기 Secret 항목으로 저장하고 모든 replica에 동일하게 주입한다.
+
+두 Bootstrap Secret을 제외한 운영 설정은 관리자 화면에서 자동 조회·시험·저장·삭제한다.
+Keycloak, Bitbucket, GitLab과 모델 영역은 URL, Client/Token/API Key, 모델, TLS, 사내
+CA, Proxy와 Timeout 전용 필드를 제공하고 알 수 없는 확장 필드는 고급 JSON 편집기에
 보존한다. Secret/PAT/Token/API Key는 암호화 저장되고 재조회 시 `********`로
 마스킹되며, 마스킹 값을 그대로 저장하거나 시험하면 이전 암호문 값을 재사용한다.
 탭에 다시 접근하면 일반 필드는 DB의 현재 버전 값으로 자동 복원되고 설정 버전,
@@ -558,7 +566,8 @@ backend는 DSN 파생 AES-256-GCM으로 암호화하는 `database`이며, Vault 
 Vault 연결 시험은 `GET /v1/auth/token/lookup-self`, 저장과 조회는 KV v2의
 `/{mount}/data/{prefix}/{name}` 계약을 사용한다. Token은 암호화된 `vault` 관리자
 설정에 보관하며 최소 권한 정책과 짧은 TTL의 전용 토큰을 사용한다. Vault를 사용하지
-않아도 외부 Bootstrap 값은 계속 `GIT_CTX_DB_DSN` 하나뿐이다.
+않아도 외부 Bootstrap 값은 `GIT_CTX_DB_DSN`과 `GIT_CTX_RECOVERY_KEY` 두 개이며,
+복구 키를 Vault Token이나 DSN으로 대체하거나 파생하지 않는다.
 
 Keycloak Client Secret, Bitbucket PAT, GitLab Token, 모델 API Key 등 문자열 설정에는
 원문 대신 다음처럼 참조를 입력할 수 있다.
@@ -587,8 +596,10 @@ Bootstrap PostgreSQL에 연결할 수 없으면 `backups/recovery.db` SQLite로 
 
 최초 Bootstrap이 폐기된 뒤 Keycloak 설정 장애로 관리자 로그인이 불가능하면
 `git-ctx recovery-token --ttl 15m`으로 일회용 복구 토큰을 생성하고
-`/admin?recovery=1`에서 소비한다. 복구 토큰은 DSN에서 파생한 키로 서명되고 원문을
-저장하지 않으며, 1회 사용·최대 1시간 만료·영구 MCP 키 생성 금지를 적용한다.
+`/admin?recovery=1`에서 소비한다. 명령과 서버에는 같은 `GIT_CTX_RECOVERY_KEY`를
+주입해야 한다. 토큰은 이 독립 키로 서명되고 원문을 저장하지 않으며, 1회 사용·최대
+1시간 만료·영구 MCP 키 생성 금지를 적용한다. 복구 키는 DB·애플리케이션 백업과
+분리해 백업하고 배포마다 재생성하지 않는다.
 
 ## 모델 미설정 검색 모드
 
@@ -672,7 +683,9 @@ Embedding 요청은 한 번의 원격 호출로 병합하며 각 호출자의 �
   복구 확인용 호출은 한 번만 통과시킵니다. 관리자는 소스·색인 화면에서
   [지금 재시도] 로 즉시 해제할 수 있습니다.
 - **페이지 상한**: 한 번의 목록 조회는 GitLab 50페이지(5,000건), Bitbucket
-  20페이지(20,000건)까지만 읽습니다.
+  20페이지(20,000건)까지만 읽습니다. 상한에 도달했는데 서버가 다음 페이지를
+  광고하면 불완전한 목록을 정상 결과로 저장하지 않고 오류를 반환하므로, 프로젝트나
+  저장소 범위를 좁혀 다시 실행해야 합니다.
 
 ### 색인과 연동 상태
 

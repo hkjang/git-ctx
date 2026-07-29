@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"git-ctx/internal/auth"
@@ -40,6 +41,8 @@ func fixture(t *testing.T) *Server {
 	must(`INSERT INTO code_symbols(id,repository_id,ref_name,commit_id,file_path,name,qualified_name,symbol_kind,language,signature,documentation,line_start,line_end,content_hash) VALUES('s2','r1','release','5ba31ce','service.go','GetGPU','Service.GetGPU','method','go','func (s *Service) GetGPU(ctx context.Context) error','Returns GPU metrics.',20,31,'sh2')`)
 	must(`INSERT INTO code_symbols(id,repository_id,ref_name,commit_id,file_path,name,qualified_name,symbol_kind,language,signature,documentation,line_start,line_end,content_hash) VALUES('s3','r1','release','5ba31ce','handler.go','HandleGPU','HandleGPU','function','go','func HandleGPU() error','Handles GPU requests.',10,15,'sh3')`)
 	must(`INSERT INTO code_dependencies(id,repository_id,ref_name,commit_id,file_path,from_symbol,target,dependency_kind,line_number) VALUES('d1','r1','release','5ba31ce','handler.go','HandleGPU','Service.GetGPU','call',12)`)
+	must(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id) VALUES('r1','main','4fa21bd')`)
+	must(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id) VALUES('r1','release','5ba31ce')`)
 	must(`INSERT INTO repository_maps(repository_id,ref_name,commit_id,summary_json) VALUES('r1','main','4fa21bd','{"languages":{"go":1},"symbols":{"method":1},"directories":["docs"],"keyFiles":["README.md"],"entryPoints":["service.go:Service.GetGPU"]}')`)
 	must(`INSERT INTO context_packs(id,slug,name,description,created_by) VALUES('p1','gpu-platform','GPU Platform','GPU operations and APIs','u1')`)
 	must(`INSERT INTO context_pack_items(pack_id,library_id,ref_name,query_hint,position) VALUES('p1','/kcb/clustara','main','GPU',0)`)
@@ -66,6 +69,18 @@ func callAs(t *testing.T, s *Server, principal auth.Principal, body string) map[
 	}
 	return out
 }
+
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	deadline chan time.Time
+}
+
+func (r *deadlineRecorder) SetWriteDeadline(value time.Time) error {
+	r.deadline <- value
+	return nil
+}
+
+func (r *deadlineRecorder) Flush() {}
 
 func TestRepositorySearchAndAdministratorTools(t *testing.T) {
 	s := fixture(t)
@@ -478,6 +493,44 @@ func TestStreamableHTTPGETKeepsSSEOpenUntilSessionDelete(t *testing.T) {
 	rejected.Body.Close()
 	if rejected.StatusCode != http.StatusNotFound {
 		t.Fatalf("deleted session GET=%d", rejected.StatusCode)
+	}
+}
+
+func TestStreamableHTTPGETClearsServerWriteDeadline(t *testing.T) {
+	s := fixture(t)
+	initialize := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`))
+	initialize.Header.Set("Content-Type", "application/json")
+	initialized := httptest.NewRecorder()
+	s.ServeHTTP(initialized, initialize)
+	sessionID := initialized.Header().Get("Mcp-Session-Id")
+	if sessionID == "" {
+		t.Fatal("missing session id")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodGet, "/mcp", nil).WithContext(ctx)
+	request.Header.Set("Mcp-Session-Id", sessionID)
+	request.Header.Set("Accept", "text/event-stream")
+	recorder := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder(), deadline: make(chan time.Time, 1)}
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		s.ServeHTTP(recorder, request)
+	}()
+
+	select {
+	case deadline := <-recorder.deadline:
+		if !deadline.IsZero() {
+			t.Fatalf("SSE write deadline=%v, want zero", deadline)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SSE handler did not clear the write deadline")
+	}
+	cancel()
+	select {
+	case <-served:
+	case <-time.After(time.Second):
+		t.Fatal("SSE handler did not stop after cancellation")
 	}
 }
 

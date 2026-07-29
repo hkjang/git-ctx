@@ -1,5 +1,9 @@
 .git
+.env
+.env.*
+backups
 *.db
+*.db-*
 coverage.out
 bin
 dist

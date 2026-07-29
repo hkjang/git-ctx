@@ -1,14 +1,15 @@
 package v6
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
-	"path"
 	"strings"
 	"time"
 
@@ -29,10 +30,11 @@ type Config struct {
 	ProxyURL      string
 }
 type Client struct {
-	base   *url.URL
-	prefix string
-	cfg    Config
-	http   *http.Client
+	base       *url.URL
+	prefix     string
+	searchPath string
+	cfg        Config
+	http       *http.Client
 }
 
 func New(cfg Config) (*Client, error) {
@@ -42,6 +44,9 @@ func New(cfg Config) (*Client, error) {
 	}
 	if cfg.APIPrefix == "" {
 		cfg.APIPrefix = "/rest/api/1.0"
+	}
+	if strings.ContainsAny(cfg.APIPrefix, "?#") {
+		return nil, errors.New("Bitbucket API prefix must not contain a query or fragment")
 	}
 	if cfg.SearchAPIPath == "" {
 		cfg.SearchAPIPath = "/rest/search/latest/search"
@@ -56,7 +61,9 @@ func New(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{base: u, prefix: "/" + strings.Trim(cfg.APIPrefix, "/"), cfg: cfg, http: httpClient}, nil
+	prefix := (&url.URL{Path: "/" + strings.Trim(cfg.APIPrefix, "/")}).EscapedPath()
+	searchPath := (&url.URL{Path: "/" + strings.Trim(cfg.SearchAPIPath, "/")}).EscapedPath()
+	return &Client{base: u, prefix: prefix, searchPath: searchPath, cfg: cfg, http: httpClient}, nil
 }
 
 type page[T any] struct {
@@ -71,28 +78,98 @@ type page[T any] struct {
 type HTTPError = source.APIError
 
 // maxPages bounds one paginated read at 1000 items per page, so a single
-// discovery call on a very large instance stays a bounded request instead of
-// loading the whole server into memory.
+// adapter call on a very large instance stays bounded instead of loading the
+// whole server into memory.
 const maxPages = 20
+const maxFileBytes int64 = 10 << 20
 
 func pageAll[T any](ctx context.Context, c *Client, endpoint string) ([]T, error) {
+	return pageAllQuery[T](ctx, c, endpoint, nil)
+}
+
+func pageAllQuery[T any](ctx context.Context, c *Client, endpoint string, baseQuery url.Values) ([]T, error) {
+	return pageItems[T](ctx, c, endpoint, baseQuery, 0)
+}
+
+func pageUpTo[T any](ctx context.Context, c *Client, endpoint string, baseQuery url.Values, itemLimit int) ([]T, error) {
+	return pageItems[T](ctx, c, endpoint, baseQuery, itemLimit)
+}
+
+func pageItems[T any](ctx context.Context, c *Client, endpoint string, baseQuery url.Values, itemLimit int) ([]T, error) {
 	start := 0
 	var all []T
 	for pages := 0; pages < maxPages; pages++ {
-		q := url.Values{"limit": []string{"1000"}, "start": []string{fmt.Sprint(start)}}
+		requestLimit := 1000
+		if itemLimit > 0 {
+			remaining := itemLimit - len(all)
+			if remaining <= 0 {
+				return all, nil
+			}
+			requestLimit = min(requestLimit, remaining)
+		}
+		q := cloneValues(baseQuery)
+		q.Set("limit", fmt.Sprint(requestLimit))
+		q.Set("start", fmt.Sprint(start))
 		var p page[T]
 		if err := c.json(ctx, http.MethodGet, endpoint, q, nil, &p); err != nil {
 			return nil, err
 		}
 		all = append(all, p.Values...)
+		if itemLimit > 0 && len(all) >= itemLimit {
+			return all[:itemLimit], nil
+		}
 		if p.IsLastPage || len(p.Values) == 0 {
 			return all, nil
 		}
+		if p.NextPageStart <= start {
+			return nil, fmt.Errorf("bitbucket API pagination did not advance for %s: start=%d nextPageStart=%d", endpoint, start, p.NextPageStart)
+		}
 		start = p.NextPageStart
 	}
-	// The cap was reached: return what was read rather than failing, and let the
-	// caller work with a bounded slice of a very large instance.
-	return all, nil
+	return nil, fmt.Errorf("bitbucket API pagination incomplete for %s: exceeded %d pages after %d items; nextPageStart=%d", endpoint, maxPages, len(all), start)
+}
+
+func cloneValues(values url.Values) url.Values {
+	cloned := make(url.Values, len(values)+2)
+	for key, items := range values {
+		cloned[key] = append([]string(nil), items...)
+	}
+	return cloned
+}
+
+type branchName string
+
+func (branch *branchName) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*branch = ""
+		return nil
+	}
+	var name string
+	if err := json.Unmarshal(data, &name); err == nil {
+		*branch = branchName(normalizeBranch(name))
+		return nil
+	}
+	var value struct {
+		DisplayID string `json:"displayId"`
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+	}
+	if err := json.Unmarshal(data, &value); err != nil {
+		return fmt.Errorf("decode Bitbucket default branch: %w", err)
+	}
+	name = value.DisplayID
+	if name == "" {
+		name = value.Name
+	}
+	if name == "" {
+		name = value.ID
+	}
+	*branch = branchName(normalizeBranch(name))
+	return nil
+}
+
+func normalizeBranch(value string) string {
+	return strings.TrimPrefix(strings.TrimSpace(value), "refs/heads/")
 }
 func (c *Client) ListProjects(ctx context.Context) ([]source.Project, error) {
 	type item struct{ Key, Name, Description string }
@@ -112,9 +189,7 @@ func (c *Client) ListRepositories(ctx context.Context, project string) ([]source
 		Slug, Name, Description string
 		Archived                bool
 		Project                 struct{ Key string }
-		DefaultBranch           *struct {
-			DisplayID string `json:"displayId"`
-		} `json:"defaultBranch"`
+		DefaultBranch           branchName `json:"defaultBranch"`
 	}
 	items, e := pageAll[item](ctx, c, "/projects/"+escape(project)+"/repos")
 	if e != nil {
@@ -122,11 +197,7 @@ func (c *Client) ListRepositories(ctx context.Context, project string) ([]source
 	}
 	out := make([]source.Repository, len(items))
 	for i, x := range items {
-		branch := ""
-		if x.DefaultBranch != nil {
-			branch = x.DefaultBranch.DisplayID
-		}
-		out[i] = source.Repository{ID: x.ID, ProjectKey: x.Project.Key, Slug: x.Slug, Name: x.Name, Description: x.Description, DefaultBranch: branch, Archived: x.Archived}
+		out[i] = source.Repository{ID: x.ID, ProjectKey: x.Project.Key, Slug: x.Slug, Name: x.Name, Description: x.Description, DefaultBranch: string(x.DefaultBranch), Archived: x.Archived}
 	}
 	return out, nil
 }
@@ -275,42 +346,24 @@ func (c *Client) ListCommits(ctx context.Context, r source.RepositoryRef, refNam
 
 func (c *Client) ListFiles(ctx context.Context, r source.RepositoryRef, ref string) ([]source.File, error) {
 	q := url.Values{"at": []string{ref}}
-	var p struct {
-		Lines    []struct{ Text string } `json:"lines"`
-		Children struct {
-			Values []struct {
-				Path struct {
-					ToString string `json:"toString"`
-				}
-				Size int64
-			} `json:"values"`
-		} `json:"children"`
-	}
 	// The files endpoint is recursively paged by Bitbucket and returns canonical paths.
-	var paths []string
-	start := 0
-	for {
-		q.Set("start", fmt.Sprint(start))
-		var x page[string]
-		if e := c.json(ctx, http.MethodGet, c.repo(r)+"/files", q, nil, &x); e != nil {
-			return nil, e
-		}
-		paths = append(paths, x.Values...)
-		if x.IsLastPage || len(x.Values) == 0 {
-			break
-		}
-		start = x.NextPageStart
+	paths, err := pageAllQuery[string](ctx, c, c.repo(r)+"/files", q)
+	if err != nil {
+		return nil, err
 	}
 	out := make([]source.File, len(paths))
 	for i, p := range paths {
 		out[i] = source.File{Path: p}
 	}
-	_ = p
 	return out, nil
 }
 func (c *Client) GetFile(ctx context.Context, r source.RepositoryRef, ref, filePath string) ([]byte, error) {
+	escapedPath, err := escapePath(filePath)
+	if err != nil {
+		return nil, err
+	}
 	q := url.Values{"at": []string{ref}}
-	return c.bytes(ctx, c.repo(r)+"/raw/"+escapePath(filePath), q)
+	return c.bytes(ctx, c.repo(r)+"/raw/"+escapedPath, q)
 }
 func (c *Client) Changes(ctx context.Context, r source.RepositoryRef, from, to string) ([]source.Change, error) {
 	type item struct {
@@ -322,19 +375,10 @@ func (c *Client) Changes(ctx context.Context, r source.RepositoryRef, from, to s
 			ToString string `json:"toString"`
 		} `json:"srcPath"`
 	}
-	var items []item
-	start := 0
-	for {
-		q := url.Values{"since": []string{from}, "until": []string{to}, "limit": []string{"1000"}, "start": []string{fmt.Sprint(start)}}
-		var current page[item]
-		if err := c.json(ctx, http.MethodGet, c.repo(r)+"/changes", q, nil, &current); err != nil {
-			return nil, err
-		}
-		items = append(items, current.Values...)
-		if current.IsLastPage || len(current.Values) == 0 {
-			break
-		}
-		start = current.NextPageStart
+	q := url.Values{"since": []string{from}, "until": []string{to}}
+	items, err := pageAllQuery[item](ctx, c, c.repo(r)+"/changes", q)
+	if err != nil {
+		return nil, err
 	}
 	out := make([]source.Change, 0, len(items))
 	for _, item := range items {
@@ -358,10 +402,36 @@ func (c *Client) SearchQuery(ctx context.Context, r source.RepositoryRef, ref, q
 		return nil, err
 	}
 	out := make([]source.QueryResult, 0, len(hits))
+	requestedRef := normalizeBranch(ref)
+	mismatchedRef := ""
 	for _, hit := range hits {
+		if hit.ProjectKey != "" && !strings.EqualFold(hit.ProjectKey, r.ProjectKey) {
+			continue
+		}
+		if hit.Slug != "" && !strings.EqualFold(hit.Slug, r.Slug) {
+			continue
+		}
+		actualRef := normalizeBranch(hit.DefaultBranch)
+		if actualRef == "" {
+			actualRef = normalizeBranch(hit.Ref)
+		}
+		// Bitbucket Server/Data Center indexes only the repository default
+		// branch. Never relabel those snippets as a requested tag or branch.
+		if requestedRef != "" && actualRef != "" && requestedRef != actualRef {
+			mismatchedRef = actualRef
+			continue
+		}
 		result := hit.QueryResult
-		result.CommitID = ref
+		result.CommitID = actualRef
+		if result.CommitID == "" {
+			// Older search plugins omitted repository metadata. Preserve the
+			// caller's ref only when the server gave us nothing better.
+			result.CommitID = requestedRef
+		}
 		out = append(out, result)
+	}
+	if mismatchedRef != "" {
+		return nil, fmt.Errorf("%w: Bitbucket returned default branch %q for requested ref %q", source.ErrCodeSearchRefUnsupported, mismatchedRef, requestedRef)
 	}
 	return out, nil
 }
@@ -373,7 +443,11 @@ func (c *Client) SearchGlobalQuery(ctx context.Context, query string, limit int)
 	if query == "" {
 		return nil, errors.New("search query is required")
 	}
-	return c.searchCode(ctx, query, limit)
+	hits, err := c.searchCode(ctx, query, limit)
+	if source.StatusOf(err) == http.StatusNotFound {
+		return nil, fmt.Errorf("%w: %w", source.ErrGlobalSearchUnsupported, err)
+	}
+	return hits, err
 }
 
 // SearchRepositories matches the term against repository names across every
@@ -391,21 +465,15 @@ func (c *Client) SearchRepositories(ctx context.Context, query string, limit int
 		Slug, Name, Description string
 		Archived                bool
 		Project                 struct{ Key string }
-		DefaultBranch           *struct {
-			DisplayID string `json:"displayId"`
-		} `json:"defaultBranch"`
+		DefaultBranch           branchName `json:"defaultBranch"`
 	}
-	items, err := pageAll[item](ctx, c, "/repos?name="+url.QueryEscape(query))
+	items, err := pageUpTo[item](ctx, c, "/repos", url.Values{"name": []string{query}}, limit)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]source.Repository, 0, len(items))
 	for _, x := range items {
-		branch := ""
-		if x.DefaultBranch != nil {
-			branch = x.DefaultBranch.DisplayID
-		}
-		out = append(out, source.Repository{ID: x.ID, ProjectKey: x.Project.Key, Slug: x.Slug, Name: x.Name, Description: x.Description, DefaultBranch: branch, Archived: x.Archived})
+		out = append(out, source.Repository{ID: x.ID, ProjectKey: x.Project.Key, Slug: x.Slug, Name: x.Name, Description: x.Description, DefaultBranch: string(x.DefaultBranch), Archived: x.Archived})
 		if len(out) == limit {
 			break
 		}
@@ -413,80 +481,148 @@ func (c *Client) SearchRepositories(ctx context.Context, query string, limit int
 	return out, nil
 }
 
+type codeSearchLine struct {
+	Line     int    `json:"line"`
+	Text     string `json:"text"`
+	Segments []struct {
+		Text string `json:"text"`
+	} `json:"segments"`
+}
+
+type codeSearchHit struct {
+	File       string `json:"file"`
+	Repository struct {
+		ID            int64                `json:"id"`
+		Slug          string               `json:"slug"`
+		Name          string               `json:"name"`
+		Project       struct{ Key string } `json:"project"`
+		DefaultBranch branchName           `json:"defaultBranch"`
+	} `json:"repository"`
+	// Bitbucket 6.x returns grouped hitContexts. Lines is retained for newer
+	// or customized search plugins that expose a flattened representation.
+	HitContexts [][]codeSearchLine `json:"hitContexts"`
+	Lines       []codeSearchLine   `json:"lines"`
+}
+
+type codeSearchPayload struct {
+	Errors []struct {
+		Message       string `json:"message"`
+		ExceptionName string `json:"exceptionName"`
+	} `json:"errors"`
+	Code struct {
+		Values        []codeSearchHit `json:"values"`
+		IsLastPage    bool            `json:"isLastPage"`
+		NextStart     *int            `json:"nextStart"`
+		NextPageStart *int            `json:"nextPageStart"`
+	} `json:"code"`
+}
+
 func (c *Client) searchCode(ctx context.Context, query string, limit int) ([]source.GlobalQueryResult, error) {
 	if limit < 1 || limit > 50 {
 		limit = 8
 	}
-	body := map[string]any{
-		"query":    query,
-		"entities": map[string]any{"code": map[string]int{"start": 0, "limit": limit}},
-		"limits":   map[string]int{"primary": limit, "secondary": limit},
-	}
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	u := *c.base
-	u.Path = strings.TrimSuffix(c.base.Path, "/") + "/" + strings.Trim(c.cfg.SearchAPIPath, "/")
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), strings.NewReader(string(raw)))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", "application/json")
-	if c.cfg.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.cfg.Token)
-	} else if c.cfg.Username != "" {
-		req.SetBasicAuth(c.cfg.Username, c.cfg.Password)
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("bitbucket search API %s: %s", resp.Status, string(limited))
-	}
-	var payload struct {
-		Code struct {
-			Values []struct {
-				File       string `json:"file"`
-				Repository struct {
-					ID            int64                `json:"id"`
-					Slug          string               `json:"slug"`
-					Name          string               `json:"name"`
-					Project       struct{ Key string } `json:"project"`
-					DefaultBranch string               `json:"defaultBranch"`
-				} `json:"repository"`
-				Lines []struct {
-					Line     int    `json:"line"`
-					Text     string `json:"text"`
-					Segments []struct {
-						Text string `json:"text"`
-					} `json:"segments"`
-				} `json:"lines"`
-			} `json:"values"`
-		} `json:"code"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&payload); err != nil {
-		return nil, err
-	}
-	out := make([]source.GlobalQueryResult, 0, len(payload.Code.Values))
-	for _, hit := range payload.Code.Values {
-		if hit.File == "" {
-			continue
+	start := 0
+	out := make([]source.GlobalQueryResult, 0, limit)
+	for pages := 0; pages < maxPages && len(out) < limit; pages++ {
+		pageLimit := limit - len(out)
+		body := map[string]any{
+			"query":    query,
+			"entities": map[string]any{"code": map[string]int{"start": start, "limit": pageLimit}},
+			"limits":   map[string]int{"primary": pageLimit, "secondary": pageLimit},
 		}
-		var lines []string
-		start, end := 0, 0
-		for _, line := range hit.Lines {
-			text := line.Text
-			if text == "" {
-				for _, segment := range line.Segments {
-					text += segment.Text
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.searchRequest(ctx, raw)
+		if err != nil {
+			return nil, err
+		}
+		var payload codeSearchPayload
+		decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&payload)
+		resp.Body.Close()
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+		if len(payload.Errors) > 0 {
+			messages := make([]string, 0, len(payload.Errors))
+			for _, item := range payload.Errors {
+				message := strings.TrimSpace(item.Message)
+				if message == "" {
+					message = strings.TrimSpace(item.ExceptionName)
+				}
+				if message != "" {
+					messages = append(messages, message)
 				}
 			}
-			lines = append(lines, text)
+			if len(messages) == 0 {
+				messages = append(messages, "unknown search error")
+			}
+			return nil, fmt.Errorf("bitbucket search API: %s", strings.Join(messages, "; "))
+		}
+		for _, hit := range payload.Code.Values {
+			if result, ok := convertCodeSearchHit(hit); ok {
+				out = append(out, result)
+				if len(out) == limit {
+					return out, nil
+				}
+			}
+		}
+		if payload.Code.IsLastPage || len(payload.Code.Values) == 0 {
+			return out, nil
+		}
+		var next *int
+		if payload.Code.NextStart != nil {
+			next = payload.Code.NextStart
+		} else {
+			next = payload.Code.NextPageStart
+		}
+		// Some search plugin versions omit all paging metadata when the first
+		// page contains every result.
+		if next == nil {
+			return out, nil
+		}
+		if *next <= start {
+			return nil, fmt.Errorf("bitbucket search pagination did not advance: start=%d nextStart=%d", start, *next)
+		}
+		start = *next
+	}
+	return nil, fmt.Errorf("bitbucket search pagination incomplete: exceeded %d pages after %d results; nextStart=%d", maxPages, len(out), start)
+}
+
+func convertCodeSearchHit(hit codeSearchHit) (source.GlobalQueryResult, bool) {
+	if hit.File == "" {
+		return source.GlobalQueryResult{}, false
+	}
+	lines := hit.Lines
+	grouped := len(hit.HitContexts) > 0
+	if grouped {
+		lines = nil
+		for _, contextLines := range hit.HitContexts {
+			lines = append(lines, contextLines...)
+		}
+	}
+	snippet := make([]string, 0, len(lines))
+	seen := make(map[int]bool, len(lines))
+	start, end := 0, 0
+	for _, line := range lines {
+		// RestHitContext uses non-positive lines for separators between
+		// disjoint matches. They are not source lines and must not skew bounds.
+		if grouped && line.Line < 1 {
+			continue
+		}
+		if line.Line > 0 && seen[line.Line] {
+			continue
+		}
+		text := line.Text
+		if text == "" {
+			for _, segment := range line.Segments {
+				text += segment.Text
+			}
+		}
+		snippet = append(snippet, plainSearchText(text))
+		if line.Line > 0 {
+			seen[line.Line] = true
 			if start == 0 || line.Line < start {
 				start = line.Line
 			}
@@ -494,24 +630,81 @@ func (c *Client) searchCode(ctx context.Context, query string, limit int) ([]sou
 				end = line.Line
 			}
 		}
-		if start < 1 {
-			start = 1
-		}
-		if end < start {
-			end = start
-		}
-		out = append(out, source.GlobalQueryResult{
-			ID: hit.Repository.ID, ProjectKey: hit.Repository.Project.Key, Slug: hit.Repository.Slug,
-			Name: hit.Repository.Name, Ref: hit.Repository.DefaultBranch, DefaultBranch: hit.Repository.DefaultBranch,
-			QueryResult: source.QueryResult{Path: hit.File, Snippet: strings.Join(lines, "\n"), LineStart: start, LineEnd: end},
-		})
 	}
-	return out, nil
+	if start < 1 {
+		start = 1
+	}
+	if end < start {
+		end = start
+	}
+	branch := string(hit.Repository.DefaultBranch)
+	return source.GlobalQueryResult{
+		ID: hit.Repository.ID, ProjectKey: hit.Repository.Project.Key, Slug: hit.Repository.Slug,
+		Name: hit.Repository.Name, Ref: branch, DefaultBranch: branch,
+		QueryResult: source.QueryResult{Path: hit.File, Snippet: strings.Join(snippet, "\n"), LineStart: start, LineEnd: end},
+	}, true
+}
+
+func plainSearchText(value string) string {
+	value = strings.ReplaceAll(value, "<em>", "")
+	value = strings.ReplaceAll(value, "</em>", "")
+	return html.UnescapeString(value)
+}
+
+func (c *Client) searchRequest(ctx context.Context, raw []byte) (*http.Response, error) {
+	u, err := c.endpointURL(c.searchPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	var wait time.Duration
+	for attempt := 0; attempt < source.MaxAttempts; attempt++ {
+		if wait > 0 {
+			if err := source.Sleep(ctx, wait); err != nil {
+				return nil, err
+			}
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(raw))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Content-Type", "application/json")
+		c.authorize(req)
+		resp, err := c.http.Do(req)
+		if err != nil {
+			lastErr = err
+			if ctx.Err() != nil || attempt == source.MaxAttempts-1 {
+				return nil, err
+			}
+			wait = source.RetryDelay(nil, attempt)
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			apiErr := &HTTPError{
+				Source: "bitbucket", StatusCode: resp.StatusCode, Status: resp.Status,
+				Body: string(limited), RetryAfter: source.RetryDelay(resp, attempt),
+			}
+			if source.RetryableStatus(resp.StatusCode) && attempt < source.MaxAttempts-1 {
+				lastErr, wait = apiErr, apiErr.RetryAfter
+				continue
+			}
+			return nil, apiErr
+		}
+		return resp, nil
+	}
+	return nil, lastErr
 }
 func (c *Client) GetPermissions(ctx context.Context, r source.RepositoryRef) ([]source.Permission, error) {
 	type userItem struct {
 		Permission string
-		User       struct{ Name, Slug string }
+		User       struct {
+			Name   string
+			Slug   string
+			Active bool
+		}
 	}
 	type groupItem struct {
 		Permission string
@@ -559,6 +752,9 @@ func (c *Client) GetPermissions(ctx context.Context, r source.RepositoryRef) ([]
 	for index, set := range sets {
 		for _, item := range set.users {
 			if index == 2 && item.Permission != "ADMIN" && item.Permission != "SYS_ADMIN" {
+				continue
+			}
+			if !item.User.Active {
 				continue
 			}
 			principal := item.User.Slug
@@ -613,18 +809,54 @@ func (c *Client) repo(r source.RepositoryRef) string {
 	return "/projects/" + escape(r.ProjectKey) + "/repos/" + escape(r.Slug)
 }
 func escape(s string) string { return url.PathEscape(s) }
-func escapePath(s string) string {
-	parts := strings.Split(strings.TrimPrefix(s, "/"), "/")
+func escapePath(s string) (string, error) {
+	if s == "" {
+		return "", errors.New("Bitbucket file path is required")
+	}
+	if strings.HasPrefix(s, "/") {
+		return "", fmt.Errorf("invalid Bitbucket file path %q: absolute paths are not allowed", s)
+	}
+	parts := strings.Split(s, "/")
 	for i := range parts {
+		if parts[i] == "" || parts[i] == "." || parts[i] == ".." {
+			return "", fmt.Errorf("invalid Bitbucket file path %q: empty and dot segments are not allowed", s)
+		}
 		parts[i] = url.PathEscape(parts[i])
 	}
-	return path.Join(parts...)
+	return strings.Join(parts, "/"), nil
 }
-func (c *Client) request(ctx context.Context, method, endpoint string, q url.Values, body io.Reader) (*http.Response, error) {
+
+// endpointURL appends an already escaped API path to the configured base URL.
+// Assigning those paths directly to url.URL.Path makes '%' become '%25', so a
+// project such as "Core Team" was sent as Core%2520Team.
+func (c *Client) endpointURL(escapedSuffix string, q url.Values) (*url.URL, error) {
 	u := *c.base
-	u.Path = strings.TrimSuffix(c.base.Path, "/") + c.prefix + endpoint
-	if q != nil {
-		u.RawQuery = q.Encode()
+	rawPath := strings.TrimSuffix(c.base.EscapedPath(), "/") + escapedSuffix
+	decodedPath, err := url.PathUnescape(rawPath)
+	if err != nil {
+		return nil, fmt.Errorf("build Bitbucket API URL: %w", err)
+	}
+	u.Path = decodedPath
+	u.RawPath = rawPath
+	u.RawQuery = q.Encode()
+	u.ForceQuery = false
+	u.Fragment = ""
+	u.RawFragment = ""
+	return &u, nil
+}
+
+func (c *Client) authorize(req *http.Request) {
+	if c.cfg.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.cfg.Token)
+	} else if c.cfg.Username != "" {
+		req.SetBasicAuth(c.cfg.Username, c.cfg.Password)
+	}
+}
+
+func (c *Client) request(ctx context.Context, method, endpoint string, q url.Values, body io.Reader) (*http.Response, error) {
+	u, err := c.endpointURL(c.prefix+endpoint, q)
+	if err != nil {
+		return nil, err
 	}
 	// Only a request without a body can be replayed. Every read call qualifies,
 	// and the one write call (webhook registration) is left to the caller.
@@ -645,11 +877,7 @@ func (c *Client) request(ctx context.Context, method, endpoint string, q url.Val
 			return nil, e
 		}
 		req.Header.Set("Accept", "application/json")
-		if c.cfg.Token != "" {
-			req.Header.Set("Authorization", "Bearer "+c.cfg.Token)
-		} else if c.cfg.Username != "" {
-			req.SetBasicAuth(c.cfg.Username, c.cfg.Password)
-		}
+		c.authorize(req)
 		resp, e := c.http.Do(req)
 		if e != nil {
 			// A connection reset or a closed keep-alive is worth one more try; a
@@ -700,5 +928,15 @@ func (c *Client) bytes(ctx context.Context, endpoint string, q url.Values) ([]by
 		return nil, e
 	}
 	defer resp.Body.Close()
-	return io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if resp.ContentLength > maxFileBytes {
+		return nil, fmt.Errorf("bitbucket file exceeds %d-byte limit: Content-Length is %d", maxFileBytes, resp.ContentLength)
+	}
+	content, err := io.ReadAll(io.LimitReader(resp.Body, maxFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(content)) > maxFileBytes {
+		return nil, fmt.Errorf("bitbucket file exceeds %d-byte limit", maxFileBytes)
+	}
+	return content, nil
 }

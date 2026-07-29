@@ -7,7 +7,9 @@ ARG COMMIT=""
 ARG BUILD_TIME=""
 COPY go.mod go.sum ./
 RUN go mod download
-COPY . .
+COPY cmd ./cmd
+COPY internal ./internal
+COPY web ./web
 RUN set -eu; \
     source_version=$(sed -n 's/.*Version = "\(.*\)".*/\1/p' internal/version/version.go); \
     if [ -n "$VERSION" ] && [ "${VERSION#v}" != "$source_version" ]; then \

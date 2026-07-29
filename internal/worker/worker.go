@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -57,23 +58,23 @@ func (w *Worker) SetRetrievalModeLoader(loader RetrievalModeLoader) {
 func (w *Worker) SetProjection(projection Projection) { w.projection = projection }
 
 func New(s *store.Store, idx *indexer.Indexer, f SourceFactory) *Worker {
-	return &Worker{store: s, indexer: idx, factory: f, poll: 2 * time.Second, maxAttempts: 5, lease: jobLease, timeout: jobTimeout}
+	return &Worker{store: s, indexer: idx, factory: f, poll: 2 * time.Second, maxAttempts: 5, lease: JobLeaseDuration, timeout: jobTimeout}
 }
 
 const (
-	// jobLease is how long a claimed job may stay in `running` before another
-	// worker pass reclaims it. Without this a job that was interrupted by a
-	// restart, a crash or a hung remote call stays `running` forever and the
-	// repository never gets indexed again.
-	jobLease = 15 * time.Minute
 	// jobTimeout bounds one index run so a single unresponsive source server
 	// cannot block every other repository behind it.
 	jobTimeout = 30 * time.Minute
+	// JobLeaseDuration is deliberately longer than jobTimeout. With multiple
+	// replicas a shorter lease lets a second worker claim a healthy long-running
+	// job while the first worker is still writing its result.
+	JobLeaseDuration = jobTimeout + 5*time.Minute
 )
 
 type job struct {
 	ID, RepositoryID, RefName string
 	Attempts                  int
+	StartedAt                 time.Time
 }
 type repository struct {
 	source.Repository
@@ -99,7 +100,7 @@ func (w *Worker) Run(ctx context.Context) {
 func (w *Worker) RecoverStaleJobs(ctx context.Context) (int64, error) {
 	lease := w.lease
 	if lease <= 0 {
-		lease = jobLease
+		lease = JobLeaseDuration
 	}
 	result, err := w.store.DB.ExecContext(ctx, w.store.Rebind(
 		`UPDATE index_jobs SET status='pending',next_run_at=?,error_message=? WHERE status='running' AND started_at IS NOT NULL AND started_at<?`),
@@ -122,8 +123,7 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	sourceType, hasSource := w.repositorySource(ctx, j.RepositoryID)
 	if hasSource && w.health != nil {
 		if allowed, reason := w.health.Allow(sourceType); !allowed {
-			w.requeuePaused(ctx, j, reason)
-			return true, nil
+			return true, w.requeuePaused(ctx, j, reason)
 		}
 	}
 	timeout := w.timeout
@@ -133,6 +133,15 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	jobCtx, cancel := context.WithTimeout(ctx, timeout)
 	err = w.execute(jobCtx, j)
 	cancel()
+	// A shutdown cancels the worker context before this claimed job can record
+	// its outcome. Use a short detached context for the state transition so the
+	// job is not stranded as `running` until the lease expires after restart.
+	stateCtx := ctx
+	stateCancel := func() {}
+	if ctx.Err() != nil {
+		stateCtx, stateCancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	}
+	defer stateCancel()
 	// Indexing is the heaviest user of the source API, so its outcome is the best
 	// early signal for the breaker that the search path also reads. Only outages
 	// count: a missing repository or a policy that indexes nothing says nothing
@@ -141,12 +150,15 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		w.health.Report(sourceType, outageOnly(err))
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		err = fmt.Errorf("index job exceeded the %s limit; check source server responsiveness, repository size and the embedding endpoint", timeout)
+		err = fmt.Errorf("index job exceeded the %s limit; check source server responsiveness, repository size and the embedding endpoint: %w", timeout, err)
 	}
 	if err == nil {
 		// error_message keeps the indexer's skip warning; only the status changes.
-		_, err = w.store.DB.ExecContext(ctx, w.store.Rebind(`UPDATE index_jobs SET status='completed',completed_at=? WHERE id=?`), time.Now().UTC(), j.ID)
-		return true, err
+		result, updateErr := w.store.DB.ExecContext(stateCtx, w.store.Rebind(`UPDATE index_jobs SET status='completed',completed_at=? WHERE id=? AND status='running' AND started_at=?`), time.Now().UTC(), j.ID, j.StartedAt)
+		if updateErr != nil {
+			return true, updateErr
+		}
+		return true, requireOwnedLease(result)
 	}
 	delay := time.Duration(1<<min(j.Attempts, 8)) * time.Second
 	status := "pending"
@@ -159,21 +171,25 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		if j.Attempts > 0 {
 			j.Attempts--
 		}
-		if delay < 30*time.Second {
+		if errors.Is(err, context.Canceled) {
+			delay = 0
+		} else if delay < 30*time.Second {
 			delay = 30 * time.Second
 		}
-		_, _ = w.store.DB.ExecContext(ctx, w.store.Rebind(`UPDATE index_jobs SET attempts=? WHERE id=?`), j.Attempts, j.ID)
 	}
 	if !outage && j.Attempts >= w.maxAttempts {
 		status = "failed"
 		completed = time.Now().UTC()
 	}
-	_, updateErr := w.store.DB.ExecContext(ctx, w.store.Rebind(`UPDATE index_jobs SET status=?,error_message=?,next_run_at=?,completed_at=? WHERE id=?`), status, truncate(err.Error(), 1000), time.Now().UTC().Add(delay), completed, j.ID)
+	result, updateErr := w.store.DB.ExecContext(stateCtx, w.store.Rebind(`UPDATE index_jobs SET status=?,attempts=?,error_message=?,next_run_at=?,completed_at=? WHERE id=? AND status='running' AND started_at=?`), status, j.Attempts, truncate(err.Error(), 1000), time.Now().UTC().Add(delay), completed, j.ID, j.StartedAt)
 	if updateErr != nil {
 		return true, updateErr
 	}
+	if leaseErr := requireOwnedLease(result); leaseErr != nil {
+		return true, leaseErr
+	}
 	if status == "failed" {
-		w.notifyFailure(ctx, j, err)
+		w.notifyFailure(stateCtx, j, err)
 	}
 	return true, err
 }
@@ -199,18 +215,35 @@ func (w *Worker) repositorySource(ctx context.Context, repositoryID string) (str
 // requeuePaused puts a job back without consuming an attempt and records why it
 // is waiting, so the operations screen shows "waiting for the connector" rather
 // than an unexplained idle queue.
-func (w *Worker) requeuePaused(ctx context.Context, j job, reason string) {
+func (w *Worker) requeuePaused(ctx context.Context, j job, reason string) error {
 	attempts := j.Attempts
 	if attempts > 0 {
 		attempts--
 	}
-	_, _ = w.store.DB.ExecContext(ctx, w.store.Rebind(`UPDATE index_jobs SET status='pending',attempts=?,error_message=?,next_run_at=? WHERE id=?`),
-		attempts, truncate("소스 연동 일시 중단으로 대기 중: "+reason, 1000), time.Now().UTC().Add(pausedRequeueDelay), j.ID)
+	result, err := w.store.DB.ExecContext(ctx, w.store.Rebind(`UPDATE index_jobs SET status='pending',attempts=?,error_message=?,next_run_at=? WHERE id=? AND status='running' AND started_at=?`),
+		attempts, truncate("소스 연동 일시 중단으로 대기 중: "+reason, 1000), time.Now().UTC().Add(pausedRequeueDelay), j.ID, j.StartedAt)
+	if err != nil {
+		return err
+	}
+	return requireOwnedLease(result)
 }
 
 // pausedRequeueDelay is how long a job waits while its source is paused. It is
 // longer than the breaker window so the queue does not spin.
 const pausedRequeueDelay = 45 * time.Second
+
+var errJobLeaseLost = errors.New("index job lease is no longer owned by this worker")
+
+func requireOwnedLease(result sql.Result) error {
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return errJobLeaseLost
+	}
+	return nil
+}
 
 // sourceOutage reports whether the failure is the source server being
 // unavailable rather than a problem with this repository.
@@ -220,6 +253,9 @@ func sourceOutage(err error) bool {
 	}
 	if errors.Is(err, source.ErrNotConfigured) {
 		return false
+	}
+	if errors.Is(err, context.Canceled) || source.StatusOf(err) == http.StatusUnauthorized {
+		return true
 	}
 	if status := source.StatusOf(err); status > 0 {
 		return source.RetryableStatus(status)
@@ -271,20 +307,20 @@ func (w *Worker) claim(ctx context.Context) (job, bool, error) {
 			return job{}, false, err
 		}
 		j.Attempts++
-		result, err := tx.ExecContext(ctx, `UPDATE index_jobs SET status='running',attempts=$1,started_at=CURRENT_TIMESTAMP WHERE id=$2 AND status='pending'`, j.Attempts, j.ID)
+		err = tx.QueryRowContext(ctx, `UPDATE index_jobs SET status='running',attempts=$1,started_at=CURRENT_TIMESTAMP WHERE id=$2 AND status='pending' RETURNING started_at`, j.Attempts, j.ID).Scan(&j.StartedAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return job{}, false, errors.New("index job claim lost")
+		}
 		if err != nil {
 			return job{}, false, err
-		}
-		affected, _ := result.RowsAffected()
-		if affected != 1 {
-			return job{}, false, errors.New("index job claim lost")
 		}
 		if err = tx.Commit(); err != nil {
 			return job{}, false, err
 		}
 		return j, true, nil
 	}
-	err := w.store.DB.QueryRowContext(ctx, w.store.Rebind(`UPDATE index_jobs SET status='running',attempts=attempts+1,started_at=? WHERE id=(SELECT id FROM index_jobs WHERE status='pending' AND next_run_at<=? ORDER BY created_at LIMIT 1) RETURNING id,repository_id,ref_name,attempts`), time.Now().UTC(), time.Now().UTC()).Scan(&j.ID, &j.RepositoryID, &j.RefName, &j.Attempts)
+	claimedAt := time.Now().UTC()
+	err := w.store.DB.QueryRowContext(ctx, w.store.Rebind(`UPDATE index_jobs SET status='running',attempts=attempts+1,started_at=? WHERE id=(SELECT id FROM index_jobs WHERE status='pending' AND next_run_at<=? ORDER BY created_at LIMIT 1) RETURNING id,repository_id,ref_name,attempts,started_at`), claimedAt, claimedAt).Scan(&j.ID, &j.RepositoryID, &j.RefName, &j.Attempts, &j.StartedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return job{}, false, nil
 	}
@@ -319,15 +355,28 @@ func (w *Worker) execute(ctx context.Context, j job) (err error) {
 	if err != nil {
 		return fmt.Errorf("list branches for %s/%s: %w", r.ProjectKey, r.Slug, err)
 	}
-	tags, tagErr := adapter.ListTags(ctx, source.RepositoryRef{ProjectKey: r.ProjectKey, Slug: r.Slug})
-	if tagErr == nil {
-		refs = append(refs, tags...)
-	}
 	var selected *source.Reference
 	for n := range refs {
 		if refs[n].Name == refName {
 			selected = &refs[n]
 			break
+		}
+	}
+	// Most jobs target a branch. Only query the tag endpoint when the ref was
+	// not found among branches: this removes one remote request from the common
+	// path and, for tag jobs, keeps a tag API outage from being misreported as a
+	// permanently missing ref.
+	if selected == nil {
+		tags, tagErr := adapter.ListTags(ctx, source.RepositoryRef{ProjectKey: r.ProjectKey, Slug: r.Slug})
+		if tagErr != nil {
+			return fmt.Errorf("list tags for %s/%s: %w", r.ProjectKey, r.Slug, tagErr)
+		}
+		refs = append(refs, tags...)
+		for n := range tags {
+			if tags[n].Name == refName {
+				selected = &tags[n]
+				break
+			}
 		}
 	}
 	if selected == nil {
@@ -382,18 +431,13 @@ func (w *Worker) execute(ctx context.Context, j job) (err error) {
 			}
 		}
 	}
-	if err := activeIndexer.ApplyPendingJob(ctx, adapter, r.SourceType, r.Repository, []source.Reference{*selected}, j.ID); err != nil {
+	if err := activeIndexer.ApplyPendingJob(ctx, adapter, r.SourceType, r.Repository, []source.Reference{*selected}, indexer.JobLease{ID: j.ID, StartedAt: j.StartedAt}); err != nil {
 		return fmt.Errorf("index %s@%s: %w", r.ProjectKey+"/"+r.Slug, selected.Name, err)
 	}
 	if embeddingWarning != "" {
-		var current string
-		_ = w.store.DB.QueryRowContext(ctx, w.store.Rebind(`SELECT COALESCE(error_message,'') FROM index_jobs WHERE id=?`), j.ID).Scan(&current)
-		if current != "" {
-			current += "; "
+		if err := w.recordEmbeddingWarning(ctx, j, selected.Name, embeddingWarning); err != nil {
+			return err
 		}
-		_, _ = w.store.DB.ExecContext(ctx, w.store.Rebind(`UPDATE index_jobs SET error_message=? WHERE id=?`), truncate(current+embeddingWarning, 1000), j.ID)
-		_, _ = w.store.DB.ExecContext(ctx, w.store.Rebind(`UPDATE repository_ref_states SET embedding_status='degraded',embedding_error=? WHERE repository_id=? AND ref_name=?`),
-			truncate(embeddingWarning, 1000), j.RepositoryID, selected.Name)
 	}
 	if w.projection != nil {
 		if err := w.projection(ctx, j.RepositoryID, selected.Name); err != nil {
@@ -402,6 +446,38 @@ func (w *Worker) execute(ctx context.Context, j job) (err error) {
 	}
 	return nil
 }
+
+func (w *Worker) recordEmbeddingWarning(ctx context.Context, j job, refName, warning string) error {
+	tx, err := w.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var current string
+	err = tx.QueryRowContext(ctx, w.store.Rebind(`SELECT COALESCE(error_message,'') FROM index_jobs WHERE id=? AND status='running' AND started_at=?`), j.ID, j.StartedAt).Scan(&current)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errJobLeaseLost
+	}
+	if err != nil {
+		return err
+	}
+	if current != "" {
+		current += "; "
+	}
+	result, err := tx.ExecContext(ctx, w.store.Rebind(`UPDATE index_jobs SET error_message=? WHERE id=? AND status='running' AND started_at=?`), truncate(current+warning, 1000), j.ID, j.StartedAt)
+	if err != nil {
+		return err
+	}
+	if err = requireOwnedLease(result); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, w.store.Rebind(`UPDATE repository_ref_states SET embedding_status='degraded',embedding_error=? WHERE repository_id=? AND ref_name=?`),
+		truncate(warning, 1000), j.RepositoryID, refName); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func truncate(s string, n int) string {
 	if len(s) > n {
 		return s[:n]

@@ -177,22 +177,31 @@ func (c *Client) SearchGlobalQuery(ctx context.Context, query string, limit int)
 	if limit < 1 || limit > 100 {
 		limit = 20
 	}
-	var items []blobHit
-	params := url.Values{"scope": []string{"blobs"}, "search": []string{query}, "per_page": []string{strconv.Itoa(limit)}}
-	if err := c.json(ctx, http.MethodGet, "/search", params, nil, &items); err != nil {
-		if globalSearchUnsupported(err) {
-			return nil, fmt.Errorf("%w: %v", source.ErrGlobalSearchUnsupported, err)
+	params := url.Values{"scope": []string{"blobs"}, "search": []string{query}}
+	out := make([]source.GlobalQueryResult, 0, limit)
+	seen := map[string]bool{}
+	var projectLookupErr error
+	err := c.searchBlobs(ctx, "/search", params, limit, func(item blobHit) bool {
+		path := item.filePath()
+		if path == "" || item.ProjectID == 0 {
+			return true
 		}
-		return nil, err
-	}
-	out := make([]source.GlobalQueryResult, 0, len(items))
-	for _, item := range items {
-		if item.Path == "" || item.ProjectID == 0 {
-			continue
+		key := strconv.FormatInt(item.ProjectID, 10) + "\x00" + path
+		if seen[key] {
+			return true
 		}
-		repository, err := c.project(ctx, item.ProjectID)
-		if err != nil {
-			continue
+		seen[key] = true
+		repository, projectErr := c.project(ctx, item.ProjectID)
+		if projectErr != nil {
+			// A project can disappear between the search and metadata calls.
+			// Authentication, transport and server failures are different: if
+			// they are swallowed, a broken credential looks like a successful
+			// search with zero hits and the caller never runs its fallback.
+			if source.IsNotFound(projectErr) {
+				return true
+			}
+			projectLookupErr = fmt.Errorf("resolve GitLab project %d: %w", item.ProjectID, projectErr)
+			return false
 		}
 		ref := item.Ref
 		if ref == "" {
@@ -202,39 +211,68 @@ func (c *Client) SearchGlobalQuery(ctx context.Context, query string, limit int)
 		out = append(out, source.GlobalQueryResult{
 			ProjectKey: repository.ProjectKey, Slug: repository.Slug, Name: repository.Name,
 			Description: repository.Description, Ref: ref, DefaultBranch: repository.DefaultBranch, ID: repository.ID,
-			QueryResult: source.QueryResult{Path: item.Path, Snippet: item.Data, LineStart: start, LineEnd: start + max(0, strings.Count(item.Data, "\n"))},
+			QueryResult: source.QueryResult{Path: path, Snippet: item.Data, CommitID: ref, LineStart: start, LineEnd: start + max(0, strings.Count(item.Data, "\n"))},
 		})
-		if len(out) == limit {
-			break
+		return len(out) < limit
+	})
+	if projectLookupErr != nil {
+		return nil, projectLookupErr
+	}
+	if err != nil {
+		if globalSearchUnsupported(err) {
+			// Preserve both classifications: callers need the fallback sentinel,
+			// while diagnostics and health reporting still need the HTTP status.
+			return nil, fmt.Errorf("%w: %w", source.ErrGlobalSearchUnsupported, err)
 		}
+		return nil, err
 	}
 	return out, nil
 }
 
 type blobHit struct {
 	Path      string `json:"path"`
+	Filename  string `json:"filename"`
 	Data      string `json:"data"`
 	Ref       string `json:"ref"`
 	StartLine int    `json:"startline"`
 	ProjectID int64  `json:"project_id"`
 }
 
+func (h blobHit) filePath() string {
+	if h.Path != "" {
+		return h.Path
+	}
+	// GitLab kept filename as the full repository-relative path before adding
+	// path. It is deprecated but still makes responses from older self-managed
+	// versions usable.
+	return h.Filename
+}
+
 // globalSearchUnsupported detects the responses returned by GitLab instances
 // that run basic search only. Those reject the blobs scope with 400 or 403
 // instead of returning an empty result set.
 func globalSearchUnsupported(err error) bool {
-	// A basic-search instance answers the blobs scope with 400, 403 or 501. The
-	// status is checked first so the decision no longer depends on the wording of
-	// the message body.
-	switch source.StatusOf(err) {
-	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotImplemented:
+	status := source.StatusOf(err)
+	if status == http.StatusNotImplemented {
 		return true
+	}
+	if status != 0 && status != http.StatusBadRequest && status != http.StatusForbidden {
+		return false
 	}
 	message := strings.ToLower(err.Error())
-	if strings.Contains(message, "scope") && (strings.Contains(message, "not supported") || strings.Contains(message, "does not have a valid value")) {
-		return true
-	}
-	return strings.Contains(message, "400 bad request") || strings.Contains(message, "403 forbidden") || strings.Contains(message, "501 not implemented")
+	feature := strings.Contains(message, "scope") ||
+		strings.Contains(message, "advanced search") ||
+		strings.Contains(message, "exact code search") ||
+		strings.Contains(message, "global search") ||
+		strings.Contains(message, "code search")
+	unavailable := strings.Contains(message, "does not have a valid value") ||
+		strings.Contains(message, "not supported") ||
+		strings.Contains(message, "unsupported") ||
+		strings.Contains(message, "not enabled") ||
+		strings.Contains(message, "unavailable") ||
+		strings.Contains(message, "disabled") ||
+		strings.Contains(message, "invalid scope")
+	return feature && unavailable
 }
 
 func (c *Client) cacheProject(p project) {
@@ -445,62 +483,80 @@ func (c *Client) SearchQuery(ctx context.Context, r source.RepositoryRef, ref, q
 	if query == "" {
 		return nil, errors.New("search query is required")
 	}
-	var items []blobHit
-	params := url.Values{"scope": []string{"blobs"}, "search": []string{query}, "per_page": []string{strconv.Itoa(limit)}}
+	params := url.Values{"scope": []string{"blobs"}, "search": []string{query}}
 	if ref = strings.TrimSpace(ref); ref != "" {
 		params.Set("ref", ref)
 	}
-	err := c.json(ctx, http.MethodGet, c.repo(r)+"/search", params, nil, &items)
-	if err != nil && ref != "" {
-		// GitLab rejects the whole search when the ref is missing on the remote
-		// side, for example after a default branch rename. Retrying on the
-		// default branch keeps the search useful instead of returning nothing.
-		params.Del("ref")
-		items = nil
-		err = c.json(ctx, http.MethodGet, c.repo(r)+"/search", params, nil, &items)
-	}
+	out := make([]source.QueryResult, 0, limit)
+	seen := map[string]bool{}
+	err := c.searchBlobs(ctx, c.repo(r)+"/search", params, limit, func(item blobHit) bool {
+		path := item.filePath()
+		if path == "" || seen[path] {
+			return true
+		}
+		seen[path] = true
+		start := max(1, item.StartLine)
+		out = append(out, source.QueryResult{Path: path, Snippet: item.Data, CommitID: item.Ref, LineStart: start, LineEnd: start + max(0, strings.Count(item.Data, "\n"))})
+		return len(out) < limit
+	})
 	if err != nil {
 		return nil, err
-	}
-	out := make([]source.QueryResult, 0, min(limit, len(items)))
-	seen := map[string]bool{}
-	for _, item := range items {
-		if item.Path == "" || seen[item.Path] {
-			continue
-		}
-		seen[item.Path] = true
-		start := max(1, item.StartLine)
-		out = append(out, source.QueryResult{Path: item.Path, Snippet: item.Data, CommitID: item.Ref, LineStart: start, LineEnd: start + max(0, strings.Count(item.Data, "\n"))})
-		if len(out) == limit {
-			break
-		}
 	}
 	return out, nil
 }
 func (c *Client) GetPermissions(ctx context.Context, r source.RepositoryRef) ([]source.Permission, error) {
 	var members []struct {
 		ID          int64
-		Username    string
+		State       string
 		AccessLevel int `json:"access_level"`
 	}
 	if err := c.pages(ctx, c.repo(r)+"/members/all", nil, &members); err != nil {
 		return nil, err
 	}
-	out := make([]source.Permission, len(members))
-	for i, m := range members {
-		out[i] = source.Permission{Principal: "gitlab:" + strconv.FormatInt(m.ID, 10), Kind: "user", Permission: accessName(m.AccessLevel)}
+	out := make([]source.Permission, 0, len(members))
+	for _, m := range members {
+		// /members/all can retain users whose account is blocked. GitLab denies
+		// those users repository access, so carrying their old membership into
+		// the local ACL would expose indexed content that GitLab itself hides.
+		// Guest and lower base roles cannot read private project repository code.
+		// Planner (15) can read code on current GitLab versions. Custom Guest
+		// capabilities are not present in this response, so those fail closed.
+		if m.ID == 0 ||
+			!strings.EqualFold(strings.TrimSpace(m.State), "active") ||
+			m.AccessLevel < 15 {
+			continue
+		}
+		out = append(out, source.Permission{Principal: "gitlab:" + strconv.FormatInt(m.ID, 10), Kind: "user", Permission: accessName(m.AccessLevel)})
 	}
 	var project struct {
-		Visibility string `json:"visibility"`
+		Visibility            string `json:"visibility"`
+		RepositoryAccessLevel string `json:"repository_access_level"`
 	}
 	if err := c.json(ctx, http.MethodGet, c.repo(r), nil, nil, &project); err != nil {
 		return nil, err
 	}
+	repositoryAccess := strings.ToLower(strings.TrimSpace(project.RepositoryAccessLevel))
+	switch repositoryAccess {
+	case "disabled":
+		// The repository feature is unavailable even to project members. Do not
+		// preserve access to stale indexed content after it is disabled.
+		return nil, nil
+	case "private":
+		// Only the active, read-capable members collected above may read code.
+		return out, nil
+	case "enabled", "":
+		// Older GitLab versions omit repository_access_level. Preserve their
+		// historical project-visibility behavior explicitly for compatibility.
+	default:
+		// New or malformed feature levels fail closed for broad principals while
+		// retaining only individually verified memberships.
+		return out, nil
+	}
 	// Every git-ctx query is authenticated. GitLab public and internal projects
 	// are therefore readable by all platform users without an explicit member row.
-	if project.Visibility == "public" {
+	if strings.EqualFold(strings.TrimSpace(project.Visibility), "public") {
 		out = append(out, source.Permission{Principal: "*", Kind: "all", Permission: "read"})
-	} else if project.Visibility == "internal" {
+	} else if strings.EqualFold(strings.TrimSpace(project.Visibility), "internal") {
 		out = append(out, source.Permission{Principal: "gitlab:authenticated", Kind: "all", Permission: "read"})
 	}
 	return out, nil
@@ -534,12 +590,23 @@ func accessName(level int) string {
 		return "developer"
 	case level >= 20:
 		return "reporter"
+	case level >= 15:
+		// Planner is a read-capable role. Emit the local capability name rather
+		// than a role name so older consumers also authorize it correctly.
+		return "read"
 	default:
 		return "guest"
 	}
 }
 func (c *Client) endpoint(p string, q url.Values) string {
 	u := *c.base
+	// A configured base URL contributes only scheme, authority and path. Carrying
+	// an accidental query or fragment into API requests changes nil-query calls
+	// and can leak unrelated configuration into every request.
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	u.RawFragment = ""
 	rawPath := strings.TrimSuffix(c.base.EscapedPath(), "/") + "/api/v4" + p
 	decoded, err := url.PathUnescape(rawPath)
 	if err != nil {
@@ -626,13 +693,52 @@ func (c *Client) json(ctx context.Context, method, p string, q url.Values, input
 	return json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(output)
 }
 
-// maxPages bounds one paginated read at 100 items per page.
+// maxPages bounds one paginated read at 100 items per page. Hitting the bound
+// while GitLab still advertises another page is an error, never a complete
+// result: consumers use these lists to replace indexes and ACL snapshots.
 const maxPages = 50
 
-func (c *Client) pages(ctx context.Context, p string, q url.Values, output any) error {
-	if q == nil {
-		q = url.Values{}
+var errPaginationLimitExceeded = errors.New("gitlab pagination safety limit exceeded")
+
+// searchBlobs streams paginated blob matches to visit. GitLab can return
+// multiple entries for one file, so callers deduplicate while visiting and
+// continue to later pages until they have the requested number of distinct
+// files.
+func (c *Client) searchBlobs(ctx context.Context, p string, q url.Values, perPage int, visit func(blobHit) bool) error {
+	q = cloneValues(q)
+	page := 1
+	for pages := 0; pages < maxPages; pages++ {
+		q.Set("per_page", strconv.Itoa(perPage))
+		q.Set("page", strconv.Itoa(page))
+		resp, err := c.request(ctx, http.MethodGet, p, q, nil)
+		if err != nil {
+			return err
+		}
+		var current []blobHit
+		decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&current)
+		resp.Body.Close()
+		if decodeErr != nil {
+			return decodeErr
+		}
+		for _, item := range current {
+			if !visit(item) {
+				return nil
+			}
+		}
+		next, nextErr := nextPage(resp, page)
+		if nextErr != nil {
+			return nextErr
+		}
+		if next == 0 {
+			return nil
+		}
+		page = next
 	}
+	return fmt.Errorf("%w after %d pages for %s", errPaginationLimitExceeded, maxPages, p)
+}
+
+func (c *Client) pages(ctx context.Context, p string, q url.Values, output any) error {
+	q = cloneValues(q)
 	page := 1
 	// Decode each page into RawMessage first so callers retain strong typing.
 	var all []json.RawMessage
@@ -648,28 +754,104 @@ func (c *Client) pages(ctx context.Context, p string, q url.Values, output any) 
 		}
 		var current []json.RawMessage
 		e = json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&current)
-		next := resp.Header.Get("X-Next-Page")
 		resp.Body.Close()
 		if e != nil {
 			return e
 		}
 		all = append(all, current...)
-		if next == "" {
-			break
+		next, nextErr := nextPage(resp, page)
+		if nextErr != nil {
+			return nextErr
 		}
-		page, _ = strconv.Atoi(next)
-		if page <= 0 {
-			return errors.New("invalid GitLab pagination header")
+		if next == 0 {
+			raw, _ := json.Marshal(all)
+			return json.Unmarshal(raw, output)
+		}
+		page = next
+	}
+	return fmt.Errorf("%w after %d pages for %s", errPaginationLimitExceeded, maxPages, p)
+}
+
+func cloneValues(values url.Values) url.Values {
+	cloned := make(url.Values, len(values))
+	for key, items := range values {
+		cloned[key] = append([]string(nil), items...)
+	}
+	return cloned
+}
+
+// nextPage prefers GitLab's X-Next-Page convenience header and then its
+// standards-based Link header. Some GitLab.com responses omit X-Next-Page.
+func nextPage(resp *http.Response, current int) (int, error) {
+	if value := strings.TrimSpace(resp.Header.Get("X-Next-Page")); value != "" {
+		return parseNextPage(value, current, "X-Next-Page")
+	}
+	for _, header := range resp.Header.Values("Link") {
+		for _, entry := range strings.Split(header, ",") {
+			parts := strings.Split(entry, ";")
+			if len(parts) < 2 || !hasNextRelation(parts[1:]) {
+				continue
+			}
+			target := strings.TrimSpace(parts[0])
+			if len(target) < 2 || target[0] != '<' || target[len(target)-1] != '>' {
+				return 0, errors.New("invalid GitLab pagination Link header")
+			}
+			parsed, err := url.Parse(target[1 : len(target)-1])
+			if err != nil {
+				return 0, fmt.Errorf("invalid GitLab pagination Link header: %w", err)
+			}
+			value := parsed.Query().Get("page")
+			if value == "" {
+				return 0, errors.New("GitLab next pagination link has no page")
+			}
+			return parseNextPage(value, current, "Link")
 		}
 	}
-	raw, _ := json.Marshal(all)
-	return json.Unmarshal(raw, output)
+	return 0, nil
 }
+
+func hasNextRelation(attributes []string) bool {
+	for _, attribute := range attributes {
+		key, value, ok := strings.Cut(strings.TrimSpace(attribute), "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(key), "rel") {
+			continue
+		}
+		for _, relation := range strings.Fields(strings.Trim(strings.TrimSpace(value), `"'`)) {
+			if strings.EqualFold(relation, "next") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func parseNextPage(value string, current int, header string) (int, error) {
+	page, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || page <= current {
+		return 0, fmt.Errorf("invalid GitLab pagination %s value %q", header, value)
+	}
+	return page, nil
+}
+
 func (c *Client) bytes(ctx context.Context, p string, q url.Values) ([]byte, error) {
 	resp, e := c.request(ctx, http.MethodGet, p, q, nil)
 	if e != nil {
 		return nil, e
 	}
 	defer resp.Body.Close()
-	return io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if resp.ContentLength > maxRawFileBytes {
+		return nil, fmt.Errorf("%w: Content-Length %d exceeds %d bytes", errFileTooLarge, resp.ContentLength, maxRawFileBytes)
+	}
+	raw, e := io.ReadAll(io.LimitReader(resp.Body, maxRawFileBytes+1))
+	if int64(len(raw)) > maxRawFileBytes {
+		return nil, fmt.Errorf("%w: response exceeds %d bytes", errFileTooLarge, maxRawFileBytes)
+	}
+	if e != nil {
+		return nil, e
+	}
+	return raw, nil
 }
+
+const maxRawFileBytes int64 = 10 << 20
+
+var errFileTooLarge = errors.New("gitlab file exceeds download limit")

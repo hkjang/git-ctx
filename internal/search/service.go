@@ -193,7 +193,7 @@ func (s *Service) reportRemote(sourceType string, err error) {
 	}
 	// A missing repository, an unsupported feature and an unconfigured source say
 	// nothing about the health of the instance.
-	if err != nil && (errors.Is(err, source.ErrGlobalSearchUnsupported) || errors.Is(err, source.ErrNotConfigured) || source.IsNotFound(err)) {
+	if err != nil && (errors.Is(err, source.ErrGlobalSearchUnsupported) || errors.Is(err, source.ErrCodeSearchRefUnsupported) || errors.Is(err, source.ErrNotConfigured) || source.IsNotFound(err)) {
 		err = nil
 	}
 	s.breakers.Report(sourceType, err)
@@ -292,7 +292,7 @@ type CodeSearchResult struct {
 type SymbolResult struct {
 	LibraryID, Ref, CommitID, FilePath, Name, QualifiedName, Kind, Language, Signature, Documentation string
 	LineStart, LineEnd                                                                                int
-	Content                                                                                           string
+	Content, ContentHash                                                                              string
 }
 
 type RepositoryMap struct {
@@ -540,9 +540,21 @@ func (s *Service) CompareRefs(ctx context.Context, principals []string, libraryI
 	if err != nil {
 		return RefComparison{}, err
 	}
+	var indexedRefs int
+	err = s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT COUNT(DISTINCT ref_name) FROM repository_ref_states
+WHERE repository_id=? AND ref_name IN (?,?)`), repositoryID, baseRef, headRef).Scan(&indexedRefs)
+	if err != nil {
+		return RefComparison{}, err
+	}
+	if indexedRefs != 2 {
+		return RefComparison{}, errors.New("both baseRef and headRef must be indexed before comparison")
+	}
 	load := func(ref string) (map[string]SymbolResult, error) {
-		rows, queryErr := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT commit_id,file_path,name,qualified_name,symbol_kind,language,signature,documentation,line_start,line_end
-FROM code_symbols WHERE repository_id=? AND ref_name=? ORDER BY qualified_name,file_path,line_start`), repositoryID, ref)
+		rows, queryErr := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT s.commit_id,s.file_path,s.name,s.qualified_name,s.symbol_kind,s.language,s.signature,s.documentation,s.line_start,s.line_end,
+COALESCE((SELECT c.content_hash FROM document_chunks c
+  WHERE c.repository_id=s.repository_id AND c.ref_name=s.ref_name AND c.file_path=s.file_path
+    AND c.heading=s.qualified_name AND c.line_start=s.line_start LIMIT 1),s.content_hash)
+FROM code_symbols s WHERE s.repository_id=? AND s.ref_name=? ORDER BY s.qualified_name,s.file_path,s.line_start`), repositoryID, ref)
 		if queryErr != nil {
 			return nil, queryErr
 		}
@@ -551,7 +563,7 @@ FROM code_symbols WHERE repository_id=? AND ref_name=? ORDER BY qualified_name,f
 		for rows.Next() {
 			var item SymbolResult
 			item.LibraryID, item.Ref = baseID, ref
-			if queryErr = rows.Scan(&item.CommitID, &item.FilePath, &item.Name, &item.QualifiedName, &item.Kind, &item.Language, &item.Signature, &item.Documentation, &item.LineStart, &item.LineEnd); queryErr != nil {
+			if queryErr = rows.Scan(&item.CommitID, &item.FilePath, &item.Name, &item.QualifiedName, &item.Kind, &item.Language, &item.Signature, &item.Documentation, &item.LineStart, &item.LineEnd, &item.ContentHash); queryErr != nil {
 				return nil, queryErr
 			}
 			items[item.QualifiedName+"\x00"+item.Kind+"\x00"+item.FilePath] = item
@@ -593,6 +605,9 @@ FROM code_symbols WHERE repository_id=? AND ref_name=? ORDER BY qualified_name,f
 }
 
 func (s SymbolResult) ContentHashKey() string {
+	if s.ContentHash != "" {
+		return s.ContentHash
+	}
 	return s.Signature + "\x00" + s.Documentation + "\x00" + fmt.Sprint(s.LineStart) + "\x00" + fmt.Sprint(s.LineEnd)
 }
 
@@ -1020,6 +1035,10 @@ WHERE r.enabled=1 AND ` + predicate
 				selectedRef = item.defaultRef
 			}
 			found[index].ref = selectedRef
+			if item.sourceType == "bitbucket" && ref != "" && ref != item.defaultRef {
+				found[index].err = fmt.Errorf("%w: Bitbucket indexes only the default branch %q, not %q", source.ErrCodeSearchRefUnsupported, item.defaultRef, ref)
+				return
+			}
 			adapter, paused, loadErr := s.remoteSource(ctx, item.sourceType)
 			if loadErr != nil {
 				found[index].err, found[index].paused = loadErr, paused
@@ -1120,12 +1139,15 @@ func (s *Service) FindFiles(ctx context.Context, principals []string, pattern, l
 FROM repository_files f JOIN repositories r ON r.id=f.repository_id ` + join + `
 WHERE r.enabled=1 AND ` + predicate
 	if libraryID != "" {
-		base, _, ok := splitLibraryID(libraryID)
+		base, version, ok := splitLibraryID(libraryID)
 		if !ok {
 			return FileSearchResult{}, errors.New("libraryId must use /organization/project[/version]")
 		}
 		statement += ` AND r.library_id=?`
 		args = append(args, base)
+		if ref == "" {
+			ref = version
+		}
 	}
 	if sourceType != "" {
 		statement += ` AND r.source_type=?`
@@ -1142,6 +1164,8 @@ WHERE r.enabled=1 AND ` + predicate
 	if ref != "" {
 		statement += ` AND f.ref_name=?`
 		args = append(args, ref)
+	} else {
+		statement += ` AND f.ref_name=r.default_branch`
 	}
 	// A coarse SQL filter keeps the scan small; the precise glob runs in Go.
 	if like := matcher.sqlLike(); like != "" {
@@ -1501,6 +1525,8 @@ WHERE r.enabled=1 AND ` + predicate + ` AND LOWER(f.path)=LOWER(?)`
 	if ref != "" {
 		statement += ` AND f.ref_name=?`
 		args = append(args, ref)
+	} else {
+		statement += ` AND f.ref_name=r.default_branch`
 	}
 	statement += ` ORDER BY r.library_id,f.ref_name LIMIT 25`
 	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
@@ -2315,6 +2341,8 @@ WHERE r.enabled=1 AND ` + predicate
 	if ref != "" {
 		statement += ` AND f.ref_name=?`
 		args = append(args, ref)
+	} else {
+		statement += ` AND f.ref_name=r.default_branch`
 	}
 	if prefix != "" {
 		statement += ` AND f.path LIKE ?`
@@ -2416,6 +2444,8 @@ WHERE r.enabled=1 AND ` + predicate + ` AND LOWER(f.path)=LOWER(?)`
 	if ref != "" {
 		statement += ` AND f.ref_name=?`
 		args = append(args, ref)
+	} else {
+		statement += ` AND f.ref_name=r.default_branch`
 	}
 	statement += ` ORDER BY r.library_id,f.ref_name LIMIT 25`
 	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
@@ -2446,6 +2476,8 @@ WHERE r.enabled=1 AND ` + predicate + ` AND LOWER(f.path)=LOWER(?)`
 // can find a repository by name even when no library ID or local index exists.
 func (s *Service) SearchCode(ctx context.Context, principals []string, query, sourceType, project, repository, ref string, limit int) (CodeSearchResult, error) {
 	normalized := NormalizeSourceQuery(query)
+	sourceType = strings.ToLower(strings.TrimSpace(sourceType))
+	project, repository, ref = strings.TrimSpace(project), strings.TrimSpace(repository), strings.TrimSpace(ref)
 	if normalized == "" {
 		return CodeSearchResult{}, errors.New("query is required")
 	}
@@ -2469,6 +2501,7 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 	calltrace.From(ctx).Note("acl", aclScope, calltrace.StatusOK, fmt.Sprintf("%d principals", len(principals)))
 	repoSpan := calltrace.Start(ctx, "index-repositories", sourceType)
 	repositories, repoErr := s.SearchRepositories(ctx, principals, normalized, sourceType, limit)
+	repositories = scopedRepositoryResults(repositories, project, repository)
 	if repoErr != nil {
 		repoSpan.Fail(repoErr)
 	} else {
@@ -2488,6 +2521,9 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 	if sourceErr != nil {
 		result.Warning = "The remote source query API was unavailable; repository matches are still shown."
 		result.Diagnostics = append(result.Diagnostics, "indexed-source: "+sourceErr.Error())
+		if errors.Is(sourceErr, source.ErrCodeSearchRefUnsupported) {
+			result.Warning = "Bitbucket code search covers only the repository default branch; the requested ref was not searched."
+		}
 		// A deadline is the difference between "no code matched" and "we ran out
 		// of time", and only the second one is worth retrying with a narrower
 		// scope. Say which one happened.
@@ -2498,9 +2534,9 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 	if ctx.Err() != nil {
 		calltrace.From(ctx).Note("remote-discovery", sourceType, calltrace.StatusTimeout, "deadline passed before instance-wide discovery")
 		result.Diagnostics = append(result.Diagnostics, "remote: skipped instance-wide discovery because the request deadline had already passed.")
-	} else if s.sources != nil && repository == "" {
+	} else if s.sources != nil && (repository == "" || (sourceErr == nil && len(hits) == 0)) {
 		discoverySpan := calltrace.Start(ctx, "remote-discovery", sourceType)
-		discovery := s.discoverRemoteCode(ctx, principals, normalized, sourceType, project, ref, limit, result.Repositories, result.Hits)
+		discovery := s.discoverRemoteCode(ctx, principals, normalized, sourceType, project, repository, ref, limit, result.Repositories, result.Hits)
 		discoverySpan.End(statusFor(len(discovery.hits)+len(discovery.repositories)), len(discovery.repositories)+len(discovery.hits), len(discovery.hits), discovery.warning)
 		result.Repositories = append(result.Repositories, discovery.repositories...)
 		result.Hits = append(result.Hits, discovery.hits...)
@@ -2521,6 +2557,23 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 		return CodeSearchResult{}, sourceErr
 	}
 	return result, repoErr
+}
+
+func scopedRepositoryResults(repositories []RepositoryResult, project, repository string) []RepositoryResult {
+	if project == "" && repository == "" {
+		return repositories
+	}
+	out := repositories[:0]
+	for _, item := range repositories {
+		if project != "" && !strings.EqualFold(project, item.ProjectKey) {
+			continue
+		}
+		if repository != "" && !strings.EqualFold(repository, item.Slug) && !strings.EqualFold(repository, item.LibraryID) {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 // statusFor maps a result count to a trace status, so an empty stage is visible
@@ -2554,7 +2607,7 @@ type remoteDiscovery struct {
 // the Bitbucket and GitLab web UIs use, so a code term that appears in no
 // repository name still returns hits. Every repository is ACL-verified against
 // the caller principals before any name or snippet is returned.
-func (s *Service) discoverRemoteCode(ctx context.Context, principals []string, query, sourceType, project, ref string, limit int, existingRepositories []RepositoryResult, existingHits []SourceResult) remoteDiscovery {
+func (s *Service) discoverRemoteCode(ctx context.Context, principals []string, query, sourceType, project, repository, ref string, limit int, existingRepositories []RepositoryResult, existingHits []SourceResult) remoteDiscovery {
 	sourceTypes := []string{sourceType}
 	if sourceType == "" {
 		sourceTypes = []string{"bitbucket", "gitlab"}
@@ -2587,18 +2640,30 @@ func (s *Service) discoverRemoteCode(ctx context.Context, principals []string, q
 		}
 		scan := &remoteScan{
 			service: s, adapter: adapter, sourceType: currentSourceType, principals: principals,
-			query: query, project: project, ref: ref, limit: limit,
-			seenRepository: seenRepository, seenHit: seenHit, allowed: map[string]bool{},
+			query: query, project: project, repository: repository, ref: ref, limit: limit,
+			seenRepository: seenRepository, seenHit: seenHit, seenCandidate: map[string]bool{}, allowed: map[string]bool{},
 		}
 		scan.discoverRepositories(ctx)
 		scan.searchCode(ctx)
 		out.repositories = append(out.repositories, scan.repositories...)
 		out.hits = append(out.hits, scan.hits...)
 		out.diagnostics = append(out.diagnostics, scan.diagnostics...)
+		if scan.warning != "" {
+			if out.warning == "" {
+				out.warning = scan.warning
+			} else if !strings.Contains(out.warning, scan.warning) {
+				out.warning += " " + scan.warning
+			}
+		}
 		failures += scan.failures
 	}
 	if failures > 0 {
-		out.warning = "Some remote repositories could not be discovered, ACL-verified, or searched."
+		const degraded = "Some remote repositories could not be discovered, ACL-verified, or searched."
+		if out.warning == "" {
+			out.warning = degraded
+		} else {
+			out.warning += " " + degraded
+		}
 	}
 	if len(out.diagnostics) == 0 && len(out.repositories) == 0 && len(out.hits) == 0 {
 		out.diagnostics = append(out.diagnostics, "remote: no source connector is configured, so only the local index was searched.")
@@ -2607,20 +2672,23 @@ func (s *Service) discoverRemoteCode(ctx context.Context, principals []string, q
 }
 
 type remoteScan struct {
-	service                 *Service
-	adapter                 source.RepositorySource
-	sourceType              string
-	principals              []string
-	query, project, ref     string
-	limit                   int
-	seenRepository, seenHit map[string]bool
-	mu                      sync.Mutex
-	allowed                 map[string]bool
-	repositories            []RepositoryResult
-	hits                    []SourceResult
-	diagnostics             []string
-	failures                int
-	candidates              []source.Repository
+	service                         *Service
+	adapter                         source.RepositorySource
+	sourceType                      string
+	principals                      []string
+	query, project, repository, ref string
+	limit                           int
+	seenRepository, seenHit         map[string]bool
+	seenCandidate                   map[string]bool
+	mu                              sync.Mutex
+	allowed                         map[string]bool
+	repositories                    []RepositoryResult
+	hits                            []SourceResult
+	diagnostics                     []string
+	warning                         string
+	failures                        int
+	candidates                      []source.Repository
+	enumerated                      bool
 }
 
 // sourceQueryConcurrency bounds parallel remote code searches.
@@ -2682,19 +2750,105 @@ func aclCacheKey(projectKey, slug string) string {
 	return strings.ToLower(projectKey + "/" + slug)
 }
 
+func (r *remoteScan) repositoryInScope(projectKey, slug string) bool {
+	if r.project != "" && !strings.EqualFold(r.project, projectKey) {
+		return false
+	}
+	if r.repository == "" {
+		return true
+	}
+	if strings.EqualFold(r.repository, slug) {
+		return true
+	}
+	return strings.EqualFold(r.repository, source.LibraryID(r.sourceType, projectKey, slug))
+}
+
+func (r *remoteScan) boundedRepositories(repositories []source.Repository) []source.Repository {
+	scoped := make([]source.Repository, 0, min(len(repositories), maxDiscoveryRepositories))
+	for _, repository := range repositories {
+		if !r.repositoryInScope(repository.ProjectKey, repository.Slug) {
+			continue
+		}
+		scoped = append(scoped, repository)
+		if len(scoped) == maxDiscoveryRepositories {
+			r.diagnostics = append(r.diagnostics, fmt.Sprintf("%s: repository scan stopped after %d in-scope repositories.", r.sourceType, maxDiscoveryRepositories))
+			break
+		}
+	}
+	return scoped
+}
+
 func (r *remoteScan) discoverRepositories(ctx context.Context) {
-	searcher, ok := r.adapter.(source.RepositorySearcher)
-	if ok {
-		found, err := searcher.SearchRepositories(ctx, r.query, r.limit*2)
+	// A project filter is already an exact server-side scope. Listing that one
+	// project is both more complete and cheaper than taking the first page of a
+	// repository-name search whose best matches may all belong to other projects.
+	if r.project != "" {
+		repositories, err := r.adapter.ListRepositories(ctx, r.project)
 		r.service.reportRemote(r.sourceType, err)
 		if err == nil {
-			r.collect(ctx, found, false)
-			r.diagnostics = append(r.diagnostics, fmt.Sprintf("%s: repository name search matched %d repositories.", r.sourceType, len(r.repositories)))
+			r.enumerated = true
+			repositories = r.boundedRepositories(repositories)
+			r.collect(ctx, repositories, true, r.repository != "")
+			r.diagnostics = append(r.diagnostics, fmt.Sprintf("%s: scoped project discovery produced %d code-search candidates.", r.sourceType, len(r.candidates)))
 			return
 		}
 		r.failures++
-		r.diagnostics = append(r.diagnostics, r.sourceType+": repository name search failed, falling back to project enumeration: "+err.Error())
+		r.diagnostics = append(r.diagnostics, r.sourceType+": scoped project discovery failed, falling back to repository search: "+err.Error())
+		if source.IsAuthFailure(err) {
+			return
+		}
 	}
+
+	searcher, ok := r.adapter.(source.RepositorySearcher)
+	if ok {
+		searchTerm := r.query
+		searchLimit := min(100, max(r.limit*2, 20))
+		if r.repository != "" {
+			searchTerm = strings.Trim(strings.TrimSpace(r.repository), "/")
+			if slash := strings.LastIndex(searchTerm, "/"); slash >= 0 {
+				searchTerm = searchTerm[slash+1:]
+			}
+			searchLimit = 100
+		}
+		found, err := searcher.SearchRepositories(ctx, searchTerm, searchLimit)
+		r.service.reportRemote(r.sourceType, err)
+		if err == nil {
+			// The server has already metadata-matched these rows. An explicit
+			// repository is filtered exactly by repositoryInScope.
+			r.collect(ctx, r.boundedRepositories(found), true, true)
+			r.diagnostics = append(r.diagnostics, fmt.Sprintf("%s: repository name search matched %d repositories.", r.sourceType, len(r.repositories)))
+			// A name search is exhaustive only for the ordinary unscoped mode.
+			// A ref-specific code search must also consider repositories whose
+			// names do not contain the code identifier.
+			if r.repository != "" && len(r.candidates) > 0 {
+				return
+			}
+			if r.repository == "" && r.ref == "" {
+				return
+			}
+		}
+		if err != nil {
+			r.failures++
+			r.diagnostics = append(r.diagnostics, r.sourceType+": repository name search failed, falling back to project enumeration: "+err.Error())
+			if source.IsAuthFailure(err) {
+				return
+			}
+		}
+	}
+	r.enumerateProjects(ctx, false)
+}
+
+// enumerateProjects is the bounded fallback for source instances without an
+// instance-wide code-search feature. Repository-name search alone cannot find
+// a symbol that appears only inside a file, so after the global API explicitly
+// reports "unsupported" we enumerate accessible project containers and run
+// their repository-scoped query APIs. The flag prevents an explicit-ref scan
+// performed during discovery from being repeated.
+func (r *remoteScan) enumerateProjects(ctx context.Context, codeFallback bool) {
+	if r.enumerated {
+		return
+	}
+	r.enumerated = true
 	projects, err := r.adapter.ListProjects(ctx)
 	r.service.reportRemote(r.sourceType, err)
 	if err != nil {
@@ -2702,28 +2856,44 @@ func (r *remoteScan) discoverRepositories(ctx context.Context) {
 		r.diagnostics = append(r.diagnostics, r.sourceType+": project discovery failed: "+err.Error())
 		return
 	}
-	scanned := 0
-	for index, remoteProject := range projects {
+	scannedRepositories := 0
+	scannedProjects := 0
+	for _, remoteProject := range projects {
 		if r.project != "" && !strings.EqualFold(r.project, remoteProject.Key) {
 			continue
 		}
-		if index >= maxDiscoveryProjects {
+		if scannedProjects >= maxDiscoveryProjects {
 			r.diagnostics = append(r.diagnostics, fmt.Sprintf("%s: only the first %d projects were scanned; narrow the search with a project filter.", r.sourceType, maxDiscoveryProjects))
 			break
 		}
+		scannedProjects++
 		repositories, listErr := r.adapter.ListRepositories(ctx, remoteProject.Key)
 		r.service.reportRemote(r.sourceType, listErr)
 		if listErr != nil {
 			r.failures++
 			continue
 		}
-		if scanned += len(repositories); scanned > maxDiscoveryRepositories {
-			r.collect(ctx, repositories, true)
+		remaining := maxDiscoveryRepositories - scannedRepositories
+		if remaining <= 0 {
 			r.diagnostics = append(r.diagnostics, fmt.Sprintf("%s: repository scan stopped after %d repositories.", r.sourceType, maxDiscoveryRepositories))
 			break
 		}
-		r.collect(ctx, repositories, true)
-		if len(r.repositories) >= r.limit {
+		repositories = r.boundedRepositories(repositories)
+		capped := len(repositories) > remaining
+		if capped {
+			repositories = repositories[:remaining]
+		}
+		scannedRepositories += len(repositories)
+		// With an explicit ref the global endpoint cannot be used, so every
+		// bounded in-scope repository is a code-search candidate. Repository
+		// result rows still require a metadata match unless the caller named the
+		// repository explicitly.
+		r.collect(ctx, repositories, codeFallback || r.ref != "" || r.repository != "", r.repository != "")
+		if capped {
+			r.diagnostics = append(r.diagnostics, fmt.Sprintf("%s: repository scan stopped after %d repositories.", r.sourceType, maxDiscoveryRepositories))
+			break
+		}
+		if r.ref == "" && r.repository == "" && len(r.repositories) >= r.limit {
 			break
 		}
 	}
@@ -2731,16 +2901,19 @@ func (r *remoteScan) discoverRepositories(ctx context.Context) {
 
 // collect ACL-verifies remote repositories and keeps them as both result rows
 // and candidates for the per repository code search fallback.
-func (r *remoteScan) collect(ctx context.Context, repositories []source.Repository, requireMetadataMatch bool) {
+func (r *remoteScan) collect(ctx context.Context, repositories []source.Repository, candidateWithoutMetadata, resultWithoutMetadata bool) {
+	if r.seenCandidate == nil {
+		r.seenCandidate = map[string]bool{}
+	}
 	eligible := make([]source.Repository, 0, len(repositories))
 	for _, repository := range repositories {
 		if repository.Archived || repository.Slug == "" {
 			continue
 		}
-		if r.project != "" && !strings.EqualFold(r.project, repository.ProjectKey) {
+		if !r.repositoryInScope(repository.ProjectKey, repository.Slug) {
 			continue
 		}
-		if requireMetadataMatch && !repositoryMetadataMatches(repository, r.query) {
+		if !candidateWithoutMetadata && !repositoryMetadataMatches(repository, r.query) {
 			continue
 		}
 		eligible = append(eligible, repository)
@@ -2750,21 +2923,26 @@ func (r *remoteScan) collect(ctx context.Context, repositories []source.Reposito
 		if repository.Archived || repository.Slug == "" {
 			continue
 		}
-		if r.project != "" && !strings.EqualFold(r.project, repository.ProjectKey) {
+		if !r.repositoryInScope(repository.ProjectKey, repository.Slug) {
 			continue
 		}
-		if requireMetadataMatch && !repositoryMetadataMatches(repository, r.query) {
+		metadataMatch := repositoryMetadataMatches(repository, r.query)
+		if !candidateWithoutMetadata && !metadataMatch {
 			continue
 		}
 		libraryID := source.LibraryID(r.sourceType, repository.ProjectKey, repository.Slug)
 		if !r.authorize(ctx, repository.ProjectKey, repository.Slug) {
 			continue
 		}
-		r.candidates = append(r.candidates, repository)
-		if r.seenRepository[strings.ToLower(libraryID)] || len(r.repositories) >= r.limit {
+		candidateKey := strings.ToLower(libraryID)
+		if !r.seenCandidate[candidateKey] {
+			r.seenCandidate[candidateKey] = true
+			r.candidates = append(r.candidates, repository)
+		}
+		if (!resultWithoutMetadata && !metadataMatch) || r.seenRepository[candidateKey] || len(r.repositories) >= r.limit {
 			continue
 		}
-		r.seenRepository[strings.ToLower(libraryID)] = true
+		r.seenRepository[candidateKey] = true
 		r.repositories = append(r.repositories, RepositoryResult{
 			ID: fmt.Sprint(repository.ID), ProjectKey: repository.ProjectKey, Slug: repository.Slug,
 			Name: repository.Name, Description: repository.Description, LibraryID: libraryID,
@@ -2800,34 +2978,62 @@ func (r *remoteScan) searchCode(ctx context.Context) {
 	if len(r.hits) >= r.limit {
 		return
 	}
-	if global, ok := r.adapter.(source.GlobalQuerySearcher); ok {
-		results, err := global.SearchGlobalQuery(ctx, r.query, r.limit*2)
+	global, hasGlobalSearch := r.adapter.(source.GlobalQuerySearcher)
+	if hasGlobalSearch && r.ref == "" {
+		rawLimit := r.globalSearchLimit()
+		results, err := global.SearchGlobalQuery(ctx, r.query, rawLimit)
 		r.service.reportRemote(r.sourceType, err)
 		switch {
 		case err == nil:
+			before := len(r.hits)
 			r.appendGlobalHits(ctx, results)
-			r.diagnostics = append(r.diagnostics, fmt.Sprintf("%s: instance-wide code search returned %d hits, %d visible after the repository ACL check.", r.sourceType, len(results), len(r.hits)))
-			return
+			visible := len(r.hits) - before
+			r.diagnostics = append(r.diagnostics, fmt.Sprintf("%s: instance-wide code search returned %d raw hits, %d visible after scope and repository ACL checks.", r.sourceType, len(results), visible))
+			if len(results) == rawLimit && len(r.hits) < r.limit {
+				r.diagnostics = append(r.diagnostics, fmt.Sprintf("%s: the %d-result global search scan cap was reached before scope and ACL filtering; repository-scoped fallback was used and results may still be incomplete.", r.sourceType, rawLimit))
+			}
+			if len(r.hits) >= r.limit {
+				return
+			}
+			r.diagnostics = append(r.diagnostics, r.sourceType+": global search underfilled after scope or ACL filtering; searching discovered repositories one by one.")
 		case errors.Is(err, source.ErrGlobalSearchUnsupported):
 			r.diagnostics = append(r.diagnostics, r.sourceType+": instance-wide code search is unavailable, searching discovered repositories one by one.")
 		default:
 			r.failures++
 			r.diagnostics = append(r.diagnostics, r.sourceType+": instance-wide code search failed: "+err.Error())
 		}
+		if errors.Is(err, source.ErrGlobalSearchUnsupported) {
+			r.enumerateProjects(ctx, true)
+		}
+	} else if hasGlobalSearch {
+		// Neither GitLab instance-wide code search nor Bitbucket's code index can
+		// constrain a global query to one ref. Per-repository GitLab search can,
+		// while Bitbucket is handled below as default-branch-only.
+		r.diagnostics = append(r.diagnostics, r.sourceType+": explicit ref requested; skipped instance-wide code search and used repository-scoped search.")
+	} else {
+		// A connector that only exposes repository-scoped search needs the same
+		// bounded enumeration path as an explicitly unsupported global API.
+		r.enumerateProjects(ctx, true)
 	}
 	searcher, ok := r.adapter.(source.QuerySearcher)
 	if !ok {
 		return
 	}
 	searched := 0
+	unsupportedRefs := 0
 	for _, repository := range r.candidates {
 		if len(r.hits) >= r.limit || searched >= maxDiscoveryProjects {
 			break
 		}
 		searched++
 		selectedRef := r.selectedRef(repository.DefaultBranch)
+		if r.sourceType == "bitbucket" && r.ref != "" && r.ref != repository.DefaultBranch {
+			unsupportedRefs++
+			continue
+		}
 		libraryID := source.LibraryID(r.sourceType, repository.ProjectKey, repository.Slug)
 		found, err := searcher.SearchQuery(ctx, source.RepositoryRef{ProjectKey: repository.ProjectKey, Slug: repository.Slug}, selectedRef, r.query, r.limit-len(r.hits))
+		r.service.reportRemote(r.sourceType, err)
 		if err != nil {
 			r.failures++
 			continue
@@ -2836,11 +3042,26 @@ func (r *remoteScan) searchCode(ctx context.Context) {
 			r.appendHit(libraryID, repository.ProjectKey, repository.Slug, selectedRef, hit)
 		}
 	}
+	if unsupportedRefs > 0 {
+		r.diagnostics = append(r.diagnostics, fmt.Sprintf("bitbucket: skipped %d repository code search(es) because Bitbucket indexes only each repository's default branch.", unsupportedRefs))
+		r.warning = "Bitbucket code search covers only each repository's default branch; the requested ref was not searched."
+	}
+}
+
+func (r *remoteScan) globalSearchLimit() int {
+	cap := 50
+	if r.sourceType == "gitlab" {
+		cap = 100
+	}
+	return min(cap, max(r.limit*5, r.limit))
 }
 
 func (r *remoteScan) appendGlobalHits(ctx context.Context, results []source.GlobalQueryResult) {
 	pending := make([]source.Repository, 0, len(results))
 	for _, item := range results {
+		if item.Slug == "" || item.Path == "" || !r.repositoryInScope(item.ProjectKey, item.Slug) {
+			continue
+		}
 		pending = append(pending, source.Repository{ProjectKey: item.ProjectKey, Slug: item.Slug})
 	}
 	r.prefetchPermissions(ctx, pending)
@@ -2851,14 +3072,20 @@ func (r *remoteScan) appendGlobalHits(ctx context.Context, results []source.Glob
 		if item.Slug == "" || item.Path == "" {
 			continue
 		}
-		if r.project != "" && !strings.EqualFold(r.project, item.ProjectKey) {
+		if !r.repositoryInScope(item.ProjectKey, item.Slug) {
 			continue
 		}
 		if !r.authorize(ctx, item.ProjectKey, item.Slug) {
 			continue
 		}
 		libraryID := source.LibraryID(r.sourceType, item.ProjectKey, item.Slug)
-		selectedRef := r.selectedRef(item.Ref)
+		selectedRef := strings.TrimSpace(item.Ref)
+		if selectedRef == "" {
+			selectedRef = strings.TrimSpace(item.DefaultBranch)
+		}
+		if selectedRef == "" {
+			selectedRef = "main"
+		}
 		safe := r.service.safeSourceHits(ctx, "remote:"+libraryID, selectedRef, []source.QueryResult{item.QueryResult}, 1)
 		for _, hit := range safe {
 			r.appendHit(libraryID, item.ProjectKey, item.Slug, selectedRef, hit)
@@ -3157,28 +3384,49 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 	}
 	// remoteDocuments asks the source code search API for this repository. It is
 	// used both as the primary mode when no embedding model is configured and as
-	// the failover below when the local index has nothing to offer yet.
-	remoteDocuments := func() []source.QueryResult {
-		if s.sources == nil || (sourceType == "bitbucket" && ref != defaultRef) {
-			return nil
-		}
-		adapter, _, sourceErr := s.remoteSource(ctx, sourceType)
-		if sourceErr != nil {
-			return nil
-		}
-		querySearcher, ok := adapter.(source.QuerySearcher)
-		if !ok {
-			return nil
-		}
-		remoteHits, queryErr := querySearcher.SearchQuery(ctx, source.RepositoryRef{ProjectKey: projectKey, Slug: repositorySlug}, ref, NormalizeSourceQuery(query), cfg.FinalK)
-		s.reportRemote(sourceType, queryErr)
-		if queryErr != nil || len(remoteHits) == 0 {
-			return nil
-		}
-		return s.safeSourceHits(ctx, repoID, ref, remoteHits, cfg.FinalK)
+	// the failover below when the local index has nothing to offer yet. Cache the
+	// outcome because both paths can run during one query; retrying an empty
+	// response or an authentication failure doubles load and can hide the real
+	// failure behind a misleading "returned nothing" response.
+	var remoteDocumentsOnce sync.Once
+	var remoteDocumentHits []source.QueryResult
+	var remoteDocumentsErr error
+	if sourceType == "bitbucket" && ref != defaultRef {
+		// Bitbucket Server/Data Center's code index covers only the default
+		// branch. Record that limitation even when the local non-default ref has
+		// enough hits and no remote request is attempted, so callers never infer
+		// that the live source search verified this answer.
+		remoteDocumentsErr = fmt.Errorf("%w: Bitbucket indexes only the default branch %q, not %q", source.ErrCodeSearchRefUnsupported, defaultRef, ref)
+	}
+	remoteDocuments := func() ([]source.QueryResult, error) {
+		remoteDocumentsOnce.Do(func() {
+			if remoteDocumentsErr != nil {
+				return
+			}
+			if s.sources == nil {
+				return
+			}
+			adapter, _, sourceErr := s.remoteSource(ctx, sourceType)
+			if sourceErr != nil {
+				remoteDocumentsErr = sourceErr
+				return
+			}
+			querySearcher, ok := adapter.(source.QuerySearcher)
+			if !ok {
+				return
+			}
+			remoteHits, queryErr := querySearcher.SearchQuery(ctx, source.RepositoryRef{ProjectKey: projectKey, Slug: repositorySlug}, ref, NormalizeSourceQuery(query), cfg.FinalK)
+			s.reportRemote(sourceType, queryErr)
+			if queryErr != nil {
+				remoteDocumentsErr = queryErr
+				return
+			}
+			remoteDocumentHits = s.safeSourceHits(ctx, repoID, ref, remoteHits, cfg.FinalK)
+		})
+		return remoteDocumentHits, remoteDocumentsErr
 	}
 	if cfg.SourceQuerySearch {
-		if safeHits := remoteDocuments(); len(safeHits) > 0 {
+		if safeHits, _ := remoteDocuments(); len(safeHits) > 0 {
 			span.SetAttributes(attribute.Int("git_ctx.search.result_count", len(safeHits)), attribute.String("git_ctx.search.mode", "source-query-api"))
 			answer := assembleSourceQueryResults(name, sourceType, baseID, projectKey+"/"+repositorySlug, ref, safeHits, "source-query-api")
 			if coverageFallback != "" {
@@ -3360,15 +3608,30 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 		// Failover: an empty index is normal while a repository is still being
 		// embedded, and a client that only ever hears "not indexed yet" cannot do
 		// its job. Ask the source code search API before giving up.
-		if safeHits := remoteDocuments(); len(safeHits) > 0 {
+		if safeHits, remoteErr := remoteDocuments(); len(safeHits) > 0 {
 			span.SetAttributes(attribute.Int("git_ctx.search.result_count", len(safeHits)), attribute.String("git_ctx.search.mode", "source-query-failover"))
 			return assembleSourceQueryResults(name, sourceType, baseID, projectKey+"/"+repositorySlug, ref, safeHits, "source-query-failover"), nil
+		} else if remoteErr != nil {
+			return "", fmt.Errorf("%s code search API failed for %s@%s: %w", sourceType, baseID, ref, remoteErr)
 		}
 		return fmt.Sprintf("No indexed documentation matched the query in %s at %s, and the %s code search API returned nothing for it. The repository may still be indexing; try `search-code` with the same term, another term, or another version.", name, ref, sourceType), nil
 	}
 	span.SetAttributes(attribute.Int("git_ctx.search.result_count", len(hits)), attribute.String("git_ctx.search.vector_mode", vectorMode))
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s\n\n", name)
+	if remoteDocumentsErr != nil {
+		if errors.Is(remoteDocumentsErr, source.ErrCodeSearchRefUnsupported) {
+			fmt.Fprintf(&b, "> Bitbucket code search indexes only the default branch; this answer used locally indexed content for `%s`.\n\n", ref)
+		} else {
+			status := source.StatusOf(remoteDocumentsErr)
+			if status > 0 {
+				fmt.Fprintf(&b, "> Live %s code search was unavailable (HTTP %d); this answer used locally indexed content.\n\n", sourceType, status)
+			} else {
+				fmt.Fprintf(&b, "> Live %s code search was unavailable; this answer used locally indexed content.\n\n", sourceType)
+			}
+		}
+		span.SetAttributes(attribute.Bool("git_ctx.search.remote_degraded", true))
+	}
 	if embeddingFallback != "" {
 		fmt.Fprintf(&b, "> %s\n\n", embeddingFallback)
 	} else if cfg.RetrievalMode == RetrievalKeywordOnly {

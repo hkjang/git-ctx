@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 	"sync"
 	"testing"
@@ -68,6 +69,18 @@ type querySource struct {
 	lastQuery string
 }
 
+type errorQuerySource struct {
+	querySource
+	err error
+}
+
+func (q *errorQuerySource) SearchQuery(context.Context, source.RepositoryRef, string, string, int) ([]source.QueryResult, error) {
+	q.mu.Lock()
+	q.calls++
+	q.mu.Unlock()
+	return nil, q.err
+}
+
 type discoveryQuerySource struct {
 	querySource
 	allowed bool
@@ -83,6 +96,24 @@ func (q *discoveryQuerySource) GetPermissions(context.Context, source.Repository
 	if !q.allowed {
 		return []source.Permission{{Principal: "bob", Kind: "user", Permission: "read"}}, nil
 	}
+	return []source.Permission{{Principal: "alice", Kind: "user", Permission: "read"}}, nil
+}
+
+type boundedDiscoverySource struct {
+	querySource
+	projects        []source.Project
+	repositories    map[string][]source.Repository
+	permissionCalls int
+}
+
+func (q *boundedDiscoverySource) ListProjects(context.Context) ([]source.Project, error) {
+	return q.projects, nil
+}
+func (q *boundedDiscoverySource) ListRepositories(_ context.Context, project string) ([]source.Repository, error) {
+	return q.repositories[project], nil
+}
+func (q *boundedDiscoverySource) GetPermissions(context.Context, source.RepositoryRef) ([]source.Permission, error) {
+	q.permissionCalls++
 	return []source.Permission{{Principal: "alice", Kind: "user", Permission: "read"}}, nil
 }
 
@@ -141,6 +172,63 @@ func TestSourceQueryAPIUsedWithoutRemoteModelsAfterACL(t *testing.T) {
 	}
 	if _, err = service.Query(ctx, []string{"mallory"}, "/core/demo/main", "GPU usage"); err == nil || remote.calls != 1 {
 		t.Fatalf("ACL did not protect source API calls: calls=%d err=%v", remote.calls, err)
+	}
+}
+
+func TestSourceQueryAPIFailureIsCalledOnceAndReturned(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:source-query-error?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r','core','demo','Demo','gitlab','1','/core/demo','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r','alice','read')`)
+	remote := &errorQuerySource{err: &source.APIError{Source: "gitlab", StatusCode: 401, Status: "401 Unauthorized", Body: "invalid token"}}
+	service := New(db)
+	service.SetConfigLoader(func(context.Context) Config {
+		return Config{KeywordWeight: 1, VectorWeight: 0, FinalK: 8, CandidateLimit: 100, SourceQuerySearch: true}
+	})
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) { return remote, nil })
+
+	result, err := service.Query(ctx, []string{"alice"}, "/core/demo/main", "GPU usage")
+	if err == nil || source.StatusOf(err) != 401 {
+		t.Fatalf("result=%q err=%v status=%d", result, err, source.StatusOf(err))
+	}
+	if remote.calls != 1 {
+		t.Fatalf("one documentation query called the failing source %d times", remote.calls)
+	}
+}
+
+func TestBitbucketDocumentationQueryRejectsNonDefaultRef(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:bitbucket-query-ref?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r','core','demo','Demo','bitbucket','1','/core/demo','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r','alice','read')`)
+	remote := &querySource{}
+	service := New(db)
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) { return remote, nil })
+
+	result, err := service.Query(ctx, []string{"alice"}, "/core/demo/release", "GPU usage")
+	if err == nil || !errors.Is(err, source.ErrCodeSearchRefUnsupported) {
+		t.Fatalf("result=%q err=%v", result, err)
+	}
+	if remote.calls != 0 {
+		t.Fatalf("Bitbucket non-default ref unexpectedly called the source %d times", remote.calls)
+	}
+
+	_, _ = db.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash)
+VALUES('release-doc','r','release','release-commit','docs/release.md',1,2,'GPU usage','document','GPU usage on release','release-hash')`)
+	result, err = service.Query(ctx, []string{"alice"}, "/core/demo/release", "GPU usage")
+	if err != nil || !strings.Contains(result, "GPU usage on release") || !strings.Contains(result, "only the default branch") {
+		t.Fatalf("locally indexed non-default ref result=%q err=%v", result, err)
+	}
+	if remote.calls != 0 {
+		t.Fatalf("local Bitbucket non-default ref unexpectedly called the source %d times", remote.calls)
 	}
 }
 
@@ -237,6 +325,47 @@ func TestSearchCodeDiscoversUnregisteredRemoteRepositoryAfterACL(t *testing.T) {
 	}
 }
 
+func TestRemoteDiscoveryHonorsLateExplicitProjectAndRepositoryCap(t *testing.T) {
+	ctx := context.Background()
+	remote := &boundedDiscoverySource{repositories: map[string][]source.Repository{}}
+	for index := 0; index < maxDiscoveryProjects+5; index++ {
+		key := fmt.Sprintf("P%02d", index)
+		remote.projects = append(remote.projects, source.Project{Key: key})
+	}
+	target := remote.projects[len(remote.projects)-1].Key
+	remote.repositories[target] = []source.Repository{{
+		ID: 1, ProjectKey: target, Slug: "dify", Name: "Dify", DefaultBranch: "main",
+	}}
+	service := &Service{}
+	scan := &remoteScan{
+		service: service, adapter: remote, sourceType: "gitlab", principals: []string{"alice"},
+		query: "dify", project: target, limit: 10,
+		seenRepository: map[string]bool{}, seenHit: map[string]bool{}, allowed: map[string]bool{},
+	}
+	scan.discoverRepositories(ctx)
+	if len(scan.candidates) != 1 || scan.candidates[0].ProjectKey != target {
+		t.Fatalf("explicit project beyond the global scan cap was skipped: %#v", scan.candidates)
+	}
+
+	remote.projects = []source.Project{{Key: "BIG"}}
+	remote.repositories = map[string][]source.Repository{"BIG": {}}
+	for index := 0; index < maxDiscoveryRepositories+75; index++ {
+		remote.repositories["BIG"] = append(remote.repositories["BIG"], source.Repository{
+			ID: int64(index + 1), ProjectKey: "BIG", Slug: fmt.Sprintf("repo-%03d", index),
+			Name: "Repo", DefaultBranch: "main",
+		})
+	}
+	scan = &remoteScan{
+		service: service, adapter: remote, sourceType: "gitlab",
+		principals: WithUnrestricted(nil, []string{"source-admin"}), query: "repo", limit: 10,
+		seenRepository: map[string]bool{}, seenHit: map[string]bool{}, allowed: map[string]bool{},
+	}
+	scan.discoverRepositories(ctx)
+	if len(scan.candidates) != maxDiscoveryRepositories {
+		t.Fatalf("repository discovery candidates=%d want cap=%d", len(scan.candidates), maxDiscoveryRepositories)
+	}
+}
+
 // globalQuerySource models a GitLab instance with advanced search enabled: the
 // term appears only inside a file, never in a repository name.
 type globalQuerySource struct {
@@ -257,6 +386,98 @@ func (q *globalQuerySource) SearchGlobalQuery(_ context.Context, query string, _
 		ProjectKey: "apps", Slug: "dify", Name: "Dify", Ref: "main", DefaultBranch: "main", ID: 77,
 		QueryResult: source.QueryResult{Path: "api/core/auth.py", Snippet: "def verify_token(", LineStart: 42, LineEnd: 42},
 	}}, nil
+}
+
+type unsupportedGlobalSource struct {
+	*scopedRemoteSource
+}
+
+func (q *unsupportedGlobalSource) SearchGlobalQuery(context.Context, string, int) ([]source.GlobalQueryResult, error) {
+	q.mu.Lock()
+	q.globalCalls++
+	q.mu.Unlock()
+	return nil, source.ErrGlobalSearchUnsupported
+}
+
+type scopedRemoteSource struct {
+	querySource
+	mu                 sync.Mutex
+	projects           []source.Project
+	repositories       map[string][]source.Repository
+	nameResults        []source.Repository
+	globalResults      []source.GlobalQueryResult
+	queryResults       map[string][]source.QueryResult
+	allowed            map[string]bool
+	queryRepositories  []source.RepositoryRef
+	queryRefs          []string
+	globalCalls        int
+	globalLimit        int
+	permissionCalls    map[string]int
+	repositorySearches []string
+}
+
+func (q *scopedRemoteSource) ListProjects(context.Context) ([]source.Project, error) {
+	return q.projects, nil
+}
+
+func (q *scopedRemoteSource) ListRepositories(_ context.Context, project string) ([]source.Repository, error) {
+	return q.repositories[project], nil
+}
+
+func (q *scopedRemoteSource) SearchRepositories(_ context.Context, query string, _ int) ([]source.Repository, error) {
+	q.mu.Lock()
+	q.repositorySearches = append(q.repositorySearches, query)
+	q.mu.Unlock()
+	return q.nameResults, nil
+}
+
+func (q *scopedRemoteSource) SearchGlobalQuery(_ context.Context, _ string, limit int) ([]source.GlobalQueryResult, error) {
+	q.mu.Lock()
+	q.globalCalls++
+	q.globalLimit = limit
+	q.mu.Unlock()
+	if len(q.globalResults) > limit {
+		return q.globalResults[:limit], nil
+	}
+	return q.globalResults, nil
+}
+
+func (q *scopedRemoteSource) SearchQuery(_ context.Context, repository source.RepositoryRef, ref, _ string, _ int) ([]source.QueryResult, error) {
+	q.mu.Lock()
+	q.calls++
+	q.queryRepositories = append(q.queryRepositories, repository)
+	q.queryRefs = append(q.queryRefs, ref)
+	q.mu.Unlock()
+	return q.queryResults[strings.ToLower(repository.ProjectKey+"/"+repository.Slug)], nil
+}
+
+func (q *scopedRemoteSource) GetPermissions(_ context.Context, repository source.RepositoryRef) ([]source.Permission, error) {
+	key := strings.ToLower(repository.ProjectKey + "/" + repository.Slug)
+	q.mu.Lock()
+	if q.permissionCalls == nil {
+		q.permissionCalls = map[string]int{}
+	}
+	q.permissionCalls[key]++
+	allowed := q.allowed[key]
+	q.mu.Unlock()
+	if allowed {
+		return []source.Permission{{Principal: "alice", Kind: "user", Permission: "read"}}, nil
+	}
+	return []source.Permission{{Principal: "bob", Kind: "user", Permission: "read"}}, nil
+}
+
+func newScopedRemote(project, slug, defaultBranch string) *scopedRemoteSource {
+	key := strings.ToLower(project + "/" + slug)
+	return &scopedRemoteSource{
+		projects: []source.Project{{Key: project}},
+		repositories: map[string][]source.Repository{
+			project: {{ID: 77, ProjectKey: project, Slug: slug, Name: "Application", DefaultBranch: defaultBranch}},
+		},
+		queryResults: map[string][]source.QueryResult{
+			key: {{Path: "api/auth.go", Snippet: "func verifyToken()", LineStart: 12, LineEnd: 12}},
+		},
+		allowed: map[string]bool{key: true},
+	}
 }
 
 // Searching for a code identifier must return file hits even though no
@@ -291,6 +512,19 @@ func TestSearchCodeFindsContentThatNoRepositoryNameMatches(t *testing.T) {
 		t.Fatal("diagnostics must explain which search path ran")
 	}
 
+	// Instance-wide search cannot constrain results to an explicit ref. GitLab
+	// must use its repository-scoped endpoint instead of returning default-branch
+	// hits labelled as the requested branch.
+	remote.globalCalls = 0
+	remote.calls = 0
+	explicitRef, err := service.SearchCode(ctx, []string{"alice"}, "dify", "gitlab", "", "", "release", 10)
+	if err != nil || len(explicitRef.Hits) == 0 || explicitRef.Hits[0].Ref != "release" {
+		t.Fatalf("explicit-ref result=%#v err=%v", explicitRef, err)
+	}
+	if remote.globalCalls != 0 || remote.calls == 0 {
+		t.Fatalf("explicit ref used wrong API path: global=%d repository=%d", remote.globalCalls, remote.calls)
+	}
+
 	// A user without access to the project sees nothing, and the diagnostics must
 	// not leak the repository name.
 	remote.allowed = false
@@ -306,6 +540,200 @@ func TestSearchCodeFindsContentThatNoRepositoryNameMatches(t *testing.T) {
 	fallback, err := service.SearchCode(ctx, []string{"alice"}, "dify", "gitlab", "", "", "", 10)
 	if err != nil || len(fallback.Hits) == 0 || remote.calls == 0 {
 		t.Fatalf("fallback search did not run: %#v calls=%d err=%v", fallback, remote.calls, err)
+	}
+}
+
+func TestUnsupportedGlobalSearchEnumeratesForCodeOnlyQuery(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:unsupported-global-code-only?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	remote := &unsupportedGlobalSource{scopedRemoteSource: newScopedRemote("apps", "dify", "main")}
+	// The repository metadata deliberately does not contain verify_token, so
+	// repository-name search returns nothing and only project enumeration can
+	// feed the repository-scoped GitLab/Bitbucket query API.
+	remote.nameResults = nil
+	service := New(db)
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) { return remote, nil })
+
+	result, err := service.SearchCode(ctx, []string{"alice"}, "verify_token", "gitlab", "", "", "", 10)
+	if err != nil || len(result.Hits) != 1 || result.Hits[0].RepositorySlug != "dify" {
+		t.Fatalf("unsupported-global fallback=%#v err=%v", result, err)
+	}
+	remote.mu.Lock()
+	defer remote.mu.Unlock()
+	if remote.globalCalls != 1 || remote.calls != 1 {
+		t.Fatalf("global=%d repository=%d", remote.globalCalls, remote.calls)
+	}
+	if !strings.Contains(strings.Join(result.Diagnostics, " "), "unavailable") {
+		t.Fatalf("fallback path was not diagnosed: %v", result.Diagnostics)
+	}
+}
+
+func TestSearchCodeSearchesExplicitUnregisteredRepository(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:explicit-unregistered-repository?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	remote := newScopedRemote("apps", "dify", "main")
+	service := New(db)
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) { return remote, nil })
+
+	result, err := service.SearchCode(ctx, []string{"alice"}, "verify_token", "gitlab", "apps", "dify", "release", 10)
+	if err != nil || len(result.Hits) != 1 {
+		t.Fatalf("explicit remote repository result=%#v err=%v", result, err)
+	}
+	if result.Hits[0].ProjectKey != "apps" || result.Hits[0].RepositorySlug != "dify" || result.Hits[0].Ref != "release" {
+		t.Fatalf("explicit scope was not preserved: %#v", result.Hits[0])
+	}
+	remote.mu.Lock()
+	defer remote.mu.Unlock()
+	if remote.calls != 1 || remote.globalCalls != 0 || len(remote.queryRepositories) != 1 ||
+		remote.queryRepositories[0] != (source.RepositoryRef{ProjectKey: "apps", Slug: "dify"}) ||
+		remote.queryRefs[0] != "release" {
+		t.Fatalf("targeted calls=%d global=%d repositories=%#v refs=%#v", remote.calls, remote.globalCalls, remote.queryRepositories, remote.queryRefs)
+	}
+}
+
+func TestExplicitGitLabRefDoesNotDependOnRepositoryNameMatch(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:explicit-ref-code-only?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	remote := newScopedRemote("apps", "dify", "main")
+	service := New(db)
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) { return remote, nil })
+
+	// "verify_token" appears only in source. The repository metadata is the
+	// deliberately unrelated "Application".
+	result, err := service.SearchCode(ctx, []string{"alice"}, "verify_token", "gitlab", "apps", "", "release", 10)
+	if err != nil || len(result.Hits) != 1 || result.Hits[0].Ref != "release" {
+		t.Fatalf("code-only explicit-ref result=%#v err=%v", result, err)
+	}
+	remote.mu.Lock()
+	defer remote.mu.Unlock()
+	if remote.globalCalls != 0 || remote.calls != 1 || len(remote.queryRefs) != 1 || remote.queryRefs[0] != "release" {
+		t.Fatalf("explicit-ref path global=%d repository=%d refs=%#v", remote.globalCalls, remote.calls, remote.queryRefs)
+	}
+}
+
+func TestGlobalFilteredToZeroFallsBackWithoutOutOfScopeACL(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:global-filtered-fallback?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	remote := newScopedRemote("apps", "target", "main")
+	remote.globalResults = []source.GlobalQueryResult{{
+		ProjectKey: "other", Slug: "secret", DefaultBranch: "main",
+		QueryResult: source.QueryResult{Path: "secret.go", Snippet: "verify_token", LineStart: 1, LineEnd: 1},
+	}}
+	service := New(db)
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) { return remote, nil })
+
+	result, err := service.SearchCode(ctx, []string{"alice"}, "verify_token", "gitlab", "apps", "", "", 10)
+	if err != nil || len(result.Hits) != 1 || result.Hits[0].RepositorySlug != "target" {
+		t.Fatalf("filtered global fallback=%#v err=%v", result, err)
+	}
+	remote.mu.Lock()
+	defer remote.mu.Unlock()
+	if remote.globalCalls != 1 || remote.calls != 1 {
+		t.Fatalf("global=%d repository=%d", remote.globalCalls, remote.calls)
+	}
+	if remote.permissionCalls["other/secret"] != 0 {
+		t.Fatalf("out-of-scope repository received %d ACL calls", remote.permissionCalls["other/secret"])
+	}
+}
+
+func TestGlobalSearchOverscansBeforeACLFiltering(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:global-overscan?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	remote := &scopedRemoteSource{
+		repositories: map[string][]source.Repository{},
+		queryResults: map[string][]source.QueryResult{},
+		allowed:      map[string]bool{"public/visible": true},
+	}
+	for index := 0; index < 9; index++ {
+		remote.globalResults = append(remote.globalResults, source.GlobalQueryResult{
+			ProjectKey: "private", Slug: fmt.Sprintf("denied-%d", index), DefaultBranch: "main",
+			QueryResult: source.QueryResult{Path: fmt.Sprintf("denied-%d.go", index), Snippet: "verify_token", LineStart: 1, LineEnd: 1},
+		})
+	}
+	remote.globalResults = append(remote.globalResults, source.GlobalQueryResult{
+		ProjectKey: "public", Slug: "visible", DefaultBranch: "main",
+		QueryResult: source.QueryResult{Path: "visible.go", Snippet: "verify_token", LineStart: 3, LineEnd: 3},
+	})
+	service := New(db)
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) { return remote, nil })
+
+	result, err := service.SearchCode(ctx, []string{"alice"}, "verify_token", "gitlab", "", "", "", 2)
+	if err != nil || len(result.Hits) != 1 || result.Hits[0].RepositorySlug != "visible" {
+		t.Fatalf("overscanned result=%#v err=%v", result, err)
+	}
+	remote.mu.Lock()
+	rawLimit := remote.globalLimit
+	remote.mu.Unlock()
+	if rawLimit != 10 {
+		t.Fatalf("global raw limit=%d want bounded overscan 10", rawLimit)
+	}
+	if !strings.Contains(strings.Join(result.Diagnostics, " "), "scan cap") {
+		t.Fatalf("global cap was not diagnosed: %v", result.Diagnostics)
+	}
+}
+
+func TestUnregisteredBitbucketNonDefaultRefExplainsLimitation(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:unregistered-bitbucket-ref?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	remote := newScopedRemote("CORE", "demo", "main")
+	service := New(db)
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) { return remote, nil })
+
+	result, err := service.SearchCode(ctx, []string{"alice"}, "verify_token", "bitbucket", "CORE", "demo", "release", 10)
+	if err != nil || len(result.Hits) != 0 || !strings.Contains(result.Warning, "default branch") {
+		t.Fatalf("Bitbucket non-default result=%#v err=%v", result, err)
+	}
+	remote.mu.Lock()
+	defer remote.mu.Unlock()
+	if remote.calls != 0 || remote.globalCalls != 0 {
+		t.Fatalf("Bitbucket non-default ref called code APIs: repository=%d global=%d", remote.calls, remote.globalCalls)
+	}
+}
+
+func TestBitbucketNonDefaultRefDoesNotReturnDefaultBranchHits(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:bitbucket-ref-search?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch)
+VALUES('bitbucket:1','CORE','demo','Demo','bitbucket','1','/core/demo','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('bitbucket:1','alice','read')`)
+	remote := &querySource{}
+	service := New(db)
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) { return remote, nil })
+
+	hits, err := service.SearchSource(ctx, []string{"alice"}, "verify_token", "bitbucket", "CORE", "demo", "release", 10)
+	if !errors.Is(err, source.ErrCodeSearchRefUnsupported) || len(hits) != 0 {
+		t.Fatalf("non-default Bitbucket ref hits=%#v err=%v", hits, err)
+	}
+	if remote.calls != 0 {
+		t.Fatalf("default-branch-only API was called for a non-default ref: %d", remote.calls)
 	}
 }
 
@@ -926,6 +1354,41 @@ func TestFindDependentsCrossesRepositoriesAndRespectsACL(t *testing.T) {
 	}
 }
 
+func TestCompareRefsDetectsFunctionBodyOnlyChanges(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:compare-body?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r','core','api','API','gitlab','1','/core/api','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r','alice','read')`)
+	for _, item := range []struct {
+		ref, commit, bodyHash string
+	}{
+		{"base", "base-commit", "body-v1"},
+		{"head", "head-commit", "body-v2"},
+	} {
+		_, _ = db.DB.Exec(`INSERT INTO code_symbols(id,repository_id,ref_name,commit_id,file_path,name,qualified_name,symbol_kind,language,signature,documentation,line_start,line_end,content_hash)
+VALUES(?,'r',?,?,'service.go','Run','Run','function','go','func Run()','starts work',10,12,'legacy-signature-hash')`,
+			"symbol-"+item.ref, item.ref, item.commit)
+		_, _ = db.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash)
+VALUES(?,'r',?,?,'service.go',10,12,'Run','code',?,?)`,
+			"chunk-"+item.ref, item.ref, item.commit, "func Run() { "+item.bodyHash+" }", item.bodyHash)
+		_, _ = db.DB.Exec(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id) VALUES('r',?,?)`, item.ref, item.commit)
+	}
+	comparison, err := New(db).CompareRefs(ctx, []string{"alice"}, "/core/api", "base", "head")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comparison.Changes) != 1 || comparison.Changes[0].Type != "modified" || comparison.Changes[0].Name != "Run" {
+		t.Fatalf("body-only change was missed: %#v", comparison.Changes)
+	}
+	if _, err = New(db).CompareRefs(ctx, []string{"alice"}, "/core/api", "base", "typo"); err == nil || !strings.Contains(err.Error(), "both baseRef and headRef") {
+		t.Fatalf("missing ref was treated as a real comparison: %v", err)
+	}
+}
+
 // An agent that reads a repository's own rules writes code that fits the
 // project, so the map points at them.
 func TestRepositoryMapListsProjectConventions(t *testing.T) {
@@ -1005,6 +1468,73 @@ func TestReadFileServesIndexedAndUnindexedFiles(t *testing.T) {
 	}
 	if _, err = service.ReadFile(ctx, []string{"alice"}, "", "", "nope.md", "", 0, 0); err == nil {
 		t.Fatal("unknown path must fail")
+	}
+}
+
+func TestFileToolsDefaultToRepositoryDefaultBranch(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:file-default-ref?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r','core','demo','Demo','gitlab','1','/core/demo','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r','alice','read')`)
+	for _, item := range []struct {
+		ref, path, commit string
+	}{
+		{"main", "docs/shared.md", "main-commit"},
+		{"main", "docs/main-only.md", "main-commit"},
+		{"aaa-dev", "docs/shared.md", "dev-commit"},
+		{"aaa-dev", "docs/dev-only.md", "dev-commit"},
+	} {
+		base := path.Base(item.path)
+		_, _ = db.DB.Exec(`INSERT INTO repository_files(repository_id,ref_name,path,base_name,size_bytes,content_indexed,commit_id) VALUES('r',?,?,?,20,1,?)`,
+			item.ref, item.path, base, item.commit)
+	}
+	_, _ = db.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('main-chunk','r','main','main-commit','docs/shared.md',1,1,'Shared','document','main branch content','main-hash')`)
+	_, _ = db.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('dev-chunk','r','aaa-dev','dev-commit','docs/shared.md',1,1,'Shared','document','development branch content','dev-hash')`)
+
+	service := New(db)
+	defaultFile, err := service.ReadFile(ctx, []string{"alice"}, "/core/demo", "", "docs/shared.md", "", 0, 0)
+	if err != nil || defaultFile.Ref != "main" || defaultFile.Content != "main branch content" {
+		t.Fatalf("default file=%#v err=%v", defaultFile, err)
+	}
+	devFile, err := service.ReadFile(ctx, []string{"alice"}, "/core/demo/aaa-dev", "", "docs/shared.md", "", 0, 0)
+	if err != nil || devFile.Ref != "aaa-dev" || devFile.Content != "development branch content" {
+		t.Fatalf("versioned file=%#v err=%v", devFile, err)
+	}
+
+	defaultFiles, err := service.FindFiles(ctx, []string{"alice"}, "*.md", "/core/demo", "", "", "", "", 20)
+	if err != nil || len(defaultFiles.Files) != 2 {
+		t.Fatalf("default files=%#v err=%v", defaultFiles.Files, err)
+	}
+	for _, file := range defaultFiles.Files {
+		if file.Ref != "main" || file.Path == "docs/dev-only.md" {
+			t.Fatalf("default search mixed refs: %#v", defaultFiles.Files)
+		}
+	}
+	devFiles, err := service.FindFiles(ctx, []string{"alice"}, "*.md", "/core/demo/aaa-dev", "", "", "", "", 20)
+	if err != nil || len(devFiles.Files) != 2 {
+		t.Fatalf("versioned files=%#v err=%v", devFiles.Files, err)
+	}
+	for _, file := range devFiles.Files {
+		if file.Ref != "aaa-dev" || file.Path == "docs/main-only.md" {
+			t.Fatalf("versioned search ignored the library ref: %#v", devFiles.Files)
+		}
+	}
+
+	listing, err := service.ListDirectory(ctx, []string{"alice"}, "/core/demo", "", "docs", "")
+	if err != nil || listing.Ref != "main" || len(listing.Entries) != 2 {
+		t.Fatalf("default directory=%#v err=%v", listing, err)
+	}
+	resolved, err := service.resolveRepositoryPath(ctx, []string{"alice"}, "/core/demo", "", "docs/shared.md", "")
+	if err != nil || resolved.refName != "main" {
+		t.Fatalf("default resolved path=%#v err=%v", resolved, err)
+	}
+	resolved, err = service.resolveRepositoryPath(ctx, []string{"alice"}, "/core/demo/aaa-dev", "", "docs/shared.md", "")
+	if err != nil || resolved.refName != "aaa-dev" {
+		t.Fatalf("versioned resolved path=%#v err=%v", resolved, err)
 	}
 }
 

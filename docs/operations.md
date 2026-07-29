@@ -2,11 +2,19 @@
 
 ## Bootstrap
 
-필수 외부 값은 `GIT_CTX_DB_DSN` 하나다. DB driver, 설정 암호화 키와 API-key pepper는
-DSN에서 도메인 분리해 결정한다. Keycloak 미설정 시 `backups/bootstrap-admin.token`이
-0600 권한으로 생성되며 Keycloak 설정 후 실제 `platform-admin` OIDC 로그인이 성공할 때
-메모리와 파일에서 폐기된다. 운영에서는 TLS 종단 뒤에 배치하고 프록시가 신뢰할 수
-없는 전달 헤더를 제거해야 한다.
+필수 외부 값은 `GIT_CTX_DB_DSN`과 `GIT_CTX_RECOVERY_KEY` 두 개다. DB driver, 설정
+암호화 키와 API-key pepper는 DSN에서 도메인 분리해 결정하고, 복구 토큰 서명에는
+DSN과 독립된 복구 키를 사용한다. 복구 키는 최소 32자의 고엔트로피 값으로 최초 한
+번만 생성한다.
+
+```bash
+openssl rand -base64 48
+```
+
+출력은 장기 Secret으로 보관해 모든 replica에 동일하게 주입한다. Keycloak 미설정 시
+`backups/bootstrap-admin.token`이 0600 권한으로 생성되며 Keycloak 설정 후 실제
+`platform-admin` OIDC 로그인이 성공할 때 메모리와 파일에서 폐기된다. 운영에서는 TLS
+종단 뒤에 배치하고 프록시가 신뢰할 수 없는 전달 헤더를 제거해야 한다.
 
 화면의 최초 관리자 설정은 원문 토큰을 한 번만 `POST /api/v1/bootstrap/login`으로
 검증한 뒤 30분 HttpOnly·SameSite=Strict 세션으로 교환한다. 따라서 역방향 프록시는
@@ -21,6 +29,11 @@ DSN에서 도메인 분리해 결정한다. Keycloak 미설정 시 `backups/boot
 암호화 저장되며 조회 시 마스킹된다. 원래 Bootstrap DSN은 DB 백업과 분리한 Secret
 Store에 보관한다.
 
+`GIT_CTX_RECOVERY_KEY`는 DSN이나 DB 비밀번호를 재사용하지 않는 별도 장기 Secret이다.
+DB 백업·백업 볼륨과 분리해 복구 가능한 Secret Store에 보관하고, 모든 Pod와
+`recovery-token` 명령에 같은 값을 제공한다. 계획된 키 회전은 아직 만료되지 않은 복구
+토큰을 무효화하므로 전체 replica를 동시에 갱신하고 새 토큰을 생성한다.
+
 사용자 MCP 키 회전은 UI에서 0~1,440분의 중복 유효기간을 선택한다. 신규 키는 기존
 키의 도구·CIDR·저장소·호출량 제한과 만료일을 상속하며 원문은 한 번만 표시된다.
 보안 관리자는 전체 키 목록에서 즉시 강제 폐기할 수 있다.
@@ -32,11 +45,13 @@ Store에 보관한다.
 잠겼을 때 서버 콘솔에서 다음 명령을 실행한다.
 
 ```bash
-GIT_CTX_DB_DSN='postgres://...' /app/git-ctx recovery-token --ttl 15m
+GIT_CTX_DB_DSN='postgres://...' \
+GIT_CTX_RECOVERY_KEY='<Secret Store의 기존 장기 복구 키>' \
+/app/git-ctx recovery-token --ttl 15m
 ```
 
-명령은 현재 Bootstrap DSN에서 파생한 서명키로 짧은 만료시간의 토큰을 생성하며
-DB나 로그에 토큰 원문을 기록하지 않는다. 허용 TTL은 1분 이상 1시간 이하이다.
+명령은 `GIT_CTX_RECOVERY_KEY`로 짧은 만료시간의 토큰에 서명하며 DB나 로그에 토큰
+원문을 기록하지 않는다. 허용 TTL은 1분 이상 1시간 이하이다.
 운영자는 `/admin?recovery=1`에서 토큰을 한 번 입력한다. 서버는 서명과 만료를
 확인하고 토큰 해시를 원자적으로 소비하므로 재사용할 수 없다.
 
@@ -113,8 +128,9 @@ PostgreSQL 모두 일관된 트랜잭션 스냅샷을 사용한다. 복원은 �
 
 복원에는 `platform-admin` 재인증과 `RESTORE <백업 ID>` 확인문이 필요하다.
 사전에 별도 환경에서 아카이브 SHA-256, 원래 DSN, 복원 후 readiness와 Keycloak
-로그인을 검증한다. DSN Secret은 백업 볼륨과 분리해 Secret Store에 보관한다. 목표는
-RPO 24시간, RTO 4시간이며 분기별 복구
+로그인을 검증한다. DSN과 `GIT_CTX_RECOVERY_KEY`는 서로 독립된 Secret 항목으로,
+백업 볼륨과 분리해 Secret Store 및 DR 절차에 보관한다. 목표는 RPO 24시간,
+RTO 4시간이며 분기별 복구
 훈련으로 입증한다. 인프라 전체 재해 복구에는 PostgreSQL 물리/`pg_dump` 백업과
 스토리지 스냅샷을 추가 계층으로 함께 유지한다.
 

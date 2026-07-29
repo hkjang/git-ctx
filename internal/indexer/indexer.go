@@ -113,17 +113,43 @@ func LibraryIDForSource(sourceType, projectKey, slug string) string {
 }
 
 func (i *Indexer) SyncRepository(ctx context.Context, adapter source.RepositorySource, sourceType string, repo source.Repository, refs []source.Reference) error {
-	return i.syncRepository(ctx, adapter, sourceType, repo, refs, true, "")
+	return i.syncRepository(ctx, adapter, sourceType, repo, refs, true, nil)
 }
 
-// ApplyPendingJob indexes content for a job the worker already owns. The job id
-// is required so progress, the processed file count and skip warnings land on
-// the row the operations screen is showing; the worker still owns the status.
-func (i *Indexer) ApplyPendingJob(ctx context.Context, adapter source.RepositorySource, sourceType string, repo source.Repository, refs []source.Reference, jobID string) error {
-	return i.syncRepository(ctx, adapter, sourceType, repo, refs, false, jobID)
+// JobLease identifies the exact worker claim allowed to publish an index
+// generation. A stale worker may finish remote work after another replica has
+// reclaimed the row; the swap transaction must reject that generation.
+type JobLease struct {
+	ID        string
+	StartedAt time.Time
 }
 
-func (i *Indexer) syncRepository(ctx context.Context, adapter source.RepositorySource, sourceType string, repo source.Repository, refs []source.Reference, trackJobs bool, workerJobID string) error {
+func (i *Indexer) lockJobLease(ctx context.Context, tx *sql.Tx, lease *JobLease) error {
+	if lease == nil {
+		return nil
+	}
+	// A conditional no-op update both validates ownership and locks the job row
+	// until this transaction commits.
+	result, err := tx.ExecContext(ctx, i.store.Rebind(`UPDATE index_jobs SET started_at=started_at WHERE id=? AND status='running' AND started_at=?`), lease.ID, lease.StartedAt)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return errors.New("index job lease changed before generation publish")
+	}
+	return nil
+}
+
+// ApplyPendingJob indexes content for a job the worker already owns.
+func (i *Indexer) ApplyPendingJob(ctx context.Context, adapter source.RepositorySource, sourceType string, repo source.Repository, refs []source.Reference, lease JobLease) error {
+	return i.syncRepository(ctx, adapter, sourceType, repo, refs, false, &lease)
+}
+
+func (i *Indexer) syncRepository(ctx context.Context, adapter source.RepositorySource, sourceType string, repo source.Repository, refs []source.Reference, trackJobs bool, workerLease *JobLease) error {
 	if sourceType != "bitbucket" && sourceType != "gitlab" && sourceType != "confluence" && sourceType != "jira" {
 		return errors.New("unsupported source type")
 	}
@@ -162,19 +188,22 @@ func (i *Indexer) syncRepository(ctx context.Context, adapter source.RepositoryS
 		return err
 	}
 	for _, r := range refs {
-		if err := i.syncRef(ctx, adapter, repoID, ref, r, trackJobs, workerJobID); err != nil {
+		if err := i.syncRef(ctx, adapter, repoID, ref, r, trackJobs, workerLease); err != nil {
 			return err
 		}
 	}
 	_, _ = i.store.DB.ExecContext(ctx, i.store.Rebind(`UPDATE repositories SET indexed_at=? WHERE id=?`), time.Now().UTC(), repoID)
 	return nil
 }
-func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, repoID string, repo source.RepositoryRef, ref source.Reference, trackJob bool, workerJobID string) error {
+func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, repoID string, repo source.RepositoryRef, ref source.Reference, trackJob bool, workerLease *JobLease) error {
 	jobID := fmt.Sprintf("%d", time.Now().UnixNano())
 	generationID := repoID + ":" + ref.Name + ":" + jobID
 	// reportJobID is the row that receives progress and result details. The
 	// indexer creates it for direct syncs and reuses the worker row otherwise.
-	reportJobID := workerJobID
+	reportJobID := ""
+	if workerLease != nil {
+		reportJobID = workerLease.ID
+	}
 	if trackJob {
 		reportJobID = jobID
 	}
@@ -195,29 +224,62 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 		}
 		return e
 	}
-	// complete records the finished job. A non-empty warning marks files that
-	// were skipped so the operations screen shows partial results instead of a
-	// silent gap.
+	// complete records the finished job. A non-empty warning exposes degraded
+	// embedding or policy outcomes instead of leaving a silent gap.
 	complete := func(processed int, warning string) error {
 		if reportJobID == "" {
 			return nil
 		}
 		if !trackJob {
 			// The worker owns the status transition; only the details are ours.
-			_, err := i.store.DB.ExecContext(ctx, i.store.Rebind(`UPDATE index_jobs SET files_processed=?,error_message=? WHERE id=?`), processed, truncate(warning, 1000), reportJobID)
-			return err
+			result, err := i.store.DB.ExecContext(ctx, i.store.Rebind(`UPDATE index_jobs SET files_processed=?,error_message=? WHERE id=? AND status='running' AND started_at=?`), processed, truncate(warning, 1000), reportJobID, workerLease.StartedAt)
+			if err != nil {
+				return err
+			}
+			affected, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if affected != 1 {
+				return errors.New("index job lease changed before progress update")
+			}
+			return nil
 		}
 		_, err := i.store.DB.ExecContext(ctx, i.store.Rebind(`UPDATE index_jobs SET status='completed',files_processed=?,error_message=?,completed_at=? WHERE id=?`), processed, truncate(warning, 1000), time.Now().UTC(), reportJobID)
 		return err
 	}
+	updateProgress := func(processed int) error {
+		if reportJobID == "" {
+			return nil
+		}
+		query := `UPDATE index_jobs SET files_processed=? WHERE id=? AND status='running'`
+		args := []any{processed, reportJobID}
+		if !trackJob {
+			query += ` AND started_at=?`
+			args = append(args, workerLease.StartedAt)
+		}
+		result, err := i.store.DB.ExecContext(ctx, i.store.Rebind(query), args...)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return errors.New("index job lease changed before progress update")
+		}
+		return nil
+	}
 	embeddingMetadata := embedding.Metadata{}
 	metadataKnown := false
-	if provider, ok := i.embedder.(embedding.MetadataProvider); ok && i.embedder != nil {
+	activeEmbedder := i.embedder
+	if provider, ok := activeEmbedder.(embedding.MetadataProvider); ok && activeEmbedder != nil {
 		embeddingMetadata = provider.EmbeddingMetadata()
 		metadataKnown = embeddingMetadata.Provider != "" && embeddingMetadata.Model != ""
 	}
 	embeddingRevision := embeddingMetadata.Identity()
-	if i.embedder == nil {
+	if activeEmbedder == nil {
 		embeddingRevision = "keyword-only"
 	}
 	previousCommit := ""
@@ -231,17 +293,33 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 	}
 	if previousCommit != "" && previousCommit == ref.LatestCommit && previousEmbeddingRevision == embeddingRevision {
 		var totalChunks, embeddedChunks int
-		if err = i.store.DB.QueryRowContext(ctx, i.store.Rebind(`SELECT COUNT(*),COUNT(embedding) FROM document_chunks WHERE repository_id=? AND ref_name=?`), repoID, ref.Name).Scan(&totalChunks, &embeddedChunks); err != nil {
+		tx, txErr := i.store.DB.BeginTx(ctx, nil)
+		if txErr != nil {
+			return fail(txErr)
+		}
+		defer tx.Rollback()
+		if txErr = i.lockJobLease(ctx, tx, workerLease); txErr != nil {
+			_ = tx.Rollback()
+			return fail(txErr)
+		}
+		if err = tx.QueryRowContext(ctx, i.store.Rebind(`SELECT COUNT(*),COUNT(embedding) FROM document_chunks WHERE repository_id=? AND ref_name=?`), repoID, ref.Name).Scan(&totalChunks, &embeddedChunks); err != nil {
+			_ = tx.Rollback()
 			return fail(err)
 		}
 		embeddingStatus, embeddingError := describeEmbeddingState(embeddingRevision, totalChunks, embeddedChunks, nil)
-		_, err = i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,indexed_at,embedding_revision,total_chunks,embedded_chunks,embedding_status,embedding_error)
+		_, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,indexed_at,embedding_revision,total_chunks,embedded_chunks,embedding_status,embedding_error)
 VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET commit_id=excluded.commit_id,indexed_at=excluded.indexed_at,embedding_revision=excluded.embedding_revision,total_chunks=excluded.total_chunks,embedded_chunks=excluded.embedded_chunks,embedding_status=excluded.embedding_status,embedding_error=excluded.embedding_error`),
 			repoID, ref.Name, ref.LatestCommit, time.Now().UTC(), embeddingRevision, totalChunks, embeddedChunks, embeddingStatus, embeddingError)
 		if err != nil {
+			_ = tx.Rollback()
 			return fail(err)
 		}
-		if err = i.refreshRepositoryMap(ctx, repoID, ref.Name, ref.LatestCommit); err != nil {
+		if err = i.refreshRepositoryMap(ctx, tx, repoID, ref.Name, ref.LatestCommit); err != nil {
+			_ = tx.Rollback()
+			return fail(err)
+		}
+		if err = tx.Commit(); err != nil {
+			_ = tx.Rollback()
 			return fail(err)
 		}
 		return complete(0, "")
@@ -316,8 +394,8 @@ VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET comm
 				positions = append(positions, index)
 			}
 		}
-		if len(texts) > 0 && i.embedder != nil {
-			vectors, embedErr := embedding.EmbedAll(ctx, i.embedder, texts)
+		if len(texts) > 0 && activeEmbedder != nil {
+			vectors, embedErr := embedding.EmbedAll(ctx, activeEmbedder, texts)
 			if embedErr != nil {
 				if i.embeddingRequired {
 					return fmt.Errorf("embedding %d chunks near %s: %w", len(texts), pending[positions[0]].filePath, embedErr)
@@ -326,7 +404,7 @@ VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET comm
 					fmt.Sprintf("embedding disabled for %d chunk(s) near %s after model error: %s", len(texts), pending[positions[0]].filePath, truncate(embedErr.Error(), 160)))
 				// Do not keep calling a broken endpoint for every remaining
 				// batch in this generation.
-				i.embedder = nil
+				activeEmbedder = nil
 				embeddingMetadata = embedding.Metadata{}
 				embeddingRevision = "keyword-only"
 				metadataKnown = false
@@ -341,17 +419,16 @@ VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET comm
 		}
 		for _, chunk := range pending {
 			if _, err := i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO document_chunks_staging(generation_id,id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding,embedding_provider,embedding_model,embedding_dimensions,embedding_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
-				generationID, chunk.id, repoID, ref.Name, ref.LatestCommit, chunk.filePath, chunk.start, chunk.end, chunk.heading, chunk.contentType, chunk.content, chunk.contentHash, chunk.vector, embeddingMetadata.Provider, embeddingMetadata.Model, embeddingMetadata.Dimensions, embeddingMetadata.Revision); err != nil {
+				generationID, chunk.id, repoID, ref.Name, ref.LatestCommit, chunk.filePath, chunk.start, chunk.end, chunk.heading, chunk.contentType, chunk.content, chunk.contentHash, chunk.vector, embeddingMetadata.Provider, embeddingMetadata.Model, embeddingMetadata.Dimensions, embeddingRevision); err != nil {
 				return err
 			}
 		}
 		pending = pending[:0]
 		return nil
 	}
-	// A single unreadable file must not discard a whole repository index. Skipped
-	// files are counted and reported on the job so operators can see what was
-	// left out instead of watching the job retry forever.
-	var skipped []string
+	// Policy exclusions are intentional and happen before the remote read. Once a
+	// file is accepted by policy, failing to read it makes this generation
+	// incomplete, so it must never replace the active ref index.
 	candidates := 0
 	for _, file := range files {
 		if !i.allowed(file) {
@@ -359,12 +436,13 @@ VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET comm
 		}
 		candidates++
 		if reportJobID != "" && processed > 0 && processed%indexProgressInterval == 0 {
-			_, _ = i.store.DB.ExecContext(ctx, i.store.Rebind(`UPDATE index_jobs SET files_processed=? WHERE id=?`), processed, reportJobID)
+			if err = updateProgress(processed); err != nil {
+				return fail(err)
+			}
 		}
 		raw, e := adapter.GetFile(ctx, repo, snapshotRef, file.Path)
 		if e != nil {
-			skipped = append(skipped, fmt.Sprintf("%s (%s)", file.Path, truncate(e.Error(), 120)))
-			continue
+			return fail(fmt.Errorf("read %s at %s: %w", file.Path, snapshotRef, e))
 		}
 		if int64(len(raw)) > i.policy.MaxFileBytes {
 			continue
@@ -381,10 +459,14 @@ VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET comm
 				continue
 			}
 		}
+		contentLines := strings.Split(strings.ReplaceAll(safeContent, "\r\n", "\n"), "\n")
 		for _, symbol := range codeintel.Extract(file.Path, safeContent) {
 			symbolID := hash(repoID + "\x00" + ref.Name + "\x00" + file.Path + "\x00" + symbol.QualifiedName + "\x00" + fmt.Sprint(symbol.LineStart))
+			start := min(max(1, symbol.LineStart), len(contentLines))
+			end := min(len(contentLines), max(start, symbol.LineEnd))
+			symbolHash := hash(strings.TrimSpace(strings.Join(contentLines[start-1:end], "\n")))
 			_, e = i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO code_symbols_staging(generation_id,id,repository_id,ref_name,commit_id,file_path,name,qualified_name,symbol_kind,language,signature,documentation,line_start,line_end,content_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
-				generationID, symbolID, repoID, ref.Name, ref.LatestCommit, filepath.ToSlash(file.Path), symbol.Name, symbol.QualifiedName, symbol.Kind, symbol.Language, symbol.Signature, symbol.Documentation, symbol.LineStart, symbol.LineEnd, hash(symbol.Signature+"\n"+symbol.Documentation))
+				generationID, symbolID, repoID, ref.Name, ref.LatestCommit, filepath.ToSlash(file.Path), symbol.Name, symbol.QualifiedName, symbol.Kind, symbol.Language, symbol.Signature, symbol.Documentation, symbol.LineStart, symbol.LineEnd, symbolHash)
 			if e != nil {
 				return fail(e)
 			}
@@ -402,7 +484,7 @@ VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET comm
 			contentHash := hash(chunk.Content)
 			var vector []byte
 			if metadataKnown {
-				reuseErr := i.store.DB.QueryRowContext(ctx, i.store.Rebind(`SELECT embedding FROM document_chunks WHERE repository_id=? AND heading=? AND content_hash=? AND embedding_provider=? AND embedding_model=? AND embedding_revision=? AND embedding IS NOT NULL LIMIT 1`), repoID, chunk.Heading, contentHash, embeddingMetadata.Provider, embeddingMetadata.Model, embeddingMetadata.Revision).Scan(&vector)
+				reuseErr := i.store.DB.QueryRowContext(ctx, i.store.Rebind(`SELECT embedding FROM document_chunks WHERE repository_id=? AND heading=? AND content_hash=? AND embedding_provider=? AND embedding_model=? AND embedding_revision=? AND embedding IS NOT NULL LIMIT 1`), repoID, chunk.Heading, contentHash, embeddingMetadata.Provider, embeddingMetadata.Model, embeddingRevision).Scan(&vector)
 				if reuseErr != nil && !errors.Is(reuseErr, sql.ErrNoRows) {
 					return fail(reuseErr)
 				}
@@ -424,14 +506,15 @@ VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET comm
 	if flushErr := flush(); flushErr != nil {
 		return fail(flushErr)
 	}
-	if len(skipped) > 0 && processed == 0 && candidates > 0 {
-		return fail(fmt.Errorf("every indexable file failed to download, first error: %s", skipped[0]))
-	}
 	tx, err := i.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return fail(err)
 	}
 	defer tx.Rollback()
+	if leaseErr := i.lockJobLease(ctx, tx, workerLease); leaseErr != nil {
+		_ = tx.Rollback()
+		return fail(leaseErr)
+	}
 	deletedChunkIDs := map[string][]string{}
 	var activeCommit string
 	stateErr := tx.QueryRowContext(ctx, i.store.Rebind(`SELECT commit_id FROM repository_ref_states WHERE repository_id=? AND ref_name=?`), repoID, ref.Name).Scan(&activeCommit)
@@ -587,21 +670,16 @@ VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET comm
 			}
 		}
 	}
+	if err = i.refreshRepositoryMap(ctx, tx, repoID, ref.Name, ref.LatestCommit); err != nil {
+		_ = tx.Rollback()
+		return fail(err)
+	}
 	if err = tx.Commit(); err != nil {
 		_ = tx.Rollback()
 		return fail(err)
 	}
-	if err = i.refreshRepositoryMap(ctx, repoID, ref.Name, ref.LatestCommit); err != nil {
-		return fail(err)
-	}
 	warning := ""
-	if len(skipped) > 0 {
-		warning = fmt.Sprintf("%d file(s) skipped: %s", len(skipped), strings.Join(skipped[:min(len(skipped), 5)], "; "))
-	}
 	if len(embeddingWarnings) > 0 {
-		if warning != "" {
-			warning += "; "
-		}
 		warning += strings.Join(embeddingWarnings[:min(len(embeddingWarnings), 3)], "; ")
 	}
 	// A completed job with nothing indexed is the most confusing outcome of all,
@@ -636,7 +714,7 @@ func describeEmbeddingState(revision string, total, embedded int, warnings []str
 	}
 }
 
-func (i *Indexer) refreshRepositoryMap(ctx context.Context, repoID, ref, commit string) error {
+func (i *Indexer) refreshRepositoryMap(ctx context.Context, tx *sql.Tx, repoID, ref, commit string) error {
 	type repositoryMap struct {
 		Languages   map[string]int `json:"languages"`
 		Symbols     map[string]int `json:"symbols"`
@@ -645,7 +723,7 @@ func (i *Indexer) refreshRepositoryMap(ctx context.Context, repoID, ref, commit 
 		EntryPoints []string       `json:"entryPoints"`
 	}
 	summary := repositoryMap{Languages: map[string]int{}, Symbols: map[string]int{}}
-	rows, err := i.store.DB.QueryContext(ctx, i.store.Rebind(`SELECT language,symbol_kind,qualified_name,file_path FROM code_symbols WHERE repository_id=? AND ref_name=? ORDER BY file_path,line_start`), repoID, ref)
+	rows, err := tx.QueryContext(ctx, i.store.Rebind(`SELECT language,symbol_kind,qualified_name,file_path FROM code_symbols WHERE repository_id=? AND ref_name=? ORDER BY file_path,line_start`), repoID, ref)
 	if err != nil {
 		return err
 	}
@@ -666,7 +744,7 @@ func (i *Indexer) refreshRepositoryMap(ctx context.Context, repoID, ref, commit 
 		return err
 	}
 	rows.Close()
-	fileRows, err := i.store.DB.QueryContext(ctx, i.store.Rebind(`SELECT DISTINCT file_path FROM document_chunks WHERE repository_id=? AND ref_name=? ORDER BY file_path`), repoID, ref)
+	fileRows, err := tx.QueryContext(ctx, i.store.Rebind(`SELECT DISTINCT file_path FROM document_chunks WHERE repository_id=? AND ref_name=? ORDER BY file_path`), repoID, ref)
 	if err != nil {
 		return err
 	}
@@ -694,7 +772,7 @@ func (i *Indexer) refreshRepositoryMap(ctx context.Context, repoID, ref, commit 
 	if err != nil {
 		return err
 	}
-	_, err = i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_maps(repository_id,ref_name,commit_id,summary_json,generated_at) VALUES(?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET commit_id=excluded.commit_id,summary_json=excluded.summary_json,generated_at=excluded.generated_at`), repoID, ref, commit, string(raw), time.Now().UTC())
+	_, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_maps(repository_id,ref_name,commit_id,summary_json,generated_at) VALUES(?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET commit_id=excluded.commit_id,summary_json=excluded.summary_json,generated_at=excluded.generated_at`), repoID, ref, commit, string(raw), time.Now().UTC())
 	return err
 }
 

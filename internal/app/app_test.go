@@ -523,7 +523,7 @@ func TestOneTimeRecoveryTokenCreatesRestrictedAdminSession(t *testing.T) {
 	pepper := strings.Repeat("p", 32)
 	a, err := New(context.Background(), config.Config{
 		DatabaseDriver: "sqlite", DatabaseDSN: "file:recovery-login?mode=memory&cache=shared&_foreign_keys=on",
-		KeyPepper: pepper, MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+		KeyPepper: pepper, MasterKey: strings.Repeat("m", 32), RecoveryKey: pepper, BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -564,7 +564,9 @@ func TestOneTimeRecoveryTokenCreatesRestrictedAdminSession(t *testing.T) {
 		t.Fatalf("replay status=%d body=%s", replay.Code, replay.Body.String())
 	}
 	keyRequest := httptest.NewRequest(http.MethodPost, "/api/v1/me/api-keys", strings.NewReader(`{"name":"persistent-recovery-key","scopes":["query-docs"]}`))
+	keyRequest.Host = "localhost:4747"
 	keyRequest.Header.Set("Content-Type", "application/json")
+	keyRequest.Header.Set("Origin", "http://localhost:4747")
 	keyRequest.AddCookie(cookies[0])
 	key := httptest.NewRecorder()
 	a.Handler().ServeHTTP(key, keyRequest)
@@ -574,6 +576,81 @@ func TestOneTimeRecoveryTokenCreatesRestrictedAdminSession(t *testing.T) {
 	var consumed int
 	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM admin_recovery_tokens`).Scan(&consumed); err != nil || consumed != 1 {
 		t.Fatalf("consumed=%d err=%v", consumed, err)
+	}
+}
+
+func TestCookieMutationOriginPolicy(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		origin     string
+		fetchSite  string
+		forwardTLS bool
+		want       bool
+	}{
+		{name: "safe read", method: http.MethodGet, origin: "https://evil.example", want: true},
+		{name: "same origin", method: http.MethodPost, origin: "https://git-ctx.company", forwardTLS: true, want: true},
+		{name: "sibling subdomain", method: http.MethodPost, origin: "https://evil.company", forwardTLS: true, want: false},
+		{name: "scheme mismatch", method: http.MethodPost, origin: "http://git-ctx.company", forwardTLS: true, want: false},
+		{name: "null origin", method: http.MethodDelete, origin: "null", want: false},
+		{name: "fetch metadata alone", method: http.MethodPatch, fetchSite: "same-origin", want: false},
+		{name: "fetch same site", method: http.MethodPatch, fetchSite: "same-site", want: false},
+		{name: "fetch cross site", method: http.MethodPatch, fetchSite: "cross-site", want: false},
+		{name: "missing origin", method: http.MethodPut, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(tt.method, "http://git-ctx.company/api/v1/admin/settings", nil)
+			request.Host = "git-ctx.company"
+			request.Header.Set("Origin", tt.origin)
+			request.Header.Set("Sec-Fetch-Site", tt.fetchSite)
+			if tt.forwardTLS {
+				request.Header.Set("X-Forwarded-Proto", "https")
+			}
+			if got := cookieMutationAllowed(request); got != tt.want {
+				t.Fatalf("allowed=%v want=%v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProgrammaticRecoveryKeyIsNormalizedAndNeverWeak(t *testing.T) {
+	base := config.Config{
+		DatabaseDriver:  "sqlite",
+		DatabaseDSN:     "file:programmatic-recovery-key?mode=memory&cache=shared&_foreign_keys=on",
+		KeyPepper:       strings.Repeat("p", 32),
+		MasterKey:       strings.Repeat("m", 32),
+		BootstrapAdmin:  "bootstrap",
+		BackupDirectory: t.TempDir(),
+	}
+	normalized := strings.Repeat("r", 32)
+	cfg := base
+	cfg.RecoveryKey = " \t" + normalized + "\r\n"
+	a, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.cfg.RecoveryKey != normalized {
+		t.Fatalf("recovery key was not normalized: %q", a.cfg.RecoveryKey)
+	}
+	a.Close()
+
+	cfg = base
+	cfg.DatabaseDSN = "file:programmatic-random-recovery-key?mode=memory&cache=shared&_foreign_keys=on"
+	cfg.RecoveryKey = strings.Repeat(" ", 32)
+	a, err = New(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(a.cfg.RecoveryKey) < 32 || strings.TrimSpace(a.cfg.RecoveryKey) == "" {
+		t.Fatalf("blank recovery key was not replaced: %q", a.cfg.RecoveryKey)
+	}
+	a.Close()
+
+	cfg = base
+	cfg.RecoveryKey = strings.Repeat("w", 31)
+	if _, err = New(context.Background(), cfg); err == nil {
+		t.Fatal("short programmatic recovery key was accepted")
 	}
 }
 
@@ -1060,6 +1137,9 @@ func TestSettingDenialAndAccessDiagnosticsExplainMissingRole(t *testing.T) {
 	withSession := func(method, path, payload string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(method, path, strings.NewReader(payload))
 		request.Header.Set("Content-Type", "application/json")
+		if method != http.MethodGet && method != http.MethodHead {
+			request.Header.Set("Origin", "http://example.com")
+		}
 		request.AddCookie(&http.Cookie{Name: "git_ctx_session", Value: rawSession})
 		recorder := httptest.NewRecorder()
 		a.Handler().ServeHTTP(recorder, request)

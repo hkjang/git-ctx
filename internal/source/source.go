@@ -129,6 +129,12 @@ type RepositorySearcher interface {
 // queries instead of surfacing an error.
 var ErrGlobalSearchUnsupported = errors.New("global source code search is not available on this instance")
 
+// ErrCodeSearchRefUnsupported reports that a source-side code index cannot
+// search the requested branch or tag. Bitbucket Server/Data Center indexes only
+// default branches, so returning those hits under a non-default ref would be
+// materially incorrect.
+var ErrCodeSearchRefUnsupported = errors.New("source code search does not support the requested ref")
+
 // LibraryID returns the canonical source-aware library ID used by the catalog.
 // Bitbucket keeps /project/repository while other sources receive a namespace
 // so repositories with the same name cannot collide.

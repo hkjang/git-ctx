@@ -85,7 +85,7 @@ func runRecoveryToken(args []string) error {
 	if err != nil {
 		return err
 	}
-	token, expires, err := recovery.Generate(cfg.KeyPepper, *ttl, time.Now().UTC())
+	token, expires, err := recovery.Generate(cfg.RecoveryKey, *ttl, time.Now().UTC())
 	if err != nil {
 		return err
 	}

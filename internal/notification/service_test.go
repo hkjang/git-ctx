@@ -81,6 +81,162 @@ func TestWebhookFailureBackoffAndDeadLetter(t *testing.T) {
 	}
 }
 
+func TestRunOnceSkipsFutureDeliveriesBeforeApplyingBatchLimit(t *testing.T) {
+	db := notificationFixture(t)
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	now := time.Now().UTC()
+	tx, err := db.DB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 100; i++ {
+		notificationID := fmt.Sprintf("future-%03d", i)
+		if _, err = tx.Exec(`INSERT INTO notifications(id,user_id,notification_type,resource_id,title,message,created_at) VALUES(?,?,?,?,?,?,?)`,
+			notificationID, "u1", "future", notificationID, "Future", "Not due yet", now.Add(-2*time.Hour)); err != nil {
+			tx.Rollback()
+			t.Fatal(err)
+		}
+		if _, err = tx.Exec(`INSERT INTO notification_deliveries(id,notification_id,channel,destination_hash,next_attempt_at,created_at) VALUES(?,?,?,?,?,?)`,
+			"delivery:"+notificationID, notificationID, "webhook", fmt.Sprintf("future-hash-%03d", i), now.Add(time.Hour), now.Add(-2*time.Hour)); err != nil {
+			tx.Rollback()
+			t.Fatal(err)
+		}
+	}
+	dueHash := destinationHash("webhook", server.URL)
+	if _, err = tx.Exec(`INSERT INTO notification_deliveries(id,notification_id,channel,destination_hash,next_attempt_at,created_at) VALUES(?,?,?,?,?,?)`,
+		"delivery:due", "n1", "webhook", dueHash, now.Add(-time.Minute), now.Add(-time.Hour)); err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{
+		Enabled: true, ActiveSince: now.Add(time.Hour), WebhookURL: server.URL,
+		Timeout: time.Second, MaxAttempts: 3,
+	}
+	service := New(db, func(context.Context) (Config, error) { return cfg, nil })
+	if err = service.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("webhook calls=%d want=1", calls.Load())
+	}
+	var status string
+	if err = db.DB.QueryRow(`SELECT status FROM notification_deliveries WHERE id='delivery:due'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "delivered" {
+		t.Fatalf("due delivery status=%q want=delivered", status)
+	}
+	var touched int
+	if err = db.DB.QueryRow(`SELECT COUNT(*) FROM notification_deliveries WHERE notification_id LIKE 'future-%' AND (status<>'pending' OR attempts<>0)`).Scan(&touched); err != nil {
+		t.Fatal(err)
+	}
+	if touched != 0 {
+		t.Fatalf("future deliveries touched=%d want=0", touched)
+	}
+}
+
+func TestSeedEmailCreatesNewDeliveryAfterDestinationChanges(t *testing.T) {
+	db := notificationFixture(t)
+	service := New(db, nil)
+	activeSince := time.Now().Add(-time.Hour)
+	now := time.Now().UTC()
+	if err := service.seedEmail(context.Background(), activeSince, now); err != nil {
+		t.Fatal(err)
+	}
+	oldHash := destinationHash("email", "alice@example.test")
+	if _, err := db.DB.Exec(`UPDATE notification_deliveries SET status='dead' WHERE notification_id='n1' AND channel='email' AND destination_hash=?`, oldHash); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.Exec(`UPDATE users SET email='alice.new@example.test' WHERE id='u1'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.seedEmail(context.Background(), activeSince, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	newHash := destinationHash("email", "alice.new@example.test")
+	var oldStatus, newStatus string
+	if err := db.DB.QueryRow(`SELECT status FROM notification_deliveries WHERE notification_id='n1' AND channel='email' AND destination_hash=?`, oldHash).Scan(&oldStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB.QueryRow(`SELECT status FROM notification_deliveries WHERE notification_id='n1' AND channel='email' AND destination_hash=?`, newHash).Scan(&newStatus); err != nil {
+		t.Fatal(err)
+	}
+	if oldStatus != "dead" || newStatus != "pending" {
+		t.Fatalf("old status=%q new status=%q", oldStatus, newStatus)
+	}
+	var deliveries int
+	if err := db.DB.QueryRow(`SELECT COUNT(*) FROM notification_deliveries WHERE notification_id='n1' AND channel='email'`).Scan(&deliveries); err != nil {
+		t.Fatal(err)
+	}
+	if deliveries != 2 {
+		t.Fatalf("email deliveries=%d want=2", deliveries)
+	}
+}
+
+func TestRunOnceSupersedesStaleDestinationHashes(t *testing.T) {
+	db := notificationFixture(t)
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	now := time.Now().UTC()
+	_, _ = db.DB.Exec(`UPDATE users SET email='alice.new@example.test' WHERE id='u1'`)
+	_, _ = db.DB.Exec(`INSERT INTO notification_deliveries(id,notification_id,channel,destination_hash,next_attempt_at) VALUES(?,?,?,?,?)`,
+		"stale-email", "n1", "email", destinationHash("email", "alice@example.test"), now)
+	_, _ = db.DB.Exec(`INSERT INTO notification_deliveries(id,notification_id,channel,destination_hash,next_attempt_at) VALUES(?,?,?,?,?)`,
+		"stale-webhook", "n1", "webhook", destinationHash("webhook", "https://old.example.test/hook"), now)
+	cfg := Config{Enabled: true, ActiveSince: now.Add(-time.Hour), WebhookURL: server.URL, Timeout: time.Second, MaxAttempts: 3}
+	service := New(db, func(context.Context) (Config, error) { return cfg, nil })
+	if err := service.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("new webhook calls=%d want=1", calls.Load())
+	}
+	for _, id := range []string{"stale-email", "stale-webhook"} {
+		var status, lastError string
+		var attempts int
+		if err := db.DB.QueryRow(`SELECT status,attempts,last_error FROM notification_deliveries WHERE id=?`, id).Scan(&status, &attempts, &lastError); err != nil {
+			t.Fatal(err)
+		}
+		if status != "superseded" || attempts != 0 || !strings.Contains(lastError, "destination changed") {
+			t.Fatalf("%s status=%q attempts=%d error=%q", id, status, attempts, lastError)
+		}
+	}
+	var delivered int
+	if err := db.DB.QueryRow(`SELECT COUNT(*) FROM notification_deliveries WHERE channel='webhook' AND status='delivered'`).Scan(&delivered); err != nil || delivered != 1 {
+		t.Fatalf("delivered webhooks=%d err=%v", delivered, err)
+	}
+}
+
+func TestDestinationHashPreservesCaseSensitiveURLComponents(t *testing.T) {
+	if destinationHash("email", " Alice@Example.Test ") != destinationHash("email", "alice@example.test") {
+		t.Fatal("email destination normalization changed")
+	}
+	if destinationHash("webhook", "HTTPS://HOOKS.EXAMPLE.TEST/Path?Token=ABC") != destinationHash("webhook", "https://hooks.example.test/Path?Token=ABC") {
+		t.Fatal("URL scheme or host was not canonicalized")
+	}
+	if destinationHash("webhook", "https://hooks.example.test/Path?Token=ABC") == destinationHash("webhook", "https://hooks.example.test/path?Token=ABC") {
+		t.Fatal("case-sensitive URL path was collapsed")
+	}
+	if destinationHash("messenger", "https://hooks.example.test/path?Token=ABC") == destinationHash("messenger", "https://hooks.example.test/path?Token=abc") {
+		t.Fatal("case-sensitive URL query was collapsed")
+	}
+}
+
 func TestValidateConfigRejectsUnsafeDestinations(t *testing.T) {
 	base := Config{Timeout: time.Second, MaxAttempts: 3}
 	if err := ValidateConfig(base); err != nil {

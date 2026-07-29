@@ -13,12 +13,13 @@ import (
 	"git-ctx/internal/config"
 )
 
-func TestPostgresDSNOnlyBootstrapIntegration(t *testing.T) {
+func TestPostgresBootstrapIntegration(t *testing.T) {
 	dsn := os.Getenv("GIT_CTX_TEST_POSTGRES_DSN")
 	if dsn == "" {
 		t.Skip("GIT_CTX_TEST_POSTGRES_DSN is not set")
 	}
 	t.Setenv("GIT_CTX_DB_DSN", dsn)
+	t.Setenv("GIT_CTX_RECOVERY_KEY", strings.Repeat("integration-recovery-key-", 2))
 	cfg, err := config.FromEnv()
 	if err != nil {
 		t.Fatal(err)

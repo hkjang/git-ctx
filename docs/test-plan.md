@@ -24,7 +24,7 @@ MCP GET은 initialize로 발급된 session에서 SSE 연결을 유지하고 DELE
 붙이지 않는다.
 
 ```bash
-scripts/package-offline-image.sh 0.38.0 git-ctx:v0.38.0
+scripts/package-offline-image.sh 0.39.0 git-ctx:v0.39.0
 ```
 
 실제 PostgreSQL 백업·복원 계약 시험은 격리된 빈 시험 DB DSN을 명시해서 실행한다.
@@ -36,7 +36,11 @@ GIT_CTX_TEST_POSTGRES_DSN='postgres://gitctx:password@localhost:5432/gitctx_test
 GIT_CTX_TEST_POSTGRES_DSN='postgres://gitctx:password@localhost:5432/gitctx_test?sslmode=disable' \
   go test -run TestPostgresQualityBenchmarkIntegration -v ./internal/quality
 GIT_CTX_TEST_POSTGRES_DSN='postgres://gitctx:password@localhost:5432/gitctx_test?sslmode=disable' \
-  go test -run TestPostgresDSNOnlyBootstrapIntegration -v ./internal/app
+  go test -run TestPostgresBootstrapIntegration -v ./internal/app
+GIT_CTX_TEST_POSTGRES_DSN='postgres://gitctx:password@localhost:5432/gitctx_migration_test?sslmode=disable' \
+  go test -run TestSQLiteRecoveryToPostgresMigrationIntegration -v ./internal/app
+GIT_CTX_TEST_POSTGRES_DSN='postgres://gitctx:password@localhost:5432/gitctx_notification_test?sslmode=disable' \
+  go test -run TestPostgresOutboxIntegration -v ./internal/notification
 GIT_CTX_TEST_PGVECTOR_DSN='postgres://gitctx:password@localhost:5432/gitctx_vector_test?sslmode=disable' \
   go test -count=1 -run TestPgvectorConnectionActivatesAvailableExtensionIntegration -v ./internal/vectorstore
 ```

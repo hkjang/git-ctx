@@ -13,6 +13,7 @@ type Config struct {
 	DatabaseDSN     string
 	KeyPepper       string
 	MasterKey       string
+	RecoveryKey     string
 	BootstrapAdmin  string
 	PublicURL       string
 	BackupDirectory string
@@ -22,6 +23,10 @@ func FromEnv() (Config, error) {
 	dsn := strings.TrimSpace(os.Getenv("GIT_CTX_DB_DSN"))
 	if dsn == "" {
 		return Config{}, errors.New("GIT_CTX_DB_DSN is required")
+	}
+	recoveryKey := strings.TrimSpace(os.Getenv("GIT_CTX_RECOVERY_KEY"))
+	if len(recoveryKey) < 32 {
+		return Config{}, errors.New("GIT_CTX_RECOVERY_KEY is required and must contain at least 32 characters")
 	}
 	driver := "postgres"
 	if strings.HasPrefix(dsn, "file:") || dsn == ":memory:" {
@@ -35,6 +40,7 @@ func FromEnv() (Config, error) {
 		DatabaseDSN:     dsn,
 		KeyPepper:       string(pepper[:]),
 		MasterKey:       string(master[:]),
+		RecoveryKey:     recoveryKey,
 		PublicURL:       "http://localhost:4747",
 		BackupDirectory: "backups",
 	}

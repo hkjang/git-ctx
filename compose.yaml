@@ -22,6 +22,7 @@ services:
       - backup-data:/var/lib/git-ctx/backups
     environment:
       GIT_CTX_DB_DSN: postgres://gitctx:${POSTGRES_PASSWORD}@postgres:5432/gitctx?sslmode=disable
+      GIT_CTX_RECOVERY_KEY: ${GIT_CTX_RECOVERY_KEY:?set GIT_CTX_RECOVERY_KEY}
 volumes:
   postgres-data:
   backup-data:

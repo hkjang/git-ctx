@@ -25,18 +25,46 @@ import (
 	"git-ctx/internal/store"
 )
 
-const magic = "GCTXBACKUP1\n"
+const (
+	magic                   = "GCTXBACKUP1\n"
+	snapshotStringChunkSize = 32 << 10
+)
+
+var errLogicalPayloadTooLarge = errors.New("backup logical payload exceeds configured maximum")
 
 var tables = []string{
 	"users", "roles", "user_identities", "user_roles",
 	"api_keys", "api_key_restrictions", "api_key_usage_buckets",
-	"repositories", "repository_permissions", "repository_index_policies", "document_chunks", "repository_ref_states", "repository_ref_changes", "search_projection_states",
+	"repositories", "repository_permissions", "repository_index_policies", "repository_files", "document_chunks", "repository_ref_states", "repository_ref_changes", "search_projection_states",
 	"code_symbols", "code_dependencies", "repository_maps",
 	"context_packs", "context_pack_items",
 	"quality_benchmark_cases", "quality_benchmark_runs", "quality_benchmark_results",
-	"system_settings", "setting_versions", "audit_logs", "mcp_calls", "index_jobs",
+	"system_settings", "setting_versions", "audit_logs", "mcp_calls", "mcp_call_steps", "index_jobs",
 	"webhook_events", "index_security_events", "mcp_tools", "notifications", "notification_deliveries",
 	"managed_secrets", "managed_secret_versions",
+}
+
+// legacyV1Tables is the exact table set written by releases before
+// repository_files and mcp_call_steps were added to logical backups. Those
+// tables already existed in the database, so restoring such an archive safely
+// leaves them empty rather than rejecting an otherwise compatible backup.
+var legacyV1Tables = withoutTables(tables, "repository_files", "mcp_call_steps")
+
+func withoutTables(input []string, omitted ...string) []string {
+	out := make([]string, 0, len(input))
+	for _, table := range input {
+		skip := false
+		for _, name := range omitted {
+			if table == name {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			out = append(out, table)
+		}
+	}
+	return out
 }
 
 type Config struct {
@@ -157,9 +185,17 @@ func (s *Service) Create(ctx context.Context, actor, trigger string) (record Rec
 			_, _ = s.store.DB.ExecContext(context.Background(), s.store.Rebind(`UPDATE backup_records SET status='failed',error_message=?,completed_at=? WHERE id=?`), record.ErrorMessage, time.Now().UTC(), record.ID)
 		}
 	}()
-	payload, err := s.snapshot(ctx)
+	payload, expandedBytes, err := s.snapshotWithLimit(ctx, cfg.MaxBytes)
 	if err != nil {
 		return record, err
+	}
+	// MaxBytes is a restore-safety bound as well as an on-disk archive bound.
+	// A highly compressible logical snapshot can be tiny on disk but expand far
+	// beyond the amount Restore is allowed to read. Reject it before recording a
+	// completed backup so every completed archive is restorable under the same
+	// configuration.
+	if expandedBytes > cfg.MaxBytes {
+		return record, fmt.Errorf("backup logical payload exceeds configured maximum of %d bytes", cfg.MaxBytes)
 	}
 	sealed, err := s.seal(payload)
 	if err != nil {
@@ -184,84 +220,367 @@ func (s *Service) Create(ctx context.Context, actor, trigger string) (record Rec
 	return record, nil
 }
 
-func (s *Service) snapshot(ctx context.Context) ([]byte, error) {
+func (s *Service) snapshot(ctx context.Context) ([]byte, int64, error) {
+	return s.snapshotWithLimit(ctx, 0)
+}
+
+// snapshotWithLimit writes the v1 logical JSON directly into gzip. It keeps
+// only the current SQL row and the compressed output in memory; maxLogicalBytes
+// bounds the uncompressed JSON accepted by Restore. A zero limit is used by
+// in-process logical migration, whose caller has no backup size configuration.
+func (s *Service) snapshotWithLimit(ctx context.Context, maxLogicalBytes int64) ([]byte, int64, error) {
 	options := &sql.TxOptions{ReadOnly: true}
 	if s.store.Driver() == "postgres" {
 		options.Isolation = sql.LevelRepeatableRead
 	}
 	tx, err := s.store.DB.BeginTx(ctx, options)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer tx.Rollback()
-	a := archive{Format: "git-ctx-logical-v1", SourceDriver: s.store.Driver(), CreatedAt: time.Now().UTC()}
+	var compressed bytes.Buffer
+	gzipWriter := gzip.NewWriter(&compressed)
+	logicalWriter := &logicalLimitWriter{destination: gzipWriter, limit: maxLogicalBytes}
+	if err = s.writeSnapshotJSON(ctx, tx, logicalWriter); err != nil {
+		return nil, logicalWriter.written, err
+	}
+	if err = gzipWriter.Close(); err != nil {
+		return nil, logicalWriter.written, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, logicalWriter.written, err
+	}
+	return compressed.Bytes(), logicalWriter.written, nil
+}
+
+type logicalLimitWriter struct {
+	destination io.Writer
+	limit       int64
+	written     int64
+	scratch     [snapshotStringChunkSize]byte
+}
+
+func (w *logicalLimitWriter) Write(input []byte) (int, error) {
+	if len(input) == 0 {
+		return 0, nil
+	}
+	allowed := len(input)
+	exceeded := false
+	if w.limit > 0 {
+		remaining := w.limit - w.written
+		if remaining <= 0 {
+			return 0, w.limitError()
+		}
+		if int64(allowed) > remaining {
+			allowed = int(remaining)
+			exceeded = true
+		}
+	}
+	n, err := w.destination.Write(input[:allowed])
+	w.written += int64(n)
+	if err != nil {
+		return n, err
+	}
+	if n != allowed {
+		return n, io.ErrShortWrite
+	}
+	if exceeded {
+		return n, w.limitError()
+	}
+	return n, nil
+}
+
+// WriteString copies through a fixed-size scratch buffer so a large TEXT value
+// is never converted into a second, equally large []byte before compression.
+func (w *logicalLimitWriter) WriteString(input string) (int, error) {
+	total := 0
+	for len(input) > 0 {
+		size := min(len(input), len(w.scratch))
+		copy(w.scratch[:size], input[:size])
+		n, err := w.Write(w.scratch[:size])
+		total += n
+		if err != nil {
+			return total, err
+		}
+		input = input[size:]
+	}
+	return total, nil
+}
+
+func (w *logicalLimitWriter) limitError() error {
+	return fmt.Errorf("%w of %d bytes", errLogicalPayloadTooLarge, w.limit)
+}
+
+func (s *Service) writeSnapshotJSON(ctx context.Context, tx *sql.Tx, writer *logicalLimitWriter) error {
+	write := func(text string) error {
+		_, err := writer.WriteString(text)
+		return err
+	}
+	writeString := func(text string) error {
+		return writeJSONString(writer, text)
+	}
+	if err := write(`{"Format":`); err != nil {
+		return err
+	}
+	if err := writeString("git-ctx-logical-v1"); err != nil {
+		return err
+	}
+	if err := write(`,"SourceDriver":`); err != nil {
+		return err
+	}
+	if err := writeString(s.store.Driver()); err != nil {
+		return err
+	}
+	if err := write(`,"CreatedAt":`); err != nil {
+		return err
+	}
+	if err := writeString(time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	if err := write(`,"Migrations":[`); err != nil {
+		return err
+	}
 	migrations, err := tx.QueryContext(ctx, `SELECT version FROM schema_migrations ORDER BY version`)
 	if err != nil {
-		return nil, err
+		return err
 	}
+	firstMigration := true
 	for migrations.Next() {
 		var version string
 		if err = migrations.Scan(&version); err != nil {
 			migrations.Close()
-			return nil, err
+			return err
 		}
-		a.Migrations = append(a.Migrations, version)
+		if !firstMigration {
+			if err = write(","); err != nil {
+				migrations.Close()
+				return err
+			}
+		}
+		firstMigration = false
+		if err = writeString(version); err != nil {
+			migrations.Close()
+			return err
+		}
 	}
-	migrations.Close()
-	for _, table := range tables {
+	if err = migrations.Err(); err != nil {
+		migrations.Close()
+		return err
+	}
+	if err = migrations.Close(); err != nil {
+		return err
+	}
+	if err = write(`],"Tables":[`); err != nil {
+		return err
+	}
+	for tableIndex, table := range tables {
 		rows, queryErr := tx.QueryContext(ctx, `SELECT * FROM "`+table+`"`)
 		if queryErr != nil {
-			return nil, fmt.Errorf("read %s: %w", table, queryErr)
+			return fmt.Errorf("read %s: %w", table, queryErr)
 		}
 		columns, queryErr := rows.Columns()
 		if queryErr != nil {
 			rows.Close()
-			return nil, queryErr
+			return queryErr
 		}
-		data := tableData{Name: table, ColumnsCSV: strings.Join(columns, ",")}
-		for rows.Next() {
-			raw := make([]any, len(columns))
-			pointers := make([]any, len(columns))
-			for i := range raw {
-				pointers[i] = &raw[i]
+		if tableIndex > 0 {
+			if queryErr = write(","); queryErr != nil {
+				rows.Close()
+				return queryErr
 			}
+		}
+		if queryErr = write(`{"Name":`); queryErr == nil {
+			queryErr = writeString(table)
+		}
+		if queryErr == nil {
+			queryErr = write(`,"ColumnsCSV":`)
+		}
+		if queryErr == nil {
+			queryErr = writeString(strings.Join(columns, ","))
+		}
+		if queryErr == nil {
+			queryErr = write(`,"Rows":[`)
+		}
+		if queryErr != nil {
+			rows.Close()
+			return queryErr
+		}
+		raw := make([]any, len(columns))
+		pointers := make([]any, len(columns))
+		for index := range raw {
+			pointers[index] = &raw[index]
+		}
+		firstRow := true
+		for rows.Next() {
 			if queryErr = rows.Scan(pointers...); queryErr != nil {
 				rows.Close()
-				return nil, queryErr
+				return queryErr
 			}
-			encoded := make([]value, len(raw))
-			for i := range raw {
-				encoded[i], queryErr = encodeValue(raw[i])
-				if queryErr != nil {
+			if !firstRow {
+				if queryErr = write(","); queryErr != nil {
 					rows.Close()
-					return nil, fmt.Errorf("encode %s.%s: %w", table, columns[i], queryErr)
+					return queryErr
 				}
 			}
-			data.Rows = append(data.Rows, encoded)
+			firstRow = false
+			if queryErr = write("["); queryErr != nil {
+				rows.Close()
+				return queryErr
+			}
+			for columnIndex := range raw {
+				if columnIndex > 0 {
+					if queryErr = write(","); queryErr != nil {
+						rows.Close()
+						return queryErr
+					}
+				}
+				encoded, encodeErr := encodeValue(raw[columnIndex])
+				if encodeErr != nil {
+					rows.Close()
+					return fmt.Errorf("encode %s.%s: %w", table, columns[columnIndex], encodeErr)
+				}
+				if queryErr = writeSnapshotValue(writer, encoded); queryErr != nil {
+					rows.Close()
+					return fmt.Errorf("encode %s.%s: %w", table, columns[columnIndex], queryErr)
+				}
+			}
+			if queryErr = write("]"); queryErr != nil {
+				rows.Close()
+				return queryErr
+			}
 		}
 		if queryErr = rows.Err(); queryErr != nil {
 			rows.Close()
-			return nil, queryErr
+			return queryErr
 		}
-		rows.Close()
-		a.Tables = append(a.Tables, data)
+		if queryErr = rows.Close(); queryErr != nil {
+			return queryErr
+		}
+		if queryErr = write("]}"); queryErr != nil {
+			return queryErr
+		}
 	}
-	if err = tx.Commit(); err != nil {
-		return nil, err
+	return write("]}")
+}
+
+func writeSnapshotValue(writer *logicalLimitWriter, item value) error {
+	if _, err := writer.WriteString(`{"Kind":`); err != nil {
+		return err
 	}
-	raw, err := json.Marshal(a)
-	if err != nil {
-		return nil, err
+	if err := writeJSONString(writer, item.Kind); err != nil {
+		return err
 	}
-	var compressed bytes.Buffer
-	writer := gzip.NewWriter(&compressed)
-	if _, err = writer.Write(raw); err != nil {
-		return nil, err
+	if _, err := writer.WriteString(`,"Data":`); err != nil {
+		return err
 	}
-	if err = writer.Close(); err != nil {
-		return nil, err
+	if err := writeJSONString(writer, item.Data); err != nil {
+		return err
 	}
-	return compressed.Bytes(), nil
+	_, err := writer.WriteString("}")
+	return err
+}
+
+// writeJSONString emits the same decoded value as encoding/json without
+// allocating an escaped copy of the complete SQL value.
+func writeJSONString(writer *logicalLimitWriter, input string) error {
+	if _, err := writer.WriteString(`"`); err != nil {
+		return err
+	}
+	start := 0
+	for index := 0; index < len(input); {
+		current := input[index]
+		if current < utf8.RuneSelf {
+			escape := ""
+			switch current {
+			case '\\':
+				escape = `\\`
+			case '"':
+				escape = `\"`
+			case '\b':
+				escape = `\b`
+			case '\f':
+				escape = `\f`
+			case '\n':
+				escape = `\n`
+			case '\r':
+				escape = `\r`
+			case '\t':
+				escape = `\t`
+			case '<':
+				escape = `\u003c`
+			case '>':
+				escape = `\u003e`
+			case '&':
+				escape = `\u0026`
+			}
+			if escape == "" && current >= 0x20 {
+				index++
+				continue
+			}
+			if start < index {
+				if _, err := writer.WriteString(input[start:index]); err != nil {
+					return err
+				}
+			}
+			if escape != "" {
+				if _, err := writer.WriteString(escape); err != nil {
+					return err
+				}
+			} else {
+				hex := "0123456789abcdef"
+				encoded := []byte{'\\', 'u', '0', '0', hex[current>>4], hex[current&0x0f]}
+				if _, err := writer.Write(encoded); err != nil {
+					return err
+				}
+			}
+			index++
+			start = index
+			continue
+		}
+		runeValue, size := utf8.DecodeRuneInString(input[index:])
+		if runeValue == utf8.RuneError && size == 1 {
+			if start < index {
+				if _, err := writer.WriteString(input[start:index]); err != nil {
+					return err
+				}
+			}
+			if _, err := writer.WriteString(`\ufffd`); err != nil {
+				return err
+			}
+			index++
+			start = index
+			continue
+		}
+		if runeValue == '\u2028' || runeValue == '\u2029' {
+			if start < index {
+				if _, err := writer.WriteString(input[start:index]); err != nil {
+					return err
+				}
+			}
+			if runeValue == '\u2028' {
+				_, err := writer.WriteString(`\u2028`)
+				if err != nil {
+					return err
+				}
+			} else {
+				_, err := writer.WriteString(`\u2029`)
+				if err != nil {
+					return err
+				}
+			}
+			index += size
+			start = index
+			continue
+		}
+		index += size
+	}
+	if start < len(input) {
+		if _, err := writer.WriteString(input[start:]); err != nil {
+			return err
+		}
+	}
+	_, err := writer.WriteString(`"`)
+	return err
 }
 
 func (s *Service) Restore(ctx context.Context, id string) error {
@@ -300,7 +619,7 @@ func (s *Service) Restore(ctx context.Context, id string) error {
 // copied, matching the restore security boundary.
 func MigrateLogical(ctx context.Context, source, target *store.Store) error {
 	sourceService := &Service{store: source}
-	payload, err := sourceService.snapshot(ctx)
+	payload, _, err := sourceService.snapshot(ctx)
 	if err != nil {
 		return err
 	}
@@ -364,21 +683,23 @@ func (s *Service) restoreArchive(ctx context.Context, a archive) error {
 }
 
 func (s *Service) validateArchive(ctx context.Context, a archive) error {
-	if len(a.Tables) != len(tables) {
+	actualTables := make([]string, len(a.Tables))
+	for index := range a.Tables {
+		actualTables[index] = a.Tables[index].Name
+	}
+	actualSet := strings.Join(actualTables, "\n")
+	if actualSet != strings.Join(tables, "\n") && actualSet != strings.Join(legacyV1Tables, "\n") {
 		return errors.New("backup table set does not match this git-ctx version")
 	}
-	for i := range tables {
-		if a.Tables[i].Name != tables[i] {
-			return errors.New("backup table order or identity is invalid")
-		}
-		columns, err := s.store.DB.QueryContext(ctx, `SELECT * FROM "`+tables[i]+`" WHERE 1=0`)
+	for _, data := range a.Tables {
+		columns, err := s.store.DB.QueryContext(ctx, `SELECT * FROM "`+data.Name+`" WHERE 1=0`)
 		if err != nil {
 			return err
 		}
 		current, err := columns.Columns()
 		columns.Close()
-		if err != nil || strings.Join(current, ",") != a.Tables[i].ColumnsCSV {
-			return fmt.Errorf("backup schema for %s does not match", tables[i])
+		if err != nil || strings.Join(current, ",") != data.ColumnsCSV {
+			return fmt.Errorf("backup schema for %s does not match", data.Name)
 		}
 	}
 	rows, err := s.store.DB.QueryContext(ctx, `SELECT version FROM schema_migrations ORDER BY version`)
@@ -461,12 +782,15 @@ func (s *Service) readVerified(ctx context.Context, cfg Config, id string) ([]by
 }
 
 func (s *Service) seal(payload []byte) ([]byte, error) {
-	nonce := make([]byte, s.aead.NonceSize())
+	nonceStart := len(magic)
+	nonceEnd := nonceStart + s.aead.NonceSize()
+	output := make([]byte, nonceEnd, nonceEnd+len(payload)+s.aead.Overhead())
+	copy(output, magic)
+	nonce := output[nonceStart:nonceEnd]
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, err
 	}
-	sealed := s.aead.Seal(nil, nonce, payload, []byte(magic))
-	return append(append([]byte{}, []byte(magic)...), append(nonce, sealed...)...), nil
+	return s.aead.Seal(output, nonce, payload, []byte(magic)), nil
 }
 
 func (s *Service) open(data []byte) ([]byte, error) {
