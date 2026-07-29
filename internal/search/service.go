@@ -62,6 +62,7 @@ type Service struct {
 	keyword      KeywordLoader
 	vector       VectorLoader
 	globalVector GlobalVectorLoader
+	breakers     BreakerRegistry
 }
 
 func (s *Service) SetKeywordLoader(loader KeywordLoader) { s.keyword = loader }
@@ -92,6 +93,59 @@ func (s *Service) SetConfigLoader(loader ConfigLoader) {
 	if loader != nil {
 		s.load = loader
 	}
+}
+
+// BreakerRegistry decides whether a remote source may be called right now and
+// records how the call went. It lives behind an interface so the search service
+// keeps no state of its own about source health.
+type BreakerRegistry interface {
+	Allow(sourceType string) (bool, string)
+	Report(sourceType string, err error)
+}
+
+// ErrSourcePaused reports that a source is temporarily not being called because
+// it has been failing. It is not an error the caller should surface as a
+// failure: the indexed answer is still returned, with a diagnostic saying the
+// live path was skipped.
+var ErrSourcePaused = errors.New("source integration is paused after repeated failures")
+
+// SetBreakers installs the per source circuit breaker registry.
+func (s *Service) SetBreakers(registry BreakerRegistry) { s.breakers = registry }
+
+// remoteSource loads an adapter unless the source is currently paused. Every
+// live call in this service goes through it, so one dead instance can never
+// again burn a whole tool timeout repository by repository.
+func (s *Service) remoteSource(ctx context.Context, sourceType string) (source.RepositorySource, string, error) {
+	if s.sources == nil {
+		return nil, "", errors.New("no source connector is configured")
+	}
+	if s.breakers != nil {
+		if allowed, reason := s.breakers.Allow(sourceType); !allowed {
+			calltrace.From(ctx).Note("source-paused", sourceType, calltrace.StatusSkipped, reason)
+			return nil, reason, ErrSourcePaused
+		}
+	}
+	adapter, err := s.sources(ctx, sourceType)
+	if err != nil {
+		s.reportRemote(sourceType, err)
+		return nil, "", err
+	}
+	return adapter, "", nil
+}
+
+// reportRemote feeds one call outcome back to the breaker. A missing repository
+// or an unsupported feature says nothing about the health of the instance, so
+// those are reported as success.
+func (s *Service) reportRemote(sourceType string, err error) {
+	if s.breakers == nil {
+		return
+	}
+	// A missing repository, an unsupported feature and an unconfigured source say
+	// nothing about the health of the instance.
+	if err != nil && (errors.Is(err, source.ErrGlobalSearchUnsupported) || errors.Is(err, source.ErrNotConfigured) || source.IsNotFound(err)) {
+		err = nil
+	}
+	s.breakers.Report(sourceType, err)
 }
 
 // UnrestrictedPrincipal is a synthetic principal that grants catalog-wide read
@@ -888,9 +942,10 @@ WHERE r.enabled=1 AND ` + predicate
 	// local repository list still returned - which is exactly what "MCP only
 	// shows repositories" looks like from a client.
 	type candidateHits struct {
-		hits []source.QueryResult
-		ref  string
-		err  error
+		hits   []source.QueryResult
+		ref    string
+		err    error
+		paused string
 	}
 	found := make([]candidateHits, len(candidates))
 	slots := make(chan struct{}, sourceQueryConcurrency)
@@ -909,9 +964,9 @@ WHERE r.enabled=1 AND ` + predicate
 				selectedRef = item.defaultRef
 			}
 			found[index].ref = selectedRef
-			adapter, loadErr := s.sources(ctx, item.sourceType)
+			adapter, paused, loadErr := s.remoteSource(ctx, item.sourceType)
 			if loadErr != nil {
-				found[index].err = loadErr
+				found[index].err, found[index].paused = loadErr, paused
 				return
 			}
 			searcher, ok := adapter.(source.QuerySearcher)
@@ -925,14 +980,23 @@ WHERE r.enabled=1 AND ` + predicate
 			} else {
 				span.End(statusFor(len(hits)), len(hits), len(hits), selectedRef)
 			}
+			s.reportRemote(item.sourceType, searchErr)
 			found[index].hits, found[index].err = hits, searchErr
 		}(index, item)
 	}
 	wait.Wait()
 	var out []SourceResult
 	var lastErr error
+	paused := ""
 	for index, item := range candidates {
 		if found[index].err != nil {
+			// A paused source is a degraded answer, not a failed one: the caller
+			// keeps whatever the index returned and is told the live path was
+			// skipped.
+			if errors.Is(found[index].err, ErrSourcePaused) {
+				paused = found[index].paused
+				continue
+			}
 			lastErr = found[index].err
 			continue
 		}
@@ -945,6 +1009,9 @@ WHERE r.enabled=1 AND ` + predicate
 	}
 	if len(out) == 0 && lastErr != nil {
 		return nil, lastErr
+	}
+	if paused != "" && len(out) == 0 {
+		return nil, fmt.Errorf("%w: %s", ErrSourcePaused, paused)
 	}
 	return out, nil
 }
@@ -1127,7 +1194,7 @@ AND NOT EXISTS (SELECT 1 FROM repository_files f WHERE f.repository_id=r.id)`
 	var out []FileResult
 	listed := 0
 	for _, item := range targets {
-		adapter, adapterErr := s.sources(ctx, item.sourceType)
+		adapter, _, adapterErr := s.remoteSource(ctx, item.sourceType)
 		if adapterErr != nil {
 			continue
 		}
@@ -1140,6 +1207,7 @@ AND NOT EXISTS (SELECT 1 FROM repository_files f WHERE f.repository_id=r.id)`
 		}
 		listSpan := calltrace.Start(ctx, "remote-tree", item.libraryID)
 		files, listErr := adapter.ListFiles(ctx, source.RepositoryRef{ProjectKey: item.project, Slug: item.slug}, selectedRef)
+		s.reportRemote(item.sourceType, listErr)
 		if listErr != nil {
 			listSpan.Fail(listErr)
 			continue
@@ -1487,12 +1555,13 @@ func (s *Service) fileBody(ctx context.Context, repositoryID, sourceType, projec
 	if s.sources == nil {
 		return "", "index", []string{"remote: no source connector is configured, so an unindexed file cannot be read."}
 	}
-	adapter, adapterErr := s.sources(ctx, sourceType)
+	adapter, _, adapterErr := s.remoteSource(ctx, sourceType)
 	if adapterErr != nil {
 		return "", "remote", []string{"remote: " + adapterErr.Error()}
 	}
 	remoteSpan := calltrace.Start(ctx, "read-remote", filePath)
 	raw, readErr := adapter.GetFile(ctx, source.RepositoryRef{ProjectKey: project, Slug: slug}, ref, filePath)
+	s.reportRemote(sourceType, readErr)
 	if readErr != nil {
 		remoteSpan.Fail(readErr)
 	} else {
@@ -1829,7 +1898,7 @@ WHERE r.enabled=1 AND ` + predicate
 		go func(index int, item target) {
 			defer wait.Done()
 			defer func() { <-slots }()
-			adapter, adapterErr := s.sources(ctx, item.sourceType)
+			adapter, _, adapterErr := s.remoteSource(ctx, item.sourceType)
 			if adapterErr != nil {
 				errs[index] = adapterErr
 				return
@@ -1840,6 +1909,7 @@ WHERE r.enabled=1 AND ` + predicate
 				return
 			}
 			found[index], errs[index] = searcher.SearchChangeRequests(ctx, source.RepositoryRef{ProjectKey: item.project, Slug: item.slug}, query, state, limit)
+			s.reportRemote(item.sourceType, errs[index])
 		}(index, item)
 	}
 	wait.Wait()
@@ -1900,7 +1970,7 @@ func (s *Service) FileHistory(ctx context.Context, principals []string, libraryI
 	if s.sources == nil {
 		return FileHistory{}, errors.New("no source connector is configured")
 	}
-	adapter, adapterErr := s.sources(ctx, target.sourceType)
+	adapter, _, adapterErr := s.remoteSource(ctx, target.sourceType)
 	if adapterErr != nil {
 		return FileHistory{}, adapterErr
 	}
@@ -1909,6 +1979,7 @@ func (s *Service) FileHistory(ctx context.Context, principals []string, libraryI
 		return FileHistory{}, fmt.Errorf("%s does not expose commit history", target.sourceType)
 	}
 	commits, historyErr := history.ListCommits(ctx, source.RepositoryRef{ProjectKey: target.project, Slug: target.slug}, target.refName, target.path, limit)
+	s.reportRemote(target.sourceType, historyErr)
 	if historyErr != nil {
 		return FileHistory{}, historyErr
 	}
@@ -2228,9 +2299,17 @@ func (s *Service) discoverRemoteCode(ctx context.Context, principals []string, q
 	}
 	failures := 0
 	for _, currentSourceType := range sourceTypes {
-		adapter, err := s.sources(ctx, currentSourceType)
+		adapter, paused, err := s.remoteSource(ctx, currentSourceType)
 		if err != nil {
-			if sourceType != "" {
+			switch {
+			case errors.Is(err, source.ErrNotConfigured):
+				// Only worth saying when the caller asked for this source by name.
+				if sourceType != "" {
+					out.diagnostics = append(out.diagnostics, currentSourceType+": 연동이 설정되어 있지 않습니다.")
+				}
+			case errors.Is(err, ErrSourcePaused):
+				out.diagnostics = append(out.diagnostics, currentSourceType+": "+paused)
+			case sourceType != "":
 				out.diagnostics = append(out.diagnostics, currentSourceType+": adapter is unavailable: "+err.Error())
 			}
 			continue
@@ -2315,6 +2394,7 @@ func (r *remoteScan) prefetchPermissions(ctx context.Context, repositories []sou
 			defer wait.Done()
 			defer func() { <-slots }()
 			permissions, err := r.adapter.GetPermissions(ctx, source.RepositoryRef{ProjectKey: repository.ProjectKey, Slug: repository.Slug})
+			r.service.reportRemote(r.sourceType, err)
 			decision := err == nil && permissionsAllowPrincipals(permissions, r.principals)
 			r.mu.Lock()
 			defer r.mu.Unlock()
@@ -2335,6 +2415,7 @@ func (r *remoteScan) discoverRepositories(ctx context.Context) {
 	searcher, ok := r.adapter.(source.RepositorySearcher)
 	if ok {
 		found, err := searcher.SearchRepositories(ctx, r.query, r.limit*2)
+		r.service.reportRemote(r.sourceType, err)
 		if err == nil {
 			r.collect(ctx, found, false)
 			r.diagnostics = append(r.diagnostics, fmt.Sprintf("%s: repository name search matched %d repositories.", r.sourceType, len(r.repositories)))
@@ -2344,6 +2425,7 @@ func (r *remoteScan) discoverRepositories(ctx context.Context) {
 		r.diagnostics = append(r.diagnostics, r.sourceType+": repository name search failed, falling back to project enumeration: "+err.Error())
 	}
 	projects, err := r.adapter.ListProjects(ctx)
+	r.service.reportRemote(r.sourceType, err)
 	if err != nil {
 		r.failures++
 		r.diagnostics = append(r.diagnostics, r.sourceType+": project discovery failed: "+err.Error())
@@ -2359,6 +2441,7 @@ func (r *remoteScan) discoverRepositories(ctx context.Context) {
 			break
 		}
 		repositories, listErr := r.adapter.ListRepositories(ctx, remoteProject.Key)
+		r.service.reportRemote(r.sourceType, listErr)
 		if listErr != nil {
 			r.failures++
 			continue
@@ -2431,6 +2514,7 @@ func (r *remoteScan) authorize(ctx context.Context, projectKey, slug string) boo
 		return decision
 	}
 	permissions, err := r.adapter.GetPermissions(ctx, source.RepositoryRef{ProjectKey: projectKey, Slug: slug})
+	r.service.reportRemote(r.sourceType, err)
 	decision = err == nil && permissionsAllowPrincipals(permissions, r.principals)
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -2447,6 +2531,7 @@ func (r *remoteScan) searchCode(ctx context.Context) {
 	}
 	if global, ok := r.adapter.(source.GlobalQuerySearcher); ok {
 		results, err := global.SearchGlobalQuery(ctx, r.query, r.limit*2)
+		r.service.reportRemote(r.sourceType, err)
 		switch {
 		case err == nil:
 			r.appendGlobalHits(ctx, results)
@@ -2772,7 +2857,7 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 		if s.sources == nil || (sourceType == "bitbucket" && ref != defaultRef) {
 			return nil
 		}
-		adapter, sourceErr := s.sources(ctx, sourceType)
+		adapter, _, sourceErr := s.remoteSource(ctx, sourceType)
 		if sourceErr != nil {
 			return nil
 		}
@@ -2781,6 +2866,7 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 			return nil
 		}
 		remoteHits, queryErr := querySearcher.SearchQuery(ctx, source.RepositoryRef{ProjectKey: projectKey, Slug: repositorySlug}, ref, NormalizeSourceQuery(query), cfg.FinalK)
+		s.reportRemote(sourceType, queryErr)
 		if queryErr != nil || len(remoteHits) == 0 {
 			return nil
 		}

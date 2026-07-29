@@ -2198,6 +2198,8 @@ function setupOps(capabilities) {
   refreshBackups(capabilities);
   setupIndexPolicyDialog();
   $("#refresh-index-diagnostics").onclick = () => refreshIndexDiagnostics(capabilities);
+  $("#refresh-source-health").onclick = () => refreshSourceHealth(capabilities);
+  refreshSourceHealth(capabilities);
   $("#refresh-setup-status").onclick = refreshSetupStatus;
   refreshSetupStatus();
   if (capabilities.qualityWrite) {
@@ -2955,6 +2957,44 @@ function setupMCPAdmin(capabilities) {
   };
   refreshAll();
 }
+// refreshSourceHealth 는 소스 서버 연동 상태(서킷 브레이커)를 보여 줍니다. 검색이
+// 비는 이유가 "결과 없음"인지 "지금은 호출을 멈춘 상태"인지 구분할 수 있어야
+// 합니다.
+async function refreshSourceHealth(capabilities = activeCapabilities) {
+  if (!capabilities.source) return;
+  const target = $("#source-health");
+  try {
+    const result = (await api("/api/v1/admin/source-health")) || {};
+    const sources = rows(result.sources);
+    target.innerHTML = sources.length
+      ? `<table><thead><tr><th>소스</th><th>상태</th><th>설명</th><th></th></tr></thead><tbody>${sources
+          .map(
+            (item) =>
+              `<tr><td>${esc(item.source)}</td>
+<td><span class="state ${item.healthy ? "ok" : item.state === "open" ? "error" : "warn"}">${esc(item.state)}</span>${item.failures ? `<br><small>연속 실패 ${item.failures}회</small>` : ""}</td>
+<td>${esc(item.detail || "")}</td>
+<td>${item.healthy ? "" : `<button data-source-reset="${esc(item.source)}">지금 재시도</button>`}</td></tr>`,
+          )
+          .join("")}</tbody></table>`
+      : '<p class="field-help">등록된 소스 연동이 없습니다.</p>';
+    $$("[data-source-reset]").forEach(
+      (button) =>
+        (button.hidden = !capabilities.sourceWrite) ||
+        (button.onclick = async () => {
+          try {
+            await api(`/api/v1/admin/source-health/${encodeURIComponent(button.dataset.sourceReset)}/reset`, { method: "POST" });
+            showAdmin(`${button.dataset.sourceReset} 연동을 다시 호출하도록 초기화했습니다.`, true);
+            refreshSourceHealth(capabilities);
+          } catch (error) {
+            showAdmin(error.message, false);
+          }
+        }),
+    );
+  } catch (error) {
+    target.innerHTML = `<div class="notice error">${esc(error.message)}</div>`;
+  }
+}
+
 async function refreshOps(capabilities = activeCapabilities) {
   try {
     const tools = capabilities.mcp ? rows(await api("/api/v1/admin/mcp/tools")) : [];

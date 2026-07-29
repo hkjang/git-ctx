@@ -87,6 +87,9 @@ type App struct {
 	rootCtx            context.Context
 	requestGate        sync.RWMutex
 	backgroundMu       sync.Mutex
+	adapterMu          sync.RWMutex
+	adapters           map[string]cachedAdapter
+	breakers           *source.Breakers
 	bootstrapMu        sync.RWMutex
 	bootstrapPath      string
 	bootstrapPersisted bool
@@ -239,11 +242,14 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 		return provider
 	})
 	a.search.SetSourceLoader(a.sourceAdapter)
+	a.breakers = source.NewBreakers()
+	a.search.SetBreakers(a)
 	a.search.SetKeywordLoader(a.openSearchCandidates)
 	a.search.SetVectorLoader(a.vectorCandidates)
 	a.search.SetGlobalVectorLoader(a.globalVectorCandidates)
 	a.quality = quality.New(s, a.search)
 	a.mcp = mcp.New(a.search, s)
+	a.mcp.SetHealthLoader(func() []source.BreakerState { return a.breakers.States() })
 	a.mcp.SetStrictCompatibilityLoader(a.strictMCPCompatibility)
 	a.routes()
 	a.startBackground()
@@ -499,6 +505,8 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/admin/settings-import", a.authorize(http.HandlerFunc(a.importSettings), "platform-admin"))
 	a.mux.Handle("GET /api/v1/admin/settings/{category}/versions/{version}", a.settingsAuthorize(http.HandlerFunc(a.settingVersion)))
 	a.mux.Handle("POST /api/v1/admin/settings/{category}/versions/{version}/restore", a.settingsAuthorize(http.HandlerFunc(a.restoreSettingVersion)))
+	a.mux.Handle("GET /api/v1/admin/source-health", a.authorize(http.HandlerFunc(a.sourceHealth), "source-admin", "readonly-operator", "mcp-admin"))
+	a.mux.Handle("POST /api/v1/admin/source-health/{source}/reset", a.authorize(http.HandlerFunc(a.resetSourceHealth), "source-admin"))
 	a.mux.Handle("GET /api/v1/admin/mcp/sessions", a.authorize(http.HandlerFunc(a.mcpSessions), "mcp-admin", "auditor", "security-admin"))
 	a.mux.Handle("POST /api/v1/admin/mcp/selfcheck", a.authorize(http.HandlerFunc(a.mcpSelfCheck), "mcp-admin", "source-admin", "search-admin"))
 	// A developer debugging their own agent needs the same X-ray for their own
@@ -2473,13 +2481,61 @@ func (a *App) publicURL(ctx context.Context) string {
 	}
 	return strings.TrimSuffix(a.cfg.PublicURL, "/")
 }
+
+// sourceAdapter returns the adapter for one source type, reusing the one that
+// is already built.
+//
+// It used to construct a new client — and with it a new TLS transport and
+// connection pool — on every call. A single code search fans out over up to
+// twenty-five repositories in parallel and the instance-wide fallback over
+// hundreds, so one MCP call meant hundreds of handshakes to the same server and
+// hundreds of setting decryptions. The adapter is cached per source and
+// rebuilt only when the setting version changes.
 func (a *App) sourceAdapter(ctx context.Context, sourceType string) (source.RepositorySource, error) {
-	settings, err := a.loadSettingMap(ctx, sourceType)
+	var version int
+	err := a.store.DB.QueryRowContext(ctx, a.store.Rebind(`SELECT version FROM system_settings WHERE category=?`), sourceType).Scan(&version)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Not configured is a normal state, and saying so keeps an unused source
+		// out of the connector health screen and out of the circuit breaker.
+		return nil, fmt.Errorf("%w: %s", source.ErrNotConfigured, sourceType)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%s setting is unavailable: %w", sourceType, err)
 	}
-	return sourceAdapterFromMap(sourceType, settings)
+	a.adapterMu.RLock()
+	cached, ok := a.adapters[sourceType]
+	a.adapterMu.RUnlock()
+	if ok && cached.version == version {
+		return cached.adapter, nil
+	}
+	settings, err := a.loadSettingMap(ctx, sourceType)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: %s", source.ErrNotConfigured, sourceType)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s setting is unavailable: %w", sourceType, err)
+	}
+	adapter, err := sourceAdapterFromMap(sourceType, settings)
+	if err != nil {
+		return nil, err
+	}
+	a.adapterMu.Lock()
+	if a.adapters == nil {
+		a.adapters = map[string]cachedAdapter{}
+	}
+	a.adapters[sourceType] = cachedAdapter{adapter: adapter, version: version}
+	a.adapterMu.Unlock()
+	return adapter, nil
 }
+
+// cachedAdapter keeps the adapter with the setting version it was built from,
+// which is what makes an administrator's save take effect on the next call
+// without any explicit invalidation.
+type cachedAdapter struct {
+	adapter source.RepositorySource
+	version int
+}
+
 func sourceAdapterFromMap(sourceType string, settings map[string]any) (source.RepositorySource, error) {
 	baseURL, _ := settings["baseUrl"].(string)
 	token, _ := settings["token"].(string)
@@ -5398,6 +5454,101 @@ func (a *App) saveSettingValue(ctx context.Context, p auth.Principal, category s
 		return err
 	}
 	return tx.Commit()
+}
+
+// Allow and Report implement search.BreakerRegistry. Keeping the registry on
+// the App means the administration screen and the MCP status tool read the same
+// state the search path is acting on.
+func (a *App) Allow(sourceType string) (bool, string) {
+	return a.breakers.Get(sourceType).Allow()
+}
+
+func (a *App) Report(sourceType string, err error) {
+	breaker := a.breakers.Get(sourceType)
+	if err == nil {
+		breaker.Success()
+		return
+	}
+	breaker.Failure(err)
+}
+
+// sourceHealth reports connector health for the operations screen: whether the
+// platform is currently calling each source, why it stopped, and when it will
+// try again.
+func (a *App) sourceHealth(w http.ResponseWriter, r *http.Request) {
+	states := a.breakers.States()
+	known := map[string]bool{}
+	for _, state := range states {
+		known[state.Source] = true
+	}
+	// A configured source with no recorded calls is healthy but unproven; saying
+	// so is more useful than omitting it.
+	out := make([]map[string]any, 0, len(states)+2)
+	for _, state := range states {
+		payload := breakerPayload(state)
+		// A source with no saved configuration is reported as such rather than as
+		// a healthy connector that simply has not been called.
+		var configured int
+		_ = a.store.DB.QueryRowContext(r.Context(), a.store.Rebind(`SELECT COUNT(*) FROM system_settings WHERE category=?`), state.Source).Scan(&configured)
+		if configured == 0 {
+			payload["state"], payload["configured"] = "not-configured", false
+			payload["detail"] = "연동이 설정되어 있지 않습니다."
+		} else {
+			payload["configured"] = true
+		}
+		out = append(out, payload)
+	}
+	for _, sourceType := range []string{"bitbucket", "gitlab", "confluence", "jira"} {
+		if known[sourceType] {
+			continue
+		}
+		var configured int
+		_ = a.store.DB.QueryRowContext(r.Context(), a.store.Rebind(`SELECT COUNT(*) FROM system_settings WHERE category=?`), sourceType).Scan(&configured)
+		if configured == 0 {
+			continue
+		}
+		out = append(out, map[string]any{"source": sourceType, "state": "closed", "healthy": true, "configured": true,
+			"detail": "설정되어 있으나 아직 호출 기록이 없습니다."})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i]["source"].(string) < out[j]["source"].(string) })
+	jsonOut(w, http.StatusOK, map[string]any{"sources": out})
+}
+
+func breakerPayload(state source.BreakerState) map[string]any {
+	detail := "정상적으로 호출하고 있습니다."
+	switch state.State {
+	case "degraded":
+		detail = fmt.Sprintf("최근 %d회 연속 실패: %s", state.Failures, state.LastError)
+	case "open":
+		detail = fmt.Sprintf("연속 실패 %d회로 호출을 멈췄습니다(%s). %s 이후 자동 재시도합니다.",
+			state.Failures, state.LastError, state.RetryAt.UTC().Format(time.RFC3339))
+	case "half-open":
+		detail = fmt.Sprintf("복구를 확인할 차례입니다. 마지막 오류: %s", state.LastError)
+	}
+	return map[string]any{
+		"source": state.Source, "state": state.State, "healthy": state.State == "closed",
+		"failures": state.Failures, "lastError": state.LastError, "openedAt": state.OpenedAt,
+		"retryAt": state.RetryAt, "detail": detail,
+	}
+}
+
+// resetSourceHealth is the administrator's "try again now": after fixing a
+// token or restarting a server, waiting out the back-off is pointless.
+func (a *App) resetSourceHealth(w http.ResponseWriter, r *http.Request) {
+	sourceType := r.PathValue("source")
+	if !settingCategories()[sourceType] {
+		problem(w, http.StatusNotFound, "not_found", "Unknown source")
+		return
+	}
+	a.breakers.Get(sourceType).Reset()
+	// The adapter is dropped too, so a corrected credential is picked up even if
+	// the setting version did not change.
+	a.adapterMu.Lock()
+	delete(a.adapters, sourceType)
+	a.adapterMu.Unlock()
+	p, _ := auth.FromContext(r.Context())
+	a.audit(r, p, "source.health.reset", "source", sourceType, "success", nil)
+	jsonOut(w, http.StatusOK, breakerPayload(a.breakers.Get(sourceType).State(sourceType)))
 }
 
 func boolInt(value bool) int {

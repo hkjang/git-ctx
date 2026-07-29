@@ -223,6 +223,13 @@ type blobHit struct {
 // that run basic search only. Those reject the blobs scope with 400 or 403
 // instead of returning an empty result set.
 func globalSearchUnsupported(err error) bool {
+	// A basic-search instance answers the blobs scope with 400, 403 or 501. The
+	// status is checked first so the decision no longer depends on the wording of
+	// the message body.
+	switch source.StatusOf(err) {
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotImplemented:
+		return true
+	}
 	message := strings.ToLower(err.Error())
 	if strings.Contains(message, "scope") && (strings.Contains(message, "not supported") || strings.Contains(message, "does not have a valid value")) {
 		return true
@@ -544,27 +551,56 @@ func (c *Client) request(ctx context.Context, method, p string, q url.Values, in
 		}
 		body = bytes.NewReader(raw)
 	}
-	req, e := http.NewRequestWithContext(ctx, method, c.endpoint(p, q), body)
-	if e != nil {
-		return nil, e
-	}
-	req.Header.Set("Accept", "application/json")
+	// A request without a body can be replayed, which covers every read call.
+	attempts := source.MaxAttempts
 	if input != nil {
-		req.Header.Set("Content-Type", "application/json")
+		attempts = 1
 	}
-	if c.token != "" {
-		req.Header.Set("PRIVATE-TOKEN", c.token)
+	var lastErr error
+	var wait time.Duration
+	for attempt := 0; attempt < attempts; attempt++ {
+		if wait > 0 {
+			if err := source.Sleep(ctx, wait); err != nil {
+				return nil, err
+			}
+		}
+		req, e := http.NewRequestWithContext(ctx, method, c.endpoint(p, q), body)
+		if e != nil {
+			return nil, e
+		}
+		req.Header.Set("Accept", "application/json")
+		if input != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if c.token != "" {
+			req.Header.Set("PRIVATE-TOKEN", c.token)
+		}
+		resp, e := c.http.Do(req)
+		if e != nil {
+			lastErr = e
+			if ctx.Err() != nil || attempt == attempts-1 {
+				return nil, e
+			}
+			wait = source.RetryDelay(nil, attempt)
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			// The typed error lets the search layer stop on an expired token
+			// instead of repeating it for every repository, and skip a deleted
+			// repository without treating the instance as down.
+			apiErr := &source.APIError{Source: "gitlab", StatusCode: resp.StatusCode, Status: resp.Status,
+				Body: string(raw), RetryAfter: source.RetryDelay(resp, attempt)}
+			if source.RetryableStatus(resp.StatusCode) && attempt < attempts-1 {
+				lastErr, wait = apiErr, apiErr.RetryAfter
+				continue
+			}
+			return nil, apiErr
+		}
+		return resp, nil
 	}
-	resp, e := c.http.Do(req)
-	if e != nil {
-		return nil, e
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		defer resp.Body.Close()
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("gitlab API %s: %s", resp.Status, string(raw))
-	}
-	return resp, nil
+	return nil, lastErr
 }
 func (c *Client) json(ctx context.Context, method, p string, q url.Values, input, output any) error {
 	resp, e := c.request(ctx, method, p, q, input)
@@ -578,6 +614,10 @@ func (c *Client) json(ctx context.Context, method, p string, q url.Values, input
 	}
 	return json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(output)
 }
+
+// maxPages bounds one paginated read at 100 items per page.
+const maxPages = 50
+
 func (c *Client) pages(ctx context.Context, p string, q url.Values, output any) error {
 	if q == nil {
 		q = url.Values{}
@@ -585,7 +625,10 @@ func (c *Client) pages(ctx context.Context, p string, q url.Values, output any) 
 	page := 1
 	// Decode each page into RawMessage first so callers retain strong typing.
 	var all []json.RawMessage
-	for {
+	// An instance with tens of thousands of projects would otherwise be pulled
+	// into memory in full by one discovery call. The cap is high enough for a
+	// normal on-premises group and low enough to stay a bounded request.
+	for pages := 0; pages < maxPages; pages++ {
 		q.Set("per_page", "100")
 		q.Set("page", strconv.Itoa(page))
 		resp, e := c.request(ctx, http.MethodGet, p, q, nil)

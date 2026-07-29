@@ -21,6 +21,7 @@ import (
 	"git-ctx/internal/calltrace"
 	"git-ctx/internal/contentsecurity"
 	"git-ctx/internal/search"
+	"git-ctx/internal/source"
 	"git-ctx/internal/store"
 	"git-ctx/internal/version"
 	"go.opentelemetry.io/otel"
@@ -30,8 +31,11 @@ import (
 )
 
 type Server struct {
-	search     *search.Service
-	store      *store.Store
+	search *search.Service
+	store  *store.Store
+	// health reports the state of the source connectors, so an administrator
+	// asking an agent for platform status sees a paused integration.
+	health     func() []source.BreakerState
 	strictMode func(context.Context) bool
 	mu         sync.Mutex
 	sessions   map[string]*session
@@ -956,6 +960,9 @@ func clip(value string, limit int) string {
 	return strings.TrimSpace(runeSafeCut(value, limit)) + "…"
 }
 
+// SetHealthLoader installs the source connector health source.
+func (s *Server) SetHealthLoader(loader func() []source.BreakerState) { s.health = loader }
+
 func catalogContains(name string) bool {
 	for _, tool := range Catalog() {
 		if tool["name"] == name {
@@ -1154,7 +1161,26 @@ func (s *Server) platformStatus(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("## git-ctx Platform Status\n\n- Version: %s\n- Metadata Database: connected\n- Enabled Repositories: %d\n- Bitbucket Repositories: %d\n- GitLab Repositories: %d\n- Index Jobs Pending: %d\n- Index Jobs Running: %d\n- Index Jobs Failed: %d\n", version.Version, repositories, bitbucket, gitlab, pending, running, failed), nil
+	status := fmt.Sprintf("## git-ctx Platform Status\n\n- Version: %s\n- Metadata Database: connected\n- Enabled Repositories: %d\n- Bitbucket Repositories: %d\n- GitLab Repositories: %d\n- Index Jobs Pending: %d\n- Index Jobs Running: %d\n- Index Jobs Failed: %d\n", version.Version, repositories, bitbucket, gitlab, pending, running, failed)
+	// Connector health belongs in the status an operator asks an agent for: a
+	// paused source is the difference between "nothing matched" and "we are not
+	// currently able to look".
+	if s.health != nil {
+		if states := s.health(); len(states) > 0 {
+			status += "\n### Source Connectors\n"
+			for _, state := range states {
+				status += fmt.Sprintf("- %s: %s", state.Source, state.State)
+				if state.LastError != "" {
+					status += " — " + state.LastError
+				}
+				if !state.RetryAt.IsZero() {
+					status += fmt.Sprintf(" (retry at %s)", state.RetryAt.UTC().Format(time.RFC3339))
+				}
+				status += "\n"
+			}
+		}
+	}
+	return status, nil
 }
 
 func (s *Server) indexJobs(ctx context.Context, p auth.Principal, status string, limit int) (string, error) {

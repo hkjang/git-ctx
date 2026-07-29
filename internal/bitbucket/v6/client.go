@@ -65,20 +65,20 @@ type page[T any] struct {
 	NextPageStart int  `json:"nextPageStart"`
 }
 
-type HTTPError struct {
-	StatusCode int
-	Status     string
-	Body       string
-}
+// HTTPError is the typed non 2xx response. It is source.APIError so that the
+// search layer can tell an expired token from a deleted repository without
+// importing this package.
+type HTTPError = source.APIError
 
-func (e *HTTPError) Error() string {
-	return fmt.Sprintf("bitbucket API %s: %s", e.Status, e.Body)
-}
+// maxPages bounds one paginated read at 1000 items per page, so a single
+// discovery call on a very large instance stays a bounded request instead of
+// loading the whole server into memory.
+const maxPages = 20
 
 func pageAll[T any](ctx context.Context, c *Client, endpoint string) ([]T, error) {
 	start := 0
 	var all []T
-	for {
+	for pages := 0; pages < maxPages; pages++ {
 		q := url.Values{"limit": []string{"1000"}, "start": []string{fmt.Sprint(start)}}
 		var p page[T]
 		if err := c.json(ctx, http.MethodGet, endpoint, q, nil, &p); err != nil {
@@ -90,6 +90,9 @@ func pageAll[T any](ctx context.Context, c *Client, endpoint string) ([]T, error
 		}
 		start = p.NextPageStart
 	}
+	// The cap was reached: return what was read rather than failing, and let the
+	// caller work with a bounded slice of a very large instance.
+	return all, nil
 }
 func (c *Client) ListProjects(ctx context.Context) ([]source.Project, error) {
 	type item struct{ Key, Name, Description string }
@@ -614,26 +617,55 @@ func (c *Client) request(ctx context.Context, method, endpoint string, q url.Val
 	if q != nil {
 		u.RawQuery = q.Encode()
 	}
-	req, e := http.NewRequestWithContext(ctx, method, u.String(), body)
-	if e != nil {
-		return nil, e
+	// Only a request without a body can be replayed. Every read call qualifies,
+	// and the one write call (webhook registration) is left to the caller.
+	attempts := source.MaxAttempts
+	if body != nil {
+		attempts = 1
 	}
-	req.Header.Set("Accept", "application/json")
-	if c.cfg.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.cfg.Token)
-	} else if c.cfg.Username != "" {
-		req.SetBasicAuth(c.cfg.Username, c.cfg.Password)
+	var lastErr error
+	var wait time.Duration
+	for attempt := 0; attempt < attempts; attempt++ {
+		if wait > 0 {
+			if err := source.Sleep(ctx, wait); err != nil {
+				return nil, err
+			}
+		}
+		req, e := http.NewRequestWithContext(ctx, method, u.String(), body)
+		if e != nil {
+			return nil, e
+		}
+		req.Header.Set("Accept", "application/json")
+		if c.cfg.Token != "" {
+			req.Header.Set("Authorization", "Bearer "+c.cfg.Token)
+		} else if c.cfg.Username != "" {
+			req.SetBasicAuth(c.cfg.Username, c.cfg.Password)
+		}
+		resp, e := c.http.Do(req)
+		if e != nil {
+			// A connection reset or a closed keep-alive is worth one more try; a
+			// cancelled context is not.
+			lastErr = e
+			if ctx.Err() != nil || attempt == attempts-1 {
+				return nil, e
+			}
+			wait = source.RetryDelay(nil, attempt)
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			resp.Body.Close()
+			apiErr := &HTTPError{Source: "bitbucket", StatusCode: resp.StatusCode, Status: resp.Status, Body: string(limited),
+				RetryAfter: source.RetryDelay(resp, attempt)}
+			if source.RetryableStatus(resp.StatusCode) && attempt < attempts-1 {
+				lastErr, wait = apiErr, apiErr.RetryAfter
+				continue
+			}
+			return nil, apiErr
+		}
+		return resp, nil
 	}
-	resp, e := c.http.Do(req)
-	if e != nil {
-		return nil, e
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		defer resp.Body.Close()
-		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, &HTTPError{StatusCode: resp.StatusCode, Status: resp.Status, Body: string(limited)}
-	}
-	return resp, nil
+	return nil, lastErr
 }
 func (c *Client) json(ctx context.Context, method, endpoint string, q url.Values, input, output any) error {
 	var body io.Reader

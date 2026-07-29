@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.33.0
+  version: 0.34.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -635,6 +635,20 @@ paths:
         summary: Change tool enabled state timeout cache and response budget,
         parameters: [{ $ref: "#/components/parameters/Id" }],
         responses: { "200": { description: Updated policy } },
+      }
+  /api/v1/admin/source-health:
+    get:
+      {
+        summary: Circuit breaker state of every source connector with the reason it stopped and when it retries,
+        responses: { "200": { description: Connector health } },
+      }
+  /api/v1/admin/source-health/{source}/reset:
+    post:
+      {
+        summary: Resume calling a paused source immediately and drop its cached adapter,
+        parameters:
+          [{ name: source, in: path, required: true, schema: { type: string } }],
+        responses: { "200": { description: New connector state } },
       }
   /api/v1/admin/mcp/analytics:
     get:

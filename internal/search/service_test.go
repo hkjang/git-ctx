@@ -1044,3 +1044,105 @@ func TestRerankerRunsAfterACLAndChangesFinalOrder(t *testing.T) {
 		t.Fatal("unauthorized query unexpectedly reached results")
 	}
 }
+
+// failingSource stands in for a source server that is down. Every call fails
+// the same way a connection error does.
+type failingSource struct {
+	querySource
+	mu    sync.Mutex
+	calls int
+}
+
+func (f *failingSource) SearchQuery(context.Context, source.RepositoryRef, string, string, int) ([]source.QueryResult, error) {
+	f.mu.Lock()
+	f.calls++
+	f.mu.Unlock()
+	return nil, errors.New("dial tcp 10.0.0.9:443: connect: connection refused")
+}
+
+// countingBreaker is the registry the service talks to, with the same contract
+// the application implements over source.Breakers.
+type countingBreaker struct {
+	mu       sync.Mutex
+	failures int
+	open     bool
+}
+
+func (c *countingBreaker) Allow(string) (bool, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.open {
+		return false, "연동이 일시 중단되었습니다."
+	}
+	return true, ""
+}
+
+func (c *countingBreaker) Report(_ string, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err == nil {
+		c.failures = 0
+		return
+	}
+	c.failures++
+	if c.failures >= 3 {
+		c.open = true
+	}
+}
+
+// When a source server is down the search must stop calling it, keep answering
+// from the index, and say that the live path was skipped — instead of spending
+// the whole tool timeout on one failing host per repository.
+func TestFailingSourceIsPausedAndReported(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:breaker-search?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	for index := 0; index < 5; index++ {
+		id := fmt.Sprintf("gpu-%d", index)
+		if _, err = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES(?,'core',?,?,'gitlab',?,?,'main')`,
+			id, id, id, id, "/core/"+id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES(?,'alice','read')`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service := New(db)
+	remote := &failingSource{}
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) { return remote, nil })
+	breaker := &countingBreaker{}
+	service.SetBreakers(breaker)
+
+	if _, err = service.SearchSource(ctx, []string{"alice"}, "gpu", "gitlab", "", "", "", 10); err == nil {
+		t.Fatal("a failing source must report an error on the first search")
+	}
+	firstRound := remote.calls
+	if firstRound == 0 {
+		t.Fatal("the first search must actually try the source")
+	}
+
+	// The breaker is open now, so the next search must not touch the server.
+	result, err := service.SearchSource(ctx, []string{"alice"}, "gpu", "gitlab", "", "", "", 10)
+	if err == nil || !errors.Is(err, ErrSourcePaused) {
+		t.Fatalf("a paused source must be reported as paused: %v %#v", err, result)
+	}
+	if remote.calls != firstRound {
+		t.Fatalf("the paused source was called again: %d then %d", firstRound, remote.calls)
+	}
+
+	// search-code keeps working: the repository list comes from the index and the
+	// diagnostics explain that the live search was skipped.
+	code, err := service.SearchCode(ctx, []string{"alice"}, "gpu", "gitlab", "", "", "", 10)
+	if err != nil {
+		t.Fatalf("search-code must degrade instead of failing: %v", err)
+	}
+	if len(code.Repositories) == 0 {
+		t.Fatal("the indexed repository list must still be returned")
+	}
+	if !strings.Contains(strings.Join(code.Diagnostics, " "), "일시 중단") {
+		t.Fatalf("the diagnostics must state that the source is paused: %v", code.Diagnostics)
+	}
+}

@@ -141,6 +141,7 @@ assert.match(script, /api\/v1\/admin\/mcp\/analytics/);
 assert.match(script, /api\/v1\/admin\/mcp\/calls/);
 assert.match(script, /api\/v1\/admin\/mcp\/sessions/);
 assert.match(script, /api\/v1\/admin\/settings-export/);
+assert.match(script, /api\/v1\/admin\/source-health/);
 assert.match(script, /api\/v1\/admin\/settings-import/);
 assert.match(script, /versions\/\$\{version\}\/restore/);
 assert.match(script, /api\/v1\/admin\/mcp\/selfcheck/);
