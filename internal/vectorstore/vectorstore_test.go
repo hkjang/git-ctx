@@ -56,6 +56,7 @@ func TestVectorLiteralMatchesPostgresFormat(t *testing.T) {
 func TestMilvusClientCreatesSearchesAndSurfacesAPIErrors(t *testing.T) {
 	var paths []string
 	fail := false
+	upsertRevision := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.Path)
 		if r.Header.Get("Authorization") != "Bearer user:secret" {
@@ -72,10 +73,17 @@ func TestMilvusClientCreatesSearchesAndSurfacesAPIErrors(t *testing.T) {
 		case strings.HasSuffix(r.URL.Path, "/collections/list"):
 			_, _ = w.Write([]byte(`{"code":0,"data":["git_ctx_chunk_vectors"]}`))
 		case strings.HasSuffix(r.URL.Path, "/entities/search"):
-			if payload["annsField"] != "vector" || payload["limit"] != float64(5) {
+			if payload["annsField"] != "vector" || payload["limit"] != float64(5) || !strings.Contains(payload["filter"].(string), `embedding_revision == "model-v2"`) {
 				t.Errorf("search payload=%v", payload)
 			}
 			_, _ = w.Write([]byte(`{"code":0,"data":[{"id":"c1","distance":0.91},{"id":"c2","distance":0.4}]}`))
+		case strings.HasSuffix(r.URL.Path, "/entities/upsert"):
+			data, _ := payload["data"].([]any)
+			if len(data) > 0 {
+				item, _ := data[0].(map[string]any)
+				upsertRevision = item["embedding_revision"] == "model-v2"
+			}
+			_, _ = w.Write([]byte(`{"code":0,"data":{}}`))
 		default:
 			_, _ = w.Write([]byte(`{"code":0,"data":{}}`))
 		}
@@ -91,10 +99,13 @@ func TestMilvusClientCreatesSearchesAndSurfacesAPIErrors(t *testing.T) {
 	if store.Name() != "milvus" {
 		t.Fatalf("name=%s", store.Name())
 	}
-	if err = store.Upsert(context.Background(), []Chunk{{ID: "c1", RepositoryID: "r", Ref: "main", Vector: []float32{1, 0, 0, 0}}}); err != nil {
+	if err = store.Upsert(context.Background(), []Chunk{{ID: "c1", RepositoryID: "r", Ref: "main", Revision: "model-v2", Vector: []float32{1, 0, 0, 0}}}); err != nil {
 		t.Fatal(err)
 	}
-	matches, err := store.Search(context.Background(), "r", "main", []float32{1, 0, 0, 0}, 5)
+	if !upsertRevision {
+		t.Fatal("embedding revision was not projected to Milvus")
+	}
+	matches, err := store.Search(context.Background(), "r", "main", "model-v2", []float32{1, 0, 0, 0}, 5)
 	if err != nil || len(matches) != 2 || matches[0].ID != "c1" || matches[0].Score < 0.9 {
 		t.Fatalf("matches=%#v err=%v", matches, err)
 	}
@@ -102,7 +113,7 @@ func TestMilvusClientCreatesSearchesAndSurfacesAPIErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	fail = true
-	if _, err = store.Search(context.Background(), "r", "main", []float32{1, 0, 0, 0}, 5); err == nil || !strings.Contains(err.Error(), "collection not loaded") {
+	if _, err = store.Search(context.Background(), "r", "main", "model-v2", []float32{1, 0, 0, 0}, 5); err == nil || !strings.Contains(err.Error(), "collection not loaded") {
 		t.Fatalf("an API level error must surface: %v", err)
 	}
 	if len(paths) == 0 {

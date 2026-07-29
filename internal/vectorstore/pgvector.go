@@ -70,13 +70,20 @@ func (p *postgresStore) Ensure(ctx context.Context, dimensions int) error {
   ref_name TEXT NOT NULL,
   library_id TEXT NOT NULL DEFAULT '',
   file_path TEXT NOT NULL DEFAULT '',
+  embedding_revision TEXT NOT NULL DEFAULT '',
   embedding %s(%d) NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 )`, p.table, vectorType, dimensions)
 	if _, err := p.db.ExecContext(ctx, create); err != nil {
 		return err
 	}
-	if _, err := p.db.ExecContext(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_repo_ref ON %s (repository_id, ref_name)`, p.table, p.table)); err != nil {
+	// Collections created before vector-space revision tracking are upgraded in
+	// place. Existing rows remain revisionless and are therefore excluded from
+	// model-specific queries until the normal projection job republishes them.
+	if _, err := p.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS embedding_revision TEXT NOT NULL DEFAULT ''`, p.table)); err != nil {
+		return err
+	}
+	if _, err := p.db.ExecContext(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_repo_ref_revision ON %s (repository_id, ref_name, embedding_revision)`, p.table, p.table)); err != nil {
 		return err
 	}
 	// HNSW gives good recall without tuning a list count. Older pgvector builds
@@ -98,17 +105,17 @@ func (p *postgresStore) Upsert(ctx context.Context, chunks []Chunk) error {
 		end := min(start+upsertBatch, len(chunks))
 		batch := chunks[start:end]
 		var values strings.Builder
-		args := make([]any, 0, len(batch)*6)
+		args := make([]any, 0, len(batch)*7)
 		for index, chunk := range batch {
 			if index > 0 {
 				values.WriteByte(',')
 			}
-			base := index * 6
-			fmt.Fprintf(&values, "($%d,$%d,$%d,$%d,$%d,$%d::%s)", base+1, base+2, base+3, base+4, base+5, base+6, vectorType)
-			args = append(args, chunk.ID, chunk.RepositoryID, chunk.Ref, chunk.LibraryID, chunk.FilePath, literal(chunk.Vector))
+			base := index * 7
+			fmt.Fprintf(&values, "($%d,$%d,$%d,$%d,$%d,$%d,$%d::%s)", base+1, base+2, base+3, base+4, base+5, base+6, base+7, vectorType)
+			args = append(args, chunk.ID, chunk.RepositoryID, chunk.Ref, chunk.LibraryID, chunk.FilePath, chunk.Revision, literal(chunk.Vector))
 		}
-		statement := fmt.Sprintf(`INSERT INTO %s (id,repository_id,ref_name,library_id,file_path,embedding) VALUES %s
-ON CONFLICT (id) DO UPDATE SET repository_id=excluded.repository_id,ref_name=excluded.ref_name,library_id=excluded.library_id,file_path=excluded.file_path,embedding=excluded.embedding,updated_at=now()`,
+		statement := fmt.Sprintf(`INSERT INTO %s (id,repository_id,ref_name,library_id,file_path,embedding_revision,embedding) VALUES %s
+ON CONFLICT (id) DO UPDATE SET repository_id=excluded.repository_id,ref_name=excluded.ref_name,library_id=excluded.library_id,file_path=excluded.file_path,embedding_revision=excluded.embedding_revision,embedding=excluded.embedding,updated_at=now()`,
 			p.table, values.String())
 		if _, err := p.db.ExecContext(ctx, statement, args...); err != nil {
 			return err
@@ -122,7 +129,7 @@ func (p *postgresStore) DeleteRef(ctx context.Context, repositoryID, ref string)
 	return err
 }
 
-func (p *postgresStore) Search(ctx context.Context, repositoryID, ref string, vector []float32, limit int) ([]Match, error) {
+func (p *postgresStore) Search(ctx context.Context, repositoryID, ref, revision string, vector []float32, limit int) ([]Match, error) {
 	if len(vector) == 0 {
 		return nil, errors.New("query vector is empty")
 	}
@@ -134,9 +141,15 @@ func (p *postgresStore) Search(ctx context.Context, repositoryID, ref string, ve
 	}
 	schema, vectorType := quoteIdentifier(p.extensionSchema), quoteIdentifier(p.extensionSchema)+".vector"
 	// `<=>` is cosine distance in pgvector, so similarity is 1 - distance.
+	filter := `repository_id=$2 AND ref_name=$3`
+	args := []any{literal(vector), repositoryID, ref}
+	if revision != "" {
+		filter += ` AND embedding_revision=$4`
+		args = append(args, revision)
+	}
 	statement := fmt.Sprintf(`SELECT id, 1 - (embedding OPERATOR(%s.<=>) $1::%s) AS score FROM %s
-WHERE repository_id=$2 AND ref_name=$3 ORDER BY embedding OPERATOR(%s.<=>) $1::%s LIMIT %d`, schema, vectorType, p.table, schema, vectorType, limit)
-	rows, err := p.db.QueryContext(ctx, statement, literal(vector), repositoryID, ref)
+WHERE %s ORDER BY embedding OPERATOR(%s.<=>) $1::%s LIMIT %d`, schema, vectorType, p.table, filter, schema, vectorType, limit)
+	rows, err := p.db.QueryContext(ctx, statement, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +165,7 @@ WHERE repository_id=$2 AND ref_name=$3 ORDER BY embedding OPERATOR(%s.<=>) $1::%
 	return out, rows.Err()
 }
 
-func (p *postgresStore) SearchGlobal(ctx context.Context, vector []float32, limit int) ([]Match, error) {
+func (p *postgresStore) SearchGlobal(ctx context.Context, revision string, vector []float32, limit int) ([]Match, error) {
 	if len(vector) == 0 {
 		return nil, errors.New("query vector is empty")
 	}
@@ -163,8 +176,14 @@ func (p *postgresStore) SearchGlobal(ctx context.Context, vector []float32, limi
 		return nil, err
 	}
 	schema, vectorType := quoteIdentifier(p.extensionSchema), quoteIdentifier(p.extensionSchema)+".vector"
-	statement := fmt.Sprintf(`SELECT id, 1 - (embedding OPERATOR(%s.<=>) $1::%s) AS score FROM %s ORDER BY embedding OPERATOR(%s.<=>) $1::%s LIMIT %d`, schema, vectorType, p.table, schema, vectorType, limit)
-	rows, err := p.db.QueryContext(ctx, statement, literal(vector))
+	filter := ""
+	args := []any{literal(vector)}
+	if revision != "" {
+		filter = ` WHERE embedding_revision=$2`
+		args = append(args, revision)
+	}
+	statement := fmt.Sprintf(`SELECT id, 1 - (embedding OPERATOR(%s.<=>) $1::%s) AS score FROM %s%s ORDER BY embedding OPERATOR(%s.<=>) $1::%s LIMIT %d`, schema, vectorType, p.table, filter, schema, vectorType, limit)
+	rows, err := p.db.QueryContext(ctx, statement, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -112,6 +112,20 @@ func TestRetrievalPolicyChangeQueuesEachRefOnce(t *testing.T) {
 	if kind != "retrieval-policy" || status != "pending" {
 		t.Fatalf("kind=%s status=%s", kind, status)
 	}
+	_, _ = db.DB.Exec(`UPDATE index_jobs SET status='completed'`)
+	queued, err = a.enqueueEmbeddingRevisionReindex(ctx, "sha256:new-model")
+	if err != nil || queued != 1 {
+		t.Fatalf("embedding repair queued=%d err=%v", queued, err)
+	}
+	if err = db.DB.QueryRow(`SELECT kind,status FROM index_jobs WHERE kind='embedding-revision'`).Scan(&kind, &status); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "embedding-revision" || status != "pending" {
+		t.Fatalf("embedding kind=%s status=%s", kind, status)
+	}
+	if queued, err = a.enqueueEmbeddingRevisionReindex(ctx, "sha256:new-model"); err != nil || queued != 0 {
+		t.Fatalf("duplicate embedding repair queued=%d err=%v", queued, err)
+	}
 }
 
 func TestNotificationWebhookConnectionTestAndSecretMasking(t *testing.T) {
@@ -828,7 +842,11 @@ func TestPublicAndAdminDatabaseStatus(t *testing.T) {
 	}
 }
 
-func TestAdministrativeEmbeddingHealthReportsOperationalFallback(t *testing.T) {
+func TestAdministrativeEmbeddingHealthReportsRevisionMismatch(t *testing.T) {
+	modelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
+	}))
+	defer modelServer.Close()
 	a, err := New(context.Background(), config.Config{
 		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "embedding-health.db") + "?_foreign_keys=on",
 		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
@@ -838,8 +856,16 @@ func TestAdministrativeEmbeddingHealthReportsOperationalFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer a.Close()
+	modelRequest := httptest.NewRequest(http.MethodPut, "/api/v1/admin/settings/model", strings.NewReader(fmt.Sprintf(`{"provider":"openai-compatible","baseUrl":%q,"model":"model-v2","apiKey":"secret"}`, modelServer.URL)))
+	modelRequest.Header.Set("Authorization", "Bearer bootstrap")
+	modelRequest.Header.Set("Content-Type", "application/json")
+	modelResult := httptest.NewRecorder()
+	a.Handler().ServeHTTP(modelResult, modelRequest)
+	if modelResult.Code != http.StatusOK {
+		t.Fatalf("model setting=%d body=%s", modelResult.Code, modelResult.Body.String())
+	}
 	_, _ = a.store.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r','core','dify','Dify','gitlab','1','/core/dify','main')`)
-	_, _ = a.store.DB.Exec(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,total_chunks,embedded_chunks,embedding_status) VALUES('r','main','abc',10,2,'partial')`)
+	_, _ = a.store.DB.Exec(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,embedding_revision,total_chunks,embedded_chunks,embedding_status) VALUES('r','main','abc','model-v1',10,2,'partial')`)
 
 	request := func(path string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -849,17 +875,17 @@ func TestAdministrativeEmbeddingHealthReportsOperationalFallback(t *testing.T) {
 		return rec
 	}
 	vector := request("/api/v1/admin/vector/status")
-	for _, expected := range []string{`"requestedRetrievalMode":"hybrid-fallback"`, `"operationalMode":"keyword-only"`, `"embeddingCoveragePercent":20`, `"partialRefs":1`, `"minimumEmbeddingCoveragePercent":80`} {
+	for _, expected := range []string{`"requestedRetrievalMode":"hybrid-fallback"`, `"operationalMode":"keyword-only"`, `"embeddingCoveragePercent":0`, `"storedVectors":2`, `"compatibleVectors":0`, `"incompatibleRefs":1`, `"partialRefs":1`, `"minimumEmbeddingCoveragePercent":80`} {
 		if vector.Code != http.StatusOK || !strings.Contains(vector.Body.String(), expected) {
 			t.Fatalf("vector status=%d body=%s missing=%s", vector.Code, vector.Body.String(), expected)
 		}
 	}
 	health := request("/api/v1/admin/health")
-	if health.Code != http.StatusOK || !strings.Contains(health.Body.String(), `"operationalMode":"keyword-only"`) || !strings.Contains(health.Body.String(), `"coveragePercent":20`) {
+	if health.Code != http.StatusOK || !strings.Contains(health.Body.String(), `"operationalMode":"keyword-only"`) || !strings.Contains(health.Body.String(), `"coveragePercent":0`) || !strings.Contains(health.Body.String(), `"incompatibleRefs":1`) {
 		t.Fatalf("health=%d body=%s", health.Code, health.Body.String())
 	}
 	metrics := request("/metrics")
-	if metrics.Code != http.StatusOK || !strings.Contains(metrics.Body.String(), "git_ctx_embedding_coverage_percent 20.000") || !strings.Contains(metrics.Body.String(), "git_ctx_embedding_circuit_open 0") {
+	if metrics.Code != http.StatusOK || !strings.Contains(metrics.Body.String(), "git_ctx_embedding_coverage_percent 0.000") || !strings.Contains(metrics.Body.String(), "git_ctx_embedding_incompatible_refs 1") || !strings.Contains(metrics.Body.String(), "git_ctx_embedding_circuit_open 0") {
 		t.Fatalf("metrics=%d body=%s", metrics.Code, metrics.Body.String())
 	}
 }

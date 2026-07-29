@@ -1729,7 +1729,7 @@ async function refreshVectorStatus() {
       circuit.retryAt && !String(circuit.retryAt).startsWith("0001-")
         ? ` · 다음 시험 ${new Date(circuit.retryAt).toLocaleString()}`
         : "";
-    const circuitLine = `모델 Circuit: ${circuit.state || "idle"} · 연속 실패 ${circuit.consecutiveFailures || 0} · 요청 ${circuit.requests || 0} · 실패 ${circuit.failures || 0} · 캐시 적중 ${circuit.cacheHits || 0} / 보관 ${circuit.cacheEntries || 0}${retryAt}`;
+    const circuitLine = `모델 Circuit: ${circuit.state || "idle"} · 연속 실패 ${circuit.consecutiveFailures || 0} · 요청 ${circuit.requests || 0} · 실패 ${circuit.failures || 0} · 캐시 적중 ${circuit.cacheHits || 0} / 보관 ${circuit.cacheEntries || 0} · 동시 요청 병합 ${circuit.coalesced || 0}${retryAt}`;
     const fallbackSummary = Object.entries(circuit.fallbacks || {})
       .filter(([, count]) => count > 0)
       .map(([reason, count]) => `${reason} ${count}회`)
@@ -1740,7 +1740,7 @@ async function refreshVectorStatus() {
       (circuit.lastError ? `<li>마지막 모델 오류: ${esc(circuit.lastError)}</li>` : "");
     if (!status.configured) {
       panel.className = "result-panel";
-      panel.innerHTML = `<h4>벡터 DB 미사용 · 실제 동작 ${esc(status.operationalMode || status.retrievalMode || "keyword-only")}</h4><ul class="result-list"><li>${esc(status.detail)}</li><li>요청 정책 ${esc(status.requestedRetrievalMode || "-")} · 적용 설정 ${esc(status.retrievalMode || "-")}</li><li>임베딩 커버리지 ${Number(status.embeddingCoveragePercent || 0).toFixed(1)}% · 최소 ${Number(status.minimumEmbeddingCoveragePercent || 0).toFixed(1)}% · 전체 청크 ${status.totalChunks || 0}개 / 임베딩 ${status.storedVectors || 0}개</li>${status.degradedReason ? `<li>자동 폴백 사유: ${esc(status.degradedReason)}</li>` : ""}${runtimeDetails}</ul>`;
+      panel.innerHTML = `<h4>벡터 DB 미사용 · 실제 동작 ${esc(status.operationalMode || status.retrievalMode || "keyword-only")}</h4><ul class="result-list"><li>${esc(status.detail)}</li><li>요청 정책 ${esc(status.requestedRetrievalMode || "-")} · 적용 설정 ${esc(status.retrievalMode || "-")}</li><li>호환 임베딩 커버리지 ${Number(status.embeddingCoveragePercent || 0).toFixed(1)}% · 최소 ${Number(status.minimumEmbeddingCoveragePercent || 0).toFixed(1)}% · 전체 ${status.totalChunks || 0}개 / 현재 모델 ${status.compatibleVectors || 0}개 / 저장 전체 ${status.storedVectors || 0}개</li><li>다른 모델 revision Ref ${status.incompatibleRefs || 0}개</li>${status.degradedReason ? `<li>자동 폴백 사유: ${esc(status.degradedReason)}</li>` : ""}${runtimeDetails}</ul>`;
       return;
     }
     const ready = status.ready && !status.error;
@@ -1755,8 +1755,8 @@ async function refreshVectorStatus() {
         ? `<li>pgvector ${esc(status.extensionVersion)} · 스키마 <code>${esc(status.extensionSchema || "-")}</code></li>`
         : "") +
       `<li>검색 정책: 요청 <code>${esc(status.requestedRetrievalMode || "-")}</code> · 실제 <code>${esc(status.operationalMode || status.retrievalMode || "-")}</code></li>` +
-      `<li>벡터 DB ${status.vectors ?? 0}개 / 메타 DB 임베딩 ${status.storedVectors}개 · 전체 청크 ${status.totalChunks || 0}개 (커버리지 ${Number(status.embeddingCoveragePercent || 0).toFixed(1)}% / 최소 ${Number(status.minimumEmbeddingCoveragePercent || 0).toFixed(1)}%)</li>` +
-      `<li>Ref 상태: 준비 ${status.readyRefs || 0} · 부분 ${status.partialRefs || 0} · 저하 ${status.degradedRefs || 0} · 사용불가 ${status.unavailableRefs || 0}</li>` +
+      `<li>벡터 DB ${status.vectors ?? 0}개 / 현재 모델 호환 ${status.compatibleVectors || 0}개 / 저장 전체 ${status.storedVectors || 0}개 · 전체 청크 ${status.totalChunks || 0}개 (호환 커버리지 ${Number(status.embeddingCoveragePercent || 0).toFixed(1)}% / 최소 ${Number(status.minimumEmbeddingCoveragePercent || 0).toFixed(1)}%)</li>` +
+      `<li>Ref 상태: 준비 ${status.readyRefs || 0} · 부분 ${status.partialRefs || 0} · 저하 ${status.degradedRefs || 0} · 사용불가 ${status.unavailableRefs || 0} · 다른 모델 ${status.incompatibleRefs || 0}</li>` +
       runtimeDetails +
       (status.degradedReason ? `<li>자동 폴백 사유: ${esc(status.degradedReason)}</li>` : "") +
       `<li>${esc(status.error || status.detail || "")}</li></ul>`;

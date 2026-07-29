@@ -216,7 +216,7 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 		embeddingMetadata = provider.EmbeddingMetadata()
 		metadataKnown = embeddingMetadata.Provider != "" && embeddingMetadata.Model != ""
 	}
-	embeddingRevision := embeddingMetadata.Provider + "\x00" + embeddingMetadata.Model + "\x00" + embeddingMetadata.Revision
+	embeddingRevision := embeddingMetadata.Identity()
 	if i.embedder == nil {
 		embeddingRevision = "keyword-only"
 	}

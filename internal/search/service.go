@@ -34,6 +34,10 @@ type Config struct {
 	RerankLimit       int
 	SourceQuerySearch bool
 	RetrievalMode     string
+	// EmbeddingRevision is the exact vector-space identity expected by the
+	// configured model. Stored vectors from another model or endpoint are never
+	// mixed into scoring while a rolling reindex is in progress.
+	EmbeddingRevision string
 	// MinimumEmbeddingCoverage prevents a partially embedded corpus from
 	// silently biasing ranking toward the few refs that have vectors.
 	MinimumEmbeddingCoverage float64
@@ -1693,7 +1697,7 @@ func (s *Service) SemanticSearch(ctx context.Context, principals []string, query
 		scopeArgs = append(scopeArgs, sourceType)
 	}
 	if cfg.MinimumEmbeddingCoverage > 0 {
-		coverage, coverageErr := s.semanticEmbeddingCoverage(ctx, join, predicate, aclArgs, scoped, scopeArgs)
+		coverage, coverageErr := s.semanticEmbeddingCoverage(ctx, join, predicate, aclArgs, scoped, scopeArgs, cfg.EmbeddingRevision)
 		if coverageErr == nil && coverage.Total == 0 {
 			if cfg.RequiresEmbeddings() {
 				return SemanticSearch{}, errors.New("embedding retrieval is required but no accessible indexed chunks are available")
@@ -1704,17 +1708,28 @@ func (s *Service) SemanticSearch(ctx context.Context, principals []string, query
 		}
 		if coverageErr == nil && coverage.Percent() < cfg.MinimumEmbeddingCoverage {
 			message := fmt.Sprintf("embedding coverage %.1f%% is below the configured %.1f%% minimum", coverage.Percent(), cfg.MinimumEmbeddingCoverage)
+			fallbackReason := "coverage-below-threshold"
+			if coverage.IncompatibleRefs > 0 {
+				message = fmt.Sprintf("%d accessible refs use a different embedding model revision; compatible %s", coverage.IncompatibleRefs, message)
+				fallbackReason = "embedding-revision-mismatch"
+			}
 			if cfg.RequiresEmbeddings() {
 				return SemanticSearch{}, errors.New("embedding retrieval is required but " + message)
 			}
-			s.reportFallback("coverage-below-threshold")
+			s.reportFallback(fallbackReason)
 			return s.lexicalSemanticFallback(ctx, principals, query, libraryID, sourceType, limit,
 				"keyword/source-query fallback", message+".")
 		}
 	}
+	revisionFilter := ""
+	var revisionArgs []any
+	if cfg.EmbeddingRevision != "" {
+		revisionFilter = ` AND c.embedding_revision=?`
+		revisionArgs = append(revisionArgs, cfg.EmbeddingRevision)
+	}
 	selectClause := `SELECT c.id,r.library_id,r.source_type,c.ref_name,c.commit_id,c.file_path,c.heading,c.content,c.line_start,c.line_end,c.embedding
 FROM document_chunks c JOIN repositories r ON r.id=c.repository_id ` + join + `
-WHERE r.enabled=1 AND c.embedding IS NOT NULL AND ` + predicate
+WHERE r.enabled=1 AND c.embedding IS NOT NULL AND ` + predicate + revisionFilter
 
 	// The query vector comes from the configured provider so it lives in the same
 	// space as the stored chunks.
@@ -1773,6 +1788,7 @@ WHERE r.enabled=1 AND c.embedding IS NOT NULL AND ` + predicate
 			}
 			statement = selectClause + ` AND c.id IN (` + strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",") + `)` + scoped
 			args = append(args, aclArgs...)
+			args = append(args, revisionArgs...)
 			args = append(args, ids...)
 			args = append(args, scopeArgs...)
 			result.Mode = "vector database ANN"
@@ -1795,6 +1811,7 @@ semanticScan:
 	statement = selectClause + scoped + fmt.Sprintf(" LIMIT %d", semanticScanLimit)
 	args = args[:0]
 	args = append(args, aclArgs...)
+	args = append(args, revisionArgs...)
 	args = append(args, scopeArgs...)
 	scanSpan := calltrace.Start(ctx, "embedding-scan", "")
 	hits, scanned, err := s.collectSemanticHits(ctx, statement, args, queryVector, nil, limit)
@@ -1825,7 +1842,7 @@ semanticScan:
 }
 
 type EmbeddingCoverage struct {
-	Total, Embedded int64
+	Total, Embedded, IncompatibleRefs int64
 }
 
 func (c EmbeddingCoverage) Percent() float64 {
@@ -1835,13 +1852,22 @@ func (c EmbeddingCoverage) Percent() float64 {
 	return float64(c.Embedded) * 100 / float64(c.Total)
 }
 
-func (s *Service) semanticEmbeddingCoverage(ctx context.Context, join, predicate string, aclArgs []any, scoped string, scopeArgs []any) (EmbeddingCoverage, error) {
-	statement := `SELECT COALESCE(SUM(rs.total_chunks),0),COALESCE(SUM(rs.embedded_chunks),0)
+func (s *Service) semanticEmbeddingCoverage(ctx context.Context, join, predicate string, aclArgs []any, scoped string, scopeArgs []any, revision string) (EmbeddingCoverage, error) {
+	embedded := `COALESCE(SUM(rs.embedded_chunks),0)`
+	incompatible := `0`
+	args := make([]any, 0, len(aclArgs)+len(scopeArgs)+2)
+	if revision != "" {
+		embedded = `COALESCE(SUM(CASE WHEN rs.embedding_revision=? THEN rs.embedded_chunks ELSE 0 END),0)`
+		incompatible = `COALESCE(SUM(CASE WHEN rs.embedded_chunks>0 AND rs.embedding_revision<>? THEN 1 ELSE 0 END),0)`
+		args = append(args, revision, revision)
+	}
+	statement := `SELECT COALESCE(SUM(rs.total_chunks),0),` + embedded + `,` + incompatible + `
 FROM repository_ref_states rs JOIN repositories r ON r.id=rs.repository_id ` + join + `
 WHERE r.enabled=1 AND ` + predicate + scoped
-	args := append(append([]any{}, aclArgs...), scopeArgs...)
+	args = append(args, aclArgs...)
+	args = append(args, scopeArgs...)
 	var coverage EmbeddingCoverage
-	err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(statement), args...).Scan(&coverage.Total, &coverage.Embedded)
+	err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(statement), args...).Scan(&coverage.Total, &coverage.Embedded, &coverage.IncompatibleRefs)
 	return coverage, err
 }
 
@@ -3102,21 +3128,31 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 	coverageFallback := ""
 	if cfg.UsesEmbeddings() && cfg.MinimumEmbeddingCoverage > 0 {
 		var coverage EmbeddingCoverage
-		coverageErr := s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT total_chunks,embedded_chunks FROM repository_ref_states WHERE repository_id=? AND ref_name=?`), repoID, ref).
-			Scan(&coverage.Total, &coverage.Embedded)
+		var indexedRevision string
+		coverageErr := s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT total_chunks,embedded_chunks,embedding_revision FROM repository_ref_states WHERE repository_id=? AND ref_name=?`), repoID, ref).
+			Scan(&coverage.Total, &coverage.Embedded, &indexedRevision)
 		if errors.Is(coverageErr, sql.ErrNoRows) {
 			coverage = EmbeddingCoverage{}
 			coverageErr = nil
 		}
+		revisionMismatch := coverageErr == nil && cfg.EmbeddingRevision != "" && indexedRevision != cfg.EmbeddingRevision
+		if revisionMismatch {
+			coverage.Embedded = 0
+		}
 		if coverageErr == nil && (coverage.Total == 0 || coverage.Percent() < cfg.MinimumEmbeddingCoverage) {
 			message := fmt.Sprintf("Embedding coverage %.1f%% is below the configured %.1f%% minimum.", coverage.Percent(), cfg.MinimumEmbeddingCoverage)
+			fallbackReason := "coverage-below-threshold"
+			if revisionMismatch {
+				message = "Indexed embeddings were produced by a different model revision. " + message
+				fallbackReason = "embedding-revision-mismatch"
+			}
 			if cfg.RequiresEmbeddings() {
 				return "", errors.New("embedding retrieval is required but " + strings.ToLower(message))
 			}
 			cfg.VectorWeight = 0
 			cfg.SourceQuerySearch = true
 			coverageFallback = message + " This answer used keyword/source-query retrieval only."
-			s.reportFallback("coverage-below-threshold")
+			s.reportFallback(fallbackReason)
 		}
 	}
 	// remoteDocuments asks the source code search API for this repository. It is
@@ -3190,7 +3226,7 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 			vectorMode = " + vector database ANN"
 		}
 	}
-	candidateSQL := `SELECT id,content,file_path,line_start,line_end,commit_id,heading,embedding FROM document_chunks WHERE repository_id=? AND ref_name=?`
+	candidateSQL := `SELECT id,content,file_path,line_start,line_end,commit_id,heading,embedding,embedding_revision FROM document_chunks WHERE repository_id=? AND ref_name=?`
 	args = []any{repoID, ref}
 	if len(keywordIDs) > 0 {
 		candidateSQL += " AND id IN (" + strings.TrimSuffix(strings.Repeat("?,", len(keywordIDs)), ",") + ")"
@@ -3216,18 +3252,18 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 	}
 	defer rows.Close()
 	type hit struct {
-		id, content, path, commit, heading string
-		start, end                         int
-		score                              float64
-		tokens                             []string
-		vector                             []byte
+		id, content, path, commit, heading, revision string
+		start, end                                   int
+		score                                        float64
+		tokens                                       []string
+		vector                                       []byte
 	}
 	var hits []hit
 	df := map[string]int{}
 	totalLength := 0
 	for rows.Next() {
 		var h hit
-		if err := rows.Scan(&h.id, &h.content, &h.path, &h.start, &h.end, &h.commit, &h.heading, &h.vector); err != nil {
+		if err := rows.Scan(&h.id, &h.content, &h.path, &h.start, &h.end, &h.commit, &h.heading, &h.vector, &h.revision); err != nil {
 			return "", err
 		}
 		h.tokens = embedding.Tokens(h.heading + " " + h.content)
@@ -3283,7 +3319,7 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 			bm25 += idf * (frequency * 2.2) / (frequency + 1.2*lengthNorm)
 		}
 		vectorScore := 0.0
-		if cfg.VectorWeight > 0 {
+		if cfg.VectorWeight > 0 && (cfg.EmbeddingRevision == "" || hits[n].revision == cfg.EmbeddingRevision) {
 			if external, ok := vectorScores[hits[n].id]; ok {
 				vectorScore = external
 			} else {

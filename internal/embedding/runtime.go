@@ -63,23 +63,30 @@ type RuntimeSnapshot struct {
 	Requests            uint64         `json:"requests"`
 	Failures            uint64         `json:"failures"`
 	CacheHits           uint64         `json:"cacheHits"`
+	Coalesced           uint64         `json:"coalesced"`
 	CacheEntries        int            `json:"cacheEntries"`
 	Fallbacks           map[string]int `json:"fallbacks"`
 }
 
 type runtimeState struct {
-	consecutiveFailures      int
-	openUntil, lastSuccess   time.Time
-	lastFailure              time.Time
-	lastError                string
-	requests, failures, hits uint64
-	halfOpen                 bool
+	consecutiveFailures                 int
+	openUntil, lastSuccess              time.Time
+	lastFailure                         time.Time
+	lastError                           string
+	requests, failures, hits, coalesced uint64
+	halfOpen                            bool
 }
 
 type runtimeCacheEntry struct {
 	identity string
 	vector   []float32
 	expires  time.Time
+}
+
+type runtimeFlight struct {
+	done   chan struct{}
+	vector []float32
+	err    error
 }
 
 // Runtime shares health and query-vector cache state between MCP search and
@@ -89,12 +96,14 @@ type Runtime struct {
 	mu        sync.Mutex
 	states    map[string]*runtimeState
 	cache     map[string]runtimeCacheEntry
+	flights   map[string]*runtimeFlight
 	fallbacks map[string]int
 }
 
 func NewRuntime() *Runtime {
 	return &Runtime{
 		states: map[string]*runtimeState{}, cache: map[string]runtimeCacheEntry{},
+		flights:   map[string]*runtimeFlight{},
 		fallbacks: map[string]int{},
 	}
 }
@@ -221,6 +230,37 @@ func (r *Runtime) storeVector(identity, text string, vector []float32, policy Ru
 	}
 }
 
+func (r *Runtime) beginFlight(identity, text string) (string, *runtimeFlight, bool) {
+	key := r.cacheKey(identity, text)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if flight := r.flights[key]; flight != nil {
+		r.state(identity).coalesced++
+		return key, flight, false
+	}
+	flight := &runtimeFlight{done: make(chan struct{})}
+	r.flights[key] = flight
+	return key, flight, true
+}
+
+func (r *Runtime) completeFlight(key string, flight *runtimeFlight, vector []float32, err error) {
+	r.mu.Lock()
+	flight.vector = append([]float32(nil), vector...)
+	flight.err = err
+	delete(r.flights, key)
+	close(flight.done)
+	r.mu.Unlock()
+}
+
+func waitFlight(ctx context.Context, flight *runtimeFlight) ([]float32, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-flight.done:
+		return append([]float32(nil), flight.vector...), flight.err
+	}
+}
+
 func (r *Runtime) RecordFallback(reason string) {
 	if r == nil || reason == "" {
 		return
@@ -247,6 +287,7 @@ func (r *Runtime) Snapshot(identity string) RuntimeSnapshot {
 		snapshot.Requests = state.requests
 		snapshot.Failures = state.failures
 		snapshot.CacheHits = state.hits
+		snapshot.Coalesced = state.coalesced
 		switch {
 		case state.openUntil.After(time.Now()):
 			snapshot.State = "open"
@@ -281,16 +322,46 @@ func (p *runtimeProvider) Embed(ctx context.Context, text string) ([]float32, er
 			return vector, nil
 		}
 	}
+	flightKey, flight, leader := p.runtime.beginFlight(p.identity, text)
+	if !leader {
+		return waitFlight(ctx, flight)
+	}
+	// The upstream request belongs to the shared flight, not to its first
+	// waiter. Preserve the original deadline but detach direct cancellation so
+	// one disconnected MCP client cannot fail every other coalesced caller.
+	upstreamCtx := context.WithoutCancel(ctx)
+	cancel := func() {}
+	if deadline, ok := ctx.Deadline(); ok {
+		upstreamCtx, cancel = context.WithDeadline(upstreamCtx, deadline)
+	}
+	go func() {
+		defer cancel()
+		p.runFlight(upstreamCtx, text, flightKey, flight)
+	}()
+	return waitFlight(ctx, flight)
+}
+
+func (p *runtimeProvider) runFlight(ctx context.Context, text, flightKey string, flight *runtimeFlight) {
+	// A previous leader can populate the cache between the optimistic lookup
+	// above and flight registration. Recheck once so that narrow race does not
+	// trigger a duplicate upstream request.
+	if !p.probe && p.policy.CacheTTL > 0 {
+		if vector, ok := p.runtime.cached(p.identity, text); ok {
+			p.runtime.completeFlight(flightKey, flight, vector, nil)
+			return
+		}
+	}
 	vector, err := p.provider.Embed(ctx, text)
 	if err == nil && len(vector) == 0 {
 		err = errors.New("embedding provider returned an empty vector")
 	}
 	p.runtime.finish(p.identity, p.policy, err)
 	if err != nil {
-		return nil, err
+		p.runtime.completeFlight(flightKey, flight, nil, err)
+		return
 	}
 	p.runtime.storeVector(p.identity, text, vector, p.policy)
-	return vector, nil
+	p.runtime.completeFlight(flightKey, flight, vector, nil)
 }
 
 func (p *runtimeProvider) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {

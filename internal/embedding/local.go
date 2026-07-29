@@ -2,7 +2,9 @@ package embedding
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"hash/fnv"
 	"math"
 	"regexp"
@@ -45,6 +47,18 @@ type Metadata struct {
 	Provider, Model, Revision string
 	Dimensions                int
 }
+
+// Identity is the exact vector-space revision persisted beside chunks. Two
+// vectors may only be compared when this identity matches; equal dimensions
+// alone do not make embeddings from different models or endpoints compatible.
+func (m Metadata) Identity() string {
+	if m.Provider == "" || m.Model == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(m.Provider + "\x00" + m.Model + "\x00" + m.Revision))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
 type MetadataProvider interface {
 	Provider
 	EmbeddingMetadata() Metadata

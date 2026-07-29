@@ -267,6 +267,13 @@ func (a *App) startBackground() {
 	backgroundScheduler := scheduler.New(a.store, a.pollingInterval)
 	backgroundScheduler.SetRetentionLoader(a.retentionPolicy)
 	backgroundScheduler.SetNotificationLoader(a.notificationPolicy)
+	if revision := a.searchConfig(workerCtx).EmbeddingRevision; revision != "" {
+		if queued, err := a.enqueueEmbeddingRevisionReindex(workerCtx, revision); err != nil {
+			slog.Warn("incompatible embedding refs could not be queued for repair", "error", err)
+		} else if queued > 0 {
+			slog.Info("queued incompatible embedding refs for automatic repair", "jobs", queued)
+		}
+	}
 	a.wg.Add(4)
 	go func() {
 		defer a.wg.Done()
@@ -2189,6 +2196,8 @@ func retrievalModeFromSetting(value map[string]any) string {
 	return search.RetrievalHybridFallback
 }
 
+type reindexTarget struct{ repository, ref string }
+
 // enqueueRetrievalReindex safely moves every known ref toward the new vector
 // policy. Existing answers remain active until each staging generation commits.
 func (a *App) enqueueRetrievalReindex(ctx context.Context) (int, error) {
@@ -2199,10 +2208,9 @@ WHERE r.enabled=1 ORDER BY r.id`)
 		return 0, err
 	}
 	defer rows.Close()
-	type target struct{ repository, ref string }
-	var targets []target
+	var targets []reindexTarget
 	for rows.Next() {
-		var item target
+		var item reindexTarget
 		if err = rows.Scan(&item.repository, &item.ref); err != nil {
 			return 0, err
 		}
@@ -2213,10 +2221,48 @@ WHERE r.enabled=1 ORDER BY r.id`)
 	if err = rows.Err(); err != nil {
 		return 0, err
 	}
+	if err = rows.Close(); err != nil {
+		return 0, err
+	}
+	return a.enqueueReindexTargets(ctx, targets, "retrieval-policy", "policy:")
+}
+
+// enqueueEmbeddingRevisionReindex repairs refs created by an earlier model,
+// endpoint, or the legacy NUL-delimited revision format. This runs at startup
+// after an upgrade, so search stays lexical-safe while the worker converges the
+// corpus without waiting for a source commit or a manual setting change.
+func (a *App) enqueueEmbeddingRevisionReindex(ctx context.Context, revision string) (int, error) {
+	rows, err := a.store.DB.QueryContext(ctx, a.store.Rebind(`SELECT r.id,s.ref_name
+FROM repositories r JOIN repository_ref_states s ON s.repository_id=r.id
+WHERE r.enabled=1 AND s.embedding_revision<>? ORDER BY r.id,s.ref_name`), revision)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var targets []reindexTarget
+	for rows.Next() {
+		var item reindexTarget
+		if err = rows.Scan(&item.repository, &item.ref); err != nil {
+			return 0, err
+		}
+		if item.ref != "" {
+			targets = append(targets, item)
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return 0, err
+	}
+	if err = rows.Close(); err != nil {
+		return 0, err
+	}
+	return a.enqueueReindexTargets(ctx, targets, "embedding-revision", "embedding:")
+}
+
+func (a *App) enqueueReindexTargets(ctx context.Context, targets []reindexTarget, kind, prefix string) (int, error) {
 	queued := 0
 	for _, item := range targets {
 		var existing string
-		err = a.store.DB.QueryRowContext(ctx, a.store.Rebind(`SELECT id FROM index_jobs WHERE repository_id=? AND ref_name=? AND status IN ('pending','running') LIMIT 1`), item.repository, item.ref).Scan(&existing)
+		err := a.store.DB.QueryRowContext(ctx, a.store.Rebind(`SELECT id FROM index_jobs WHERE repository_id=? AND ref_name=? AND status IN ('pending','running') LIMIT 1`), item.repository, item.ref).Scan(&existing)
 		if err == nil {
 			continue
 		}
@@ -2227,8 +2273,8 @@ WHERE r.enabled=1 ORDER BY r.id`)
 		if tokenErr != nil {
 			return queued, tokenErr
 		}
-		_, err = a.store.DB.ExecContext(ctx, a.store.Rebind(`INSERT INTO index_jobs(id,repository_id,ref_name,kind,status,next_run_at) VALUES(?,?,?,'retrieval-policy','pending',?)`),
-			"policy:"+id, item.repository, item.ref, time.Now().UTC())
+		_, err = a.store.DB.ExecContext(ctx, a.store.Rebind(`INSERT INTO index_jobs(id,repository_id,ref_name,kind,status,next_run_at) VALUES(?,?,?,?, 'pending',?)`),
+			prefix+id, item.repository, item.ref, kind, time.Now().UTC())
 		if err != nil {
 			return queued, err
 		}
@@ -3283,6 +3329,9 @@ func (a *App) searchConfig(ctx context.Context) search.Config {
 	modelSettings, modelErr := a.loadSettingMap(ctx, "model")
 	provider, _ := modelSettings["provider"].(string)
 	noRemoteModel := modelErr != nil || provider != "openai-compatible"
+	if !noRemoteModel {
+		cfg.EmbeddingRevision = configuredEmbeddingRevision(modelSettings)
+	}
 	settings, err := a.loadSettingMap(ctx, "search")
 	if err != nil {
 		if noRemoteModel {
@@ -3362,6 +3411,17 @@ func embeddingRuntimeIdentity(settings map[string]any) string {
 		return "unconfigured"
 	}
 	return provider + ":" + model + "@" + strings.TrimRight(baseURL, "/")
+}
+
+func configuredEmbeddingRevision(settings map[string]any) string {
+	provider, err := embeddingProviderFromMap(settings)
+	if err != nil {
+		return ""
+	}
+	if metadata, ok := provider.(embedding.MetadataProvider); ok {
+		return metadata.EmbeddingMetadata().Identity()
+	}
+	return ""
 }
 
 func (a *App) retrievalMode(ctx context.Context) string {
@@ -3592,7 +3652,7 @@ func (a *App) projectVectors(ctx context.Context, repositoryID, ref string) erro
 // streamVectors reads stored embeddings in batches and upserts them, so a full
 // rebuild never loads the whole corpus into memory.
 func (a *App) streamVectors(ctx context.Context, store vectorstore.Store, repositoryID, ref string) (int, error) {
-	statement := `SELECT c.id,c.repository_id,c.ref_name,COALESCE(r.library_id,''),c.file_path,c.embedding
+	statement := `SELECT c.id,c.repository_id,c.ref_name,COALESCE(r.library_id,''),c.file_path,COALESCE(c.embedding_revision,''),c.embedding
 FROM document_chunks c LEFT JOIN repositories r ON r.id=c.repository_id
 WHERE c.embedding IS NOT NULL`
 	var args []any
@@ -3625,7 +3685,7 @@ WHERE c.embedding IS NOT NULL`
 	for rows.Next() {
 		var chunk vectorstore.Chunk
 		var raw []byte
-		if err = rows.Scan(&chunk.ID, &chunk.RepositoryID, &chunk.Ref, &chunk.LibraryID, &chunk.FilePath, &raw); err != nil {
+		if err = rows.Scan(&chunk.ID, &chunk.RepositoryID, &chunk.Ref, &chunk.LibraryID, &chunk.FilePath, &chunk.Revision, &raw); err != nil {
 			return total, err
 		}
 		chunk.Vector = embedding.Decode(raw)
@@ -3647,7 +3707,8 @@ WHERE c.embedding IS NOT NULL`
 
 // vectorCandidates is the search side of the integration.
 func (a *App) vectorCandidates(ctx context.Context, repositoryID, ref, query string, limit int) ([]search.VectorCandidate, error) {
-	if !a.searchConfig(ctx).UsesEmbeddings() {
+	cfg := a.searchConfig(ctx)
+	if !cfg.UsesEmbeddings() {
 		return nil, nil
 	}
 	store, err := a.vectorStore(ctx)
@@ -3666,7 +3727,7 @@ func (a *App) vectorCandidates(ctx context.Context, repositoryID, ref, query str
 	if embedErr != nil {
 		return nil, embedErr
 	}
-	matches, searchErr := store.Search(ctx, repositoryID, ref, vector, limit)
+	matches, searchErr := store.Search(ctx, repositoryID, ref, cfg.EmbeddingRevision, vector, limit)
 	if searchErr != nil {
 		return nil, searchErr
 	}
@@ -3680,7 +3741,8 @@ func (a *App) vectorCandidates(ctx context.Context, repositoryID, ref, query str
 // globalVectorCandidates asks the vector database for nearest neighbours across
 // every repository. The repository ACL is applied by the caller afterwards.
 func (a *App) globalVectorCandidates(ctx context.Context, query string, limit int) ([]search.VectorCandidate, error) {
-	if !a.searchConfig(ctx).UsesEmbeddings() {
+	cfg := a.searchConfig(ctx)
+	if !cfg.UsesEmbeddings() {
 		return nil, nil
 	}
 	store, err := a.vectorStore(ctx)
@@ -3699,7 +3761,7 @@ func (a *App) globalVectorCandidates(ctx context.Context, query string, limit in
 	if embedErr != nil {
 		return nil, embedErr
 	}
-	matches, searchErr := store.SearchGlobal(ctx, vector, limit)
+	matches, searchErr := store.SearchGlobal(ctx, cfg.EmbeddingRevision, vector, limit)
 	if searchErr != nil {
 		return nil, searchErr
 	}
@@ -6044,20 +6106,22 @@ func safeDatabaseError(err error, dsn string) string {
 }
 
 type embeddingHealthView struct {
-	RequestedMode   string                    `json:"requestedMode"`
-	EffectiveMode   string                    `json:"effectiveMode"`
-	OperationalMode string                    `json:"operationalMode"`
-	DegradedReason  string                    `json:"degradedReason,omitempty"`
-	ModelConfigured bool                      `json:"modelConfigured"`
-	TotalChunks     int64                     `json:"totalChunks"`
-	EmbeddedChunks  int64                     `json:"embeddedChunks"`
-	CoveragePercent float64                   `json:"coveragePercent"`
-	MinimumCoverage float64                   `json:"minimumCoveragePercent"`
-	ReadyRefs       int64                     `json:"readyRefs"`
-	PartialRefs     int64                     `json:"partialRefs"`
-	DegradedRefs    int64                     `json:"degradedRefs"`
-	UnavailableRefs int64                     `json:"unavailableRefs"`
-	Circuit         embedding.RuntimeSnapshot `json:"circuit"`
+	RequestedMode    string                    `json:"requestedMode"`
+	EffectiveMode    string                    `json:"effectiveMode"`
+	OperationalMode  string                    `json:"operationalMode"`
+	DegradedReason   string                    `json:"degradedReason,omitempty"`
+	ModelConfigured  bool                      `json:"modelConfigured"`
+	TotalChunks      int64                     `json:"totalChunks"`
+	StoredEmbeddings int64                     `json:"storedEmbeddings"`
+	EmbeddedChunks   int64                     `json:"embeddedChunks"`
+	CoveragePercent  float64                   `json:"coveragePercent"`
+	MinimumCoverage  float64                   `json:"minimumCoveragePercent"`
+	IncompatibleRefs int64                     `json:"incompatibleRefs"`
+	ReadyRefs        int64                     `json:"readyRefs"`
+	PartialRefs      int64                     `json:"partialRefs"`
+	DegradedRefs     int64                     `json:"degradedRefs"`
+	UnavailableRefs  int64                     `json:"unavailableRefs"`
+	Circuit          embedding.RuntimeSnapshot `json:"circuit"`
 }
 
 func (a *App) embeddingHealth(ctx context.Context) embeddingHealthView {
@@ -6085,14 +6149,25 @@ COALESCE(SUM(CASE WHEN embedding_status='partial' THEN 1 ELSE 0 END),0),
 COALESCE(SUM(CASE WHEN embedding_status='degraded' THEN 1 ELSE 0 END),0),
 COALESCE(SUM(CASE WHEN embedding_status='unavailable' THEN 1 ELSE 0 END),0)
 FROM repository_ref_states`).Scan(
-		&trackedRefs, &view.TotalChunks, &view.EmbeddedChunks,
+		&trackedRefs, &view.TotalChunks, &view.StoredEmbeddings,
 		&view.ReadyRefs, &view.PartialRefs, &view.DegradedRefs, &view.UnavailableRefs,
 	)
+	view.EmbeddedChunks = view.StoredEmbeddings
+	if cfg.EmbeddingRevision != "" {
+		_ = a.store.DB.QueryRowContext(ctx, a.store.Rebind(`SELECT
+COALESCE(SUM(CASE WHEN embedding_revision=? THEN embedded_chunks ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN embedded_chunks>0 AND embedding_revision<>? THEN 1 ELSE 0 END),0)
+FROM repository_ref_states`), cfg.EmbeddingRevision, cfg.EmbeddingRevision).Scan(&view.EmbeddedChunks, &view.IncompatibleRefs)
+	}
 	// Installations upgraded from a version before ref coverage tracking can
 	// temporarily have chunks but no ref state. Keep diagnostics accurate until
 	// the next index run backfills the aggregate.
 	if trackedRefs == 0 {
-		_ = a.store.DB.QueryRowContext(ctx, `SELECT COUNT(*),COUNT(embedding) FROM document_chunks`).Scan(&view.TotalChunks, &view.EmbeddedChunks)
+		_ = a.store.DB.QueryRowContext(ctx, `SELECT COUNT(*),COUNT(embedding) FROM document_chunks`).Scan(&view.TotalChunks, &view.StoredEmbeddings)
+		view.EmbeddedChunks = view.StoredEmbeddings
+		if cfg.EmbeddingRevision != "" {
+			_ = a.store.DB.QueryRowContext(ctx, a.store.Rebind(`SELECT COALESCE(SUM(CASE WHEN embedding IS NOT NULL AND embedding_revision=? THEN 1 ELSE 0 END),0) FROM document_chunks`), cfg.EmbeddingRevision).Scan(&view.EmbeddedChunks)
+		}
 	}
 	if view.TotalChunks > 0 {
 		view.CoveragePercent = float64(view.EmbeddedChunks) * 100 / float64(view.TotalChunks)
@@ -6108,7 +6183,11 @@ FROM repository_ref_states`).Scan(
 		view.DegradedReason = "embedding circuit is open"
 	case view.TotalChunks > 0 && view.CoveragePercent < view.MinimumCoverage && view.RequestedMode == search.RetrievalHybridFallback:
 		view.OperationalMode = search.RetrievalKeywordOnly
-		view.DegradedReason = fmt.Sprintf("embedding coverage %.1f%% is below %.1f%%", view.CoveragePercent, view.MinimumCoverage)
+		if view.IncompatibleRefs > 0 {
+			view.DegradedReason = fmt.Sprintf("%d refs use a different embedding model revision; compatible coverage is %.1f%%", view.IncompatibleRefs, view.CoveragePercent)
+		} else {
+			view.DegradedReason = fmt.Sprintf("embedding coverage %.1f%% is below %.1f%%", view.CoveragePercent, view.MinimumCoverage)
+		}
 	}
 	return view
 }
@@ -6117,8 +6196,9 @@ func (a *App) embeddingHealthMarkdown(ctx context.Context) string {
 	view := a.embeddingHealth(ctx)
 	var b strings.Builder
 	fmt.Fprintf(&b, "- Requested Mode: %s\n- Effective Configuration: %s\n- Operational Mode: %s\n", view.RequestedMode, view.EffectiveMode, view.OperationalMode)
-	fmt.Fprintf(&b, "- Coverage: %.1f%% (%d/%d chunks, minimum %.1f%%)\n", view.CoveragePercent, view.EmbeddedChunks, view.TotalChunks, view.MinimumCoverage)
-	fmt.Fprintf(&b, "- Model Circuit: %s · requests %d · failures %d · cache hits %d\n", view.Circuit.State, view.Circuit.Requests, view.Circuit.Failures, view.Circuit.CacheHits)
+	fmt.Fprintf(&b, "- Compatible Coverage: %.1f%% (%d/%d chunks, %d stored embeddings, minimum %.1f%%)\n", view.CoveragePercent, view.EmbeddedChunks, view.TotalChunks, view.StoredEmbeddings, view.MinimumCoverage)
+	fmt.Fprintf(&b, "- Incompatible Refs: %d\n", view.IncompatibleRefs)
+	fmt.Fprintf(&b, "- Model Circuit: %s · requests %d · failures %d · cache hits %d · coalesced %d\n", view.Circuit.State, view.Circuit.Requests, view.Circuit.Failures, view.Circuit.CacheHits, view.Circuit.Coalesced)
 	if view.DegradedReason != "" {
 		fmt.Fprintf(&b, "- Degraded Reason: %s\n", view.DegradedReason)
 	}
@@ -6315,17 +6395,19 @@ func (a *App) settingVersions(w http.ResponseWriter, r *http.Request) {
 func (a *App) vectorStatus(w http.ResponseWriter, r *http.Request) {
 	searchCfg := a.searchConfig(r.Context())
 	embeddingHealth := a.embeddingHealth(r.Context())
-	chunks, stored := embeddingHealth.TotalChunks, embeddingHealth.EmbeddedChunks
+	chunks, compatible := embeddingHealth.TotalChunks, embeddingHealth.EmbeddedChunks
+	stored := embeddingHealth.StoredEmbeddings
 	coverage := 0.0
 	if chunks > 0 {
-		coverage = float64(stored) * 100 / float64(chunks)
+		coverage = float64(compatible) * 100 / float64(chunks)
 	}
 	policy := map[string]any{
 		"retrievalMode": searchCfg.RetrievalMode, "requestedRetrievalMode": embeddingHealth.RequestedMode,
 		"operationalMode": embeddingHealth.OperationalMode, "degradedReason": embeddingHealth.DegradedReason,
 		"embeddingEnabled": searchCfg.UsesEmbeddings(), "circuit": embeddingHealth.Circuit,
-		"storedVectors": stored, "totalChunks": chunks, "chunksWithoutEmbeddings": chunks - stored, "embeddingCoveragePercent": coverage,
+		"storedVectors": stored, "compatibleVectors": compatible, "totalChunks": chunks, "chunksWithoutEmbeddings": chunks - stored, "embeddingCoveragePercent": coverage,
 		"minimumEmbeddingCoveragePercent": embeddingHealth.MinimumCoverage,
+		"incompatibleRefs":                embeddingHealth.IncompatibleRefs,
 		"readyRefs":                       embeddingHealth.ReadyRefs, "partialRefs": embeddingHealth.PartialRefs,
 		"degradedRefs": embeddingHealth.DegradedRefs, "unavailableRefs": embeddingHealth.UnavailableRefs,
 	}
@@ -6720,11 +6802,13 @@ func (a *App) metrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "# HELP git_ctx_go_goroutines Current goroutines\n# TYPE git_ctx_go_goroutines gauge\ngit_ctx_go_goroutines %d\n", runtime.NumGoroutine())
 	fmt.Fprintf(w, "# HELP git_ctx_tracing_enabled OTLP tracing provider enabled\n# TYPE git_ctx_tracing_enabled gauge\ngit_ctx_tracing_enabled %d\n", boolInt(a.traces.Enabled()))
 	embeddingHealth := a.embeddingHealth(r.Context())
-	fmt.Fprintf(w, "# HELP git_ctx_embedding_coverage_percent Percentage of indexed chunks with embeddings\n# TYPE git_ctx_embedding_coverage_percent gauge\ngit_ctx_embedding_coverage_percent %.3f\n", embeddingHealth.CoveragePercent)
+	fmt.Fprintf(w, "# HELP git_ctx_embedding_coverage_percent Percentage of indexed chunks compatible with the configured embedding revision\n# TYPE git_ctx_embedding_coverage_percent gauge\ngit_ctx_embedding_coverage_percent %.3f\n", embeddingHealth.CoveragePercent)
+	fmt.Fprintf(w, "# HELP git_ctx_embedding_incompatible_refs Refs whose stored embeddings use another model revision\n# TYPE git_ctx_embedding_incompatible_refs gauge\ngit_ctx_embedding_incompatible_refs %d\n", embeddingHealth.IncompatibleRefs)
 	fmt.Fprintf(w, "# HELP git_ctx_embedding_circuit_open Whether the embedding endpoint circuit is open\n# TYPE git_ctx_embedding_circuit_open gauge\ngit_ctx_embedding_circuit_open %d\n", boolInt(embeddingHealth.Circuit.State == "open"))
 	fmt.Fprintf(w, "# HELP git_ctx_embedding_requests_total Process-local embedding provider requests\n# TYPE git_ctx_embedding_requests_total counter\ngit_ctx_embedding_requests_total %d\n", embeddingHealth.Circuit.Requests)
 	fmt.Fprintf(w, "# HELP git_ctx_embedding_failures_total Process-local embedding provider failures\n# TYPE git_ctx_embedding_failures_total counter\ngit_ctx_embedding_failures_total %d\n", embeddingHealth.Circuit.Failures)
 	fmt.Fprintf(w, "# HELP git_ctx_embedding_cache_hits_total Process-local query and chunk embedding cache hits\n# TYPE git_ctx_embedding_cache_hits_total counter\ngit_ctx_embedding_cache_hits_total %d\n", embeddingHealth.Circuit.CacheHits)
+	fmt.Fprintf(w, "# HELP git_ctx_embedding_coalesced_total Concurrent identical query embeddings joined to one provider request\n# TYPE git_ctx_embedding_coalesced_total counter\ngit_ctx_embedding_coalesced_total %d\n", embeddingHealth.Circuit.Coalesced)
 	reasons := make([]string, 0, len(embeddingHealth.Circuit.Fallbacks))
 	for reason := range embeddingHealth.Circuit.Fallbacks {
 		reasons = append(reasons, reason)

@@ -30,7 +30,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: git-ctx
-          image: git-ctx:v0.37.0
+          image: git-ctx:v0.38.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

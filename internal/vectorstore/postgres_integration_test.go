@@ -46,12 +46,13 @@ func TestPgvectorConnectionActivatesAvailableExtensionIntegration(t *testing.T) 
 	}
 	defer store.Close()
 	if err = store.Upsert(context.Background(), []Chunk{
-		{ID: "closest", RepositoryID: "repo", Ref: "main", Vector: []float32{1, 0, 0}},
-		{ID: "far", RepositoryID: "repo", Ref: "main", Vector: []float32{0, 1, 0}},
+		{ID: "closest", RepositoryID: "repo", Ref: "main", Revision: "model-v2", Vector: []float32{1, 0, 0}},
+		{ID: "far", RepositoryID: "repo", Ref: "main", Revision: "model-v2", Vector: []float32{0, 1, 0}},
+		{ID: "stale", RepositoryID: "repo", Ref: "main", Revision: "model-v1", Vector: []float32{1, 0, 0}},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	matches, err := store.Search(context.Background(), "repo", "main", []float32{1, 0, 0}, 2)
+	matches, err := store.Search(context.Background(), "repo", "main", "model-v2", []float32{1, 0, 0}, 3)
 	if err != nil {
 		t.Fatal(err)
 	}

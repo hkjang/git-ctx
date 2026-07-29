@@ -641,14 +641,22 @@ Bitbucket code search는 기본 브랜치 계약이므로 비기본 branch/tag �
 - 색인 작업이 끝나면 해당 ref의 벡터가 자동으로 재적재된다. 기존 데이터를 옮기거나
   pgvector ↔ Milvus 를 전환할 때는 `POST /api/v1/admin/vector/rebuild` 또는 관리자
   화면의 [벡터 재적재]를 사용한다. 재색인은 필요 없다.
+- 벡터에는 Embedding provider·모델·revision을 해시한 데이터베이스 안전 식별자가
+  함께 저장된다. 모델 설정이 바뀌면 기존 벡터를 새 질의와 섞지 않고, 호환되지 않는
+  ref를 시작 시 자동으로 재색인 큐에 넣는다. 새 세대가 완성될 때까지
+  `hybrid-fallback`은 질의 전체를 키워드·소스 Query API로 전환하며
+  `hybrid-required`는 불완전한 의미 검색 대신 명확한 오류를 반환한다.
 - 검색은 벡터 DB를 **후보 공급자**로만 사용한다. 장애가 나면 메타 DB 임베딩 경로로
   자동 fallback 하므로 검색이 중단되지 않는다. `GET /api/v1/admin/vector/status` 는
-  벡터 DB 보유 수와 메타 DB 임베딩 수를 함께 보여 준다.
+  메타 DB의 원시 벡터 수, 현재 모델과 호환되는 벡터 수, 호환되지 않는 ref 수와
+  벡터 DB 보유 수를 함께 보여 준다.
 
 `search-semantic`은 Library ID 없이 저장소 전 범위에서 의미로 검색한다. 벡터 DB가
 있으면 ANN 결과를 ACL·범위 조건으로 거른 뒤 반환하고, 없으면 저장된 임베딩을 최대
 20,000개까지 스캔해 채점한 뒤 그 사실을 응답 `Diagnostics`에 남긴다. 어느 경로가
-쓰였는지는 응답의 `Mode` 로 확인할 수 있다.
+쓰였는지는 응답의 `Mode` 로 확인할 수 있다. 같은 Pod에서 동시에 들어온 동일 모델·질의
+Embedding 요청은 한 번의 원격 호출로 병합하며 각 호출자의 취소와 timeout은 독립적으로
+적용한다.
 
 ## 소스 연동 동작 (Bitbucket · GitLab)
 

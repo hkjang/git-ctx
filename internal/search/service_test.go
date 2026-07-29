@@ -824,6 +824,61 @@ func TestEmbeddingCoveragePreventsPartialVectorBias(t *testing.T) {
 	}
 }
 
+func TestEmbeddingRevisionMismatchNeverMixesOldVectors(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:embedding-revision?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r','core','dify','Dify','gitlab','1','/core/dify','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r','alice','read')`)
+	_, _ = db.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding,embedding_revision) VALUES('c','r','main','abc','api/search.go',10,20,'Search service','code','Dify source search query implementation','h',?,'model-v1')`, embedding.Encode(embedding.Embed("old vector")))
+	_, _ = db.DB.Exec(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,embedding_revision,total_chunks,embedded_chunks,embedding_status) VALUES('r','main','abc','model-v1',1,1,'ready')`)
+
+	service := New(db)
+	service.SetConfigLoader(func(context.Context) Config {
+		return Config{
+			KeywordWeight: 1, VectorWeight: 1, FinalK: 5, CandidateLimit: 100,
+			RetrievalMode: RetrievalHybridFallback, MinimumEmbeddingCoverage: 80,
+			EmbeddingRevision: "model-v2",
+		}
+	})
+	vectorCalls := 0
+	service.SetVectorLoader(func(context.Context, string, string, string, int) ([]VectorCandidate, error) {
+		vectorCalls++
+		return []VectorCandidate{{ID: "c", Score: 1}}, nil
+	})
+	fallbacks := map[string]int{}
+	service.SetFallbackReporter(func(reason string) { fallbacks[reason]++ })
+
+	query, err := service.Query(ctx, []string{"alice"}, "/core/dify/main", "Dify source search")
+	if err != nil || !strings.Contains(query, "api/search.go") || !strings.Contains(query, "different model revision") {
+		t.Fatalf("query=%q err=%v", query, err)
+	}
+	if vectorCalls != 0 || fallbacks["embedding-revision-mismatch"] != 1 {
+		t.Fatalf("vectorCalls=%d fallbacks=%v", vectorCalls, fallbacks)
+	}
+	semantic, err := service.SemanticSearch(ctx, []string{"alice"}, "Dify source search", "", "", 5)
+	if err != nil || len(semantic.Hits) != 1 || !strings.Contains(strings.Join(semantic.Diagnostics, " "), "different embedding model revision") {
+		t.Fatalf("semantic=%#v err=%v", semantic, err)
+	}
+	if fallbacks["embedding-revision-mismatch"] != 2 {
+		t.Fatalf("semantic revision fallback was not recorded: %v", fallbacks)
+	}
+
+	service.SetConfigLoader(func(context.Context) Config {
+		return Config{
+			KeywordWeight: 1, VectorWeight: 1, FinalK: 5, CandidateLimit: 100,
+			RetrievalMode: RetrievalHybridRequired, MinimumEmbeddingCoverage: 80,
+			EmbeddingRevision: "model-v2",
+		}
+	})
+	if _, err = service.Query(ctx, []string{"alice"}, "/core/dify/main", "Dify source search"); err == nil || !strings.Contains(err.Error(), "different model revision") {
+		t.Fatalf("required revision error=%v", err)
+	}
+}
+
 // Before changing shared code an agent must see every repository that uses it,
 // not only the one it happens to be reading.
 func TestFindDependentsCrossesRepositoriesAndRespectsACL(t *testing.T) {

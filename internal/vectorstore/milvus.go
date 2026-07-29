@@ -156,6 +156,7 @@ func (m *milvusStore) Upsert(ctx context.Context, chunks []Chunk) error {
 			data = append(data, map[string]any{
 				"id": chunk.ID, "vector": chunk.Vector, "repository_id": chunk.RepositoryID,
 				"ref_name": chunk.Ref, "library_id": chunk.LibraryID, "file_path": chunk.FilePath,
+				"embedding_revision": chunk.Revision,
 			})
 		}
 		if err := m.call(ctx, "/v2/vectordb/entities/upsert", map[string]any{
@@ -174,7 +175,7 @@ func (m *milvusStore) DeleteRef(ctx context.Context, repositoryID, ref string) e
 	}, nil)
 }
 
-func (m *milvusStore) Search(ctx context.Context, repositoryID, ref string, vector []float32, limit int) ([]Match, error) {
+func (m *milvusStore) Search(ctx context.Context, repositoryID, ref, revision string, vector []float32, limit int) ([]Match, error) {
 	if len(vector) == 0 {
 		return nil, errors.New("query vector is empty")
 	}
@@ -185,12 +186,16 @@ func (m *milvusStore) Search(ctx context.Context, repositoryID, ref string, vect
 		ID       string  `json:"id"`
 		Distance float64 `json:"distance"`
 	}
+	filter := fmt.Sprintf("repository_id == %q and ref_name == %q", repositoryID, ref)
+	if revision != "" {
+		filter += fmt.Sprintf(" and embedding_revision == %q", revision)
+	}
 	err := m.call(ctx, "/v2/vectordb/entities/search", map[string]any{
 		"collectionName": m.collection,
 		"data":           [][]float32{vector},
 		"annsField":      "vector",
 		"limit":          limit,
-		"filter":         fmt.Sprintf("repository_id == %q and ref_name == %q", repositoryID, ref),
+		"filter":         filter,
 		"outputFields":   []string{"id"},
 	}, &results)
 	if err != nil {
@@ -204,7 +209,7 @@ func (m *milvusStore) Search(ctx context.Context, repositoryID, ref string, vect
 	return out, nil
 }
 
-func (m *milvusStore) SearchGlobal(ctx context.Context, vector []float32, limit int) ([]Match, error) {
+func (m *milvusStore) SearchGlobal(ctx context.Context, revision string, vector []float32, limit int) ([]Match, error) {
 	if len(vector) == 0 {
 		return nil, errors.New("query vector is empty")
 	}
@@ -215,10 +220,14 @@ func (m *milvusStore) SearchGlobal(ctx context.Context, vector []float32, limit 
 		ID       string  `json:"id"`
 		Distance float64 `json:"distance"`
 	}
-	err := m.call(ctx, "/v2/vectordb/entities/search", map[string]any{
+	request := map[string]any{
 		"collectionName": m.collection, "data": [][]float32{vector}, "annsField": "vector",
 		"limit": limit, "outputFields": []string{"id"},
-	}, &results)
+	}
+	if revision != "" {
+		request["filter"] = fmt.Sprintf("embedding_revision == %q", revision)
+	}
+	err := m.call(ctx, "/v2/vectordb/entities/search", request, &results)
 	if err != nil {
 		return nil, err
 	}

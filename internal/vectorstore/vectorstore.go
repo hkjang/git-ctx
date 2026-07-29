@@ -28,6 +28,7 @@ type Chunk struct {
 	Ref          string
 	LibraryID    string
 	FilePath     string
+	Revision     string
 	Vector       []float32
 }
 
@@ -63,11 +64,11 @@ type Store interface {
 	// DeleteRef removes every vector of one repository ref.
 	DeleteRef(ctx context.Context, repositoryID, ref string) error
 	// Search returns the nearest neighbours inside one repository ref.
-	Search(ctx context.Context, repositoryID, ref string, vector []float32, limit int) ([]Match, error)
+	Search(ctx context.Context, repositoryID, ref, revision string, vector []float32, limit int) ([]Match, error)
 	// SearchGlobal returns the nearest neighbours across every repository. The
 	// caller still applies the repository ACL, so this must never be exposed
 	// directly to a user.
-	SearchGlobal(ctx context.Context, vector []float32, limit int) ([]Match, error)
+	SearchGlobal(ctx context.Context, revision string, vector []float32, limit int) ([]Match, error)
 	// Status reports connectivity and the stored vector count.
 	Status(ctx context.Context) (Status, error)
 	Close() error

@@ -83,16 +83,21 @@ DB나 로그에 토큰 원문을 기록하지 않는다. 허용 TTL은 1분 이�
 
 | 지표 | 의미 |
 |---|---|
-| `git_ctx_embedding_coverage_percent` | 활성 ref 청크 중 임베딩이 있는 비율 |
+| `git_ctx_embedding_coverage_percent` | 활성 ref 청크 중 현재 모델 revision과 호환되는 임베딩 비율 |
+| `git_ctx_embedding_incompatible_refs` | 저장된 벡터가 현재 모델 revision과 달라 재색인이 필요한 ref 수 |
 | `git_ctx_embedding_circuit_open` | 현재 Pod의 모델 Circuit 열림 여부 |
 | `git_ctx_embedding_requests_total` | 현재 Pod가 실제 모델에 전달한 요청 |
 | `git_ctx_embedding_failures_total` | 모델 요청 실패 |
 | `git_ctx_embedding_cache_hits_total` | 모델 호출을 생략한 벡터 캐시 적중 |
+| `git_ctx_embedding_coalesced_total` | 동시 동일 질의를 한 번의 모델 호출로 병합한 요청 수 |
 | `git_ctx_embedding_fallback_total{reason}` | 정책·커버리지·모델 장애별 자동 폴백 |
 
 커버리지가 임계값 아래이면 부분 벡터 순위를 섞지 않고 질의 전체가
 키워드/source-query 경로로 전환된다. 관리자 MCP 키의 `get-platform-status`에서도
-요청 모드와 실제 모드, Circuit 재시험 시각과 마지막 모델 오류를 확인할 수 있다.
+요청 모드와 실제 모드, 원시·호환 벡터 수, revision 불일치 ref, Circuit 재시험
+시각과 마지막 모델 오류를 확인할 수 있다. 모델 revision 불일치는 시작 시 ref별
+`embedding-revision` 재색인 작업으로 자동 복구되며, 완료 전 구형 벡터는 메타 DB와
+pgvector·Milvus 후보 검색 모두에서 제외된다.
 
 SQLite는 단일 Writer 특성 때문에 애플리케이션 connection pool을 1개로 직렬화한다.
 이는 관리자 설정 저장과 Background Worker 쓰기가 겹칠 때 `SQLITE_BUSY`가 발생하는

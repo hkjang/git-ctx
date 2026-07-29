@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.37.0
+  version: 0.38.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -296,8 +296,8 @@ paths:
   /api/v1/admin/vector/status:
     get:
       {
-        summary: Report requested and operational retrieval modes, ref embedding coverage, model circuit state, cache statistics, and vector database connectivity,
-        responses: { "200": { description: Vector store status, including the not-configured case } },
+        summary: Report requested and operational retrieval modes, model-revision-compatible embedding coverage, incompatible refs, coalesced model requests, circuit state, and vector database connectivity,
+        responses: { "200": { description: Raw and compatible vector counts plus vector store status, including the not-configured case } },
       }
   /api/v1/admin/vector/rebuild:
     post:
