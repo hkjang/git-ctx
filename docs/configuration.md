@@ -594,7 +594,11 @@ Bitbucket code search는 기본 브랜치 계약이므로 비기본 branch/tag �
 ```
 
 - pgvector: DSN을 비우면 플랫폼 PostgreSQL을 그대로 사용한다. 연결 시험에서
+  서버 패키지 설치 여부와 실제 접속한 database/user를 확인한 뒤
   `CREATE EXTENSION IF NOT EXISTS vector` 와 테이블·HNSW 인덱스를 생성한다.
+  확장은 PostgreSQL 서버 전체가 아니라 database별로 활성화되므로, 다른 database에
+  설치된 경우에는 벡터 설정 DSN에 대상 database를 명시해야 한다. 확장이 별도
+  스키마에 설치된 환경도 자동 감지하여 타입·연산자·opclass를 해당 스키마로 한정한다.
 - Milvus: RESTful v2 API만 사용하므로 SDK 의존성이 없다. 컬렉션은 COSINE metric으로
   자동 생성된다.
 - 색인 작업이 끝나면 해당 ref의 벡터가 자동으로 재적재된다. 기존 데이터를 옮기거나

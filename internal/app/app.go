@@ -2763,20 +2763,8 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 		if !cfg.Enabled() {
 			return nil
 		}
-		store, err := vectorstore.Open(cfg, a.postgresDSN(ctx))
-		if err != nil {
-			return err
-		}
-		defer store.Close()
-		// The connection test also creates the collection when the dimensions are
-		// known, so the first projection does not fail on a missing table.
-		if _, err = store.Status(ctx); err != nil {
-			return err
-		}
-		if dimensions := cfg.Dimensions; dimensions > 0 {
-			return store.Ensure(ctx, dimensions)
-		}
-		return nil
+		_, err := vectorstore.TestConnection(ctx, cfg, a.postgresDSN(ctx))
+		return err
 	case "opensearch":
 		cfg, err := openSearchConfigFromMap(value)
 		if err != nil {
@@ -6042,7 +6030,8 @@ func (a *App) vectorStatus(w http.ResponseWriter, r *http.Request) {
 	response := map[string]any{
 		"configured": true, "provider": status.Provider, "target": status.Target, "collection": status.Collection,
 		"dimensions": status.Dimensions, "vectors": status.Vectors, "ready": status.Ready,
-		"detail": status.Detail, "storedVectors": stored,
+		"detail": status.Detail, "storedVectors": stored, "database": status.Database, "user": status.User,
+		"extensionVersion": status.ExtensionVersion, "extensionSchema": status.ExtensionSchema,
 	}
 	if statusErr != nil {
 		response["ready"] = false

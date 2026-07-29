@@ -24,7 +24,7 @@ MCP GET은 initialize로 발급된 session에서 SSE 연결을 유지하고 DELE
 붙이지 않는다.
 
 ```bash
-scripts/package-offline-image.sh 0.35.5 git-ctx:v0.35.5
+scripts/package-offline-image.sh 0.35.6 git-ctx:v0.35.6
 ```
 
 실제 PostgreSQL 백업·복원 계약 시험은 격리된 빈 시험 DB DSN을 명시해서 실행한다.
@@ -37,6 +37,8 @@ GIT_CTX_TEST_POSTGRES_DSN='postgres://gitctx:password@localhost:5432/gitctx_test
   go test -run TestPostgresQualityBenchmarkIntegration -v ./internal/quality
 GIT_CTX_TEST_POSTGRES_DSN='postgres://gitctx:password@localhost:5432/gitctx_test?sslmode=disable' \
   go test -run TestPostgresDSNOnlyBootstrapIntegration -v ./internal/app
+GIT_CTX_TEST_PGVECTOR_DSN='postgres://gitctx:password@localhost:5432/gitctx_vector_test?sslmode=disable' \
+  go test -count=1 -run TestPgvectorConnectionActivatesAvailableExtensionIntegration -v ./internal/vectorstore
 ```
 
 ## 부하 시험

@@ -10,14 +10,18 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
+var errExtensionNotEnabled = errors.New("pgvector is not enabled in the connected database")
+
 // postgresStore keeps vectors in a pgvector column. It uses the pgx driver that
 // the platform database already registers, and passes vectors as text literals,
 // so no additional dependency is required for an offline build.
 type postgresStore struct {
-	db         *sql.DB
-	table      string
-	dimensions int
-	timeout    func() (context.Context, context.CancelFunc)
+	db               *sql.DB
+	table            string
+	dimensions       int
+	extensionSchema  string
+	extensionVersion string
+	timeout          func() (context.Context, context.CancelFunc)
 }
 
 func newPostgres(cfg Config, fallbackDSN string) (Store, error) {
@@ -49,6 +53,9 @@ func newPostgres(cfg Config, fallbackDSN string) (Store, error) {
 func (p *postgresStore) Name() string { return "pgvector" }
 
 func (p *postgresStore) Ensure(ctx context.Context, dimensions int) error {
+	if err := p.activateExtension(ctx); err != nil {
+		return err
+	}
 	if dimensions <= 0 {
 		dimensions = p.dimensions
 	}
@@ -56,18 +63,16 @@ func (p *postgresStore) Ensure(ctx context.Context, dimensions int) error {
 		return errors.New("vector dimensions are unknown; index a repository first or set dimensions explicitly")
 	}
 	p.dimensions = dimensions
-	if _, err := p.db.ExecContext(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
-		return fmt.Errorf("the pgvector extension is unavailable: %w", err)
-	}
+	vectorType := quoteIdentifier(p.extensionSchema) + ".vector"
 	create := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
   id TEXT PRIMARY KEY,
   repository_id TEXT NOT NULL,
   ref_name TEXT NOT NULL,
   library_id TEXT NOT NULL DEFAULT '',
   file_path TEXT NOT NULL DEFAULT '',
-  embedding vector(%d) NOT NULL,
+  embedding %s(%d) NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-)`, p.table, dimensions)
+)`, p.table, vectorType, dimensions)
 	if _, err := p.db.ExecContext(ctx, create); err != nil {
 		return err
 	}
@@ -77,7 +82,7 @@ func (p *postgresStore) Ensure(ctx context.Context, dimensions int) error {
 	// HNSW gives good recall without tuning a list count. Older pgvector builds
 	// do not have it, and the table still works with an exact scan, so an index
 	// failure is not fatal.
-	_, _ = p.db.ExecContext(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_embedding ON %s USING hnsw (embedding vector_cosine_ops)`, p.table, p.table))
+	_, _ = p.db.ExecContext(ctx, fmt.Sprintf(`CREATE INDEX IF NOT EXISTS %s_embedding ON %s USING hnsw (embedding %s.vector_cosine_ops)`, p.table, p.table, quoteIdentifier(p.extensionSchema)))
 	return nil
 }
 
@@ -88,6 +93,7 @@ func (p *postgresStore) Upsert(ctx context.Context, chunks []Chunk) error {
 	if err := p.Ensure(ctx, len(chunks[0].Vector)); err != nil {
 		return err
 	}
+	vectorType := quoteIdentifier(p.extensionSchema) + ".vector"
 	for start := 0; start < len(chunks); start += upsertBatch {
 		end := min(start+upsertBatch, len(chunks))
 		batch := chunks[start:end]
@@ -98,7 +104,7 @@ func (p *postgresStore) Upsert(ctx context.Context, chunks []Chunk) error {
 				values.WriteByte(',')
 			}
 			base := index * 6
-			fmt.Fprintf(&values, "($%d,$%d,$%d,$%d,$%d,$%d::vector)", base+1, base+2, base+3, base+4, base+5, base+6)
+			fmt.Fprintf(&values, "($%d,$%d,$%d,$%d,$%d,$%d::%s)", base+1, base+2, base+3, base+4, base+5, base+6, vectorType)
 			args = append(args, chunk.ID, chunk.RepositoryID, chunk.Ref, chunk.LibraryID, chunk.FilePath, literal(chunk.Vector))
 		}
 		statement := fmt.Sprintf(`INSERT INTO %s (id,repository_id,ref_name,library_id,file_path,embedding) VALUES %s
@@ -123,9 +129,13 @@ func (p *postgresStore) Search(ctx context.Context, repositoryID, ref string, ve
 	if limit < 1 {
 		limit = 20
 	}
+	if err := p.loadExtension(ctx); err != nil {
+		return nil, err
+	}
+	schema, vectorType := quoteIdentifier(p.extensionSchema), quoteIdentifier(p.extensionSchema)+".vector"
 	// `<=>` is cosine distance in pgvector, so similarity is 1 - distance.
-	statement := fmt.Sprintf(`SELECT id, 1 - (embedding <=> $1::vector) AS score FROM %s
-WHERE repository_id=$2 AND ref_name=$3 ORDER BY embedding <=> $1::vector LIMIT %d`, p.table, limit)
+	statement := fmt.Sprintf(`SELECT id, 1 - (embedding OPERATOR(%s.<=>) $1::%s) AS score FROM %s
+WHERE repository_id=$2 AND ref_name=$3 ORDER BY embedding OPERATOR(%s.<=>) $1::%s LIMIT %d`, schema, vectorType, p.table, schema, vectorType, limit)
 	rows, err := p.db.QueryContext(ctx, statement, literal(vector), repositoryID, ref)
 	if err != nil {
 		return nil, err
@@ -149,7 +159,11 @@ func (p *postgresStore) SearchGlobal(ctx context.Context, vector []float32, limi
 	if limit < 1 {
 		limit = 50
 	}
-	statement := fmt.Sprintf(`SELECT id, 1 - (embedding <=> $1::vector) AS score FROM %s ORDER BY embedding <=> $1::vector LIMIT %d`, p.table, limit)
+	if err := p.loadExtension(ctx); err != nil {
+		return nil, err
+	}
+	schema, vectorType := quoteIdentifier(p.extensionSchema), quoteIdentifier(p.extensionSchema)+".vector"
+	statement := fmt.Sprintf(`SELECT id, 1 - (embedding OPERATOR(%s.<=>) $1::%s) AS score FROM %s ORDER BY embedding OPERATOR(%s.<=>) $1::%s LIMIT %d`, schema, vectorType, p.table, schema, vectorType, limit)
 	rows, err := p.db.QueryContext(ctx, statement, literal(vector))
 	if err != nil {
 		return nil, err
@@ -167,29 +181,79 @@ func (p *postgresStore) SearchGlobal(ctx context.Context, vector []float32, limi
 }
 
 func (p *postgresStore) Status(ctx context.Context) (Status, error) {
+	return p.statusContext(ctx, nil)
+}
+
+func (p *postgresStore) statusContext(ctx context.Context, cause error) (Status, error) {
 	status := Status{Provider: "pgvector", Collection: p.table, Dimensions: p.dimensions}
 	var version string
-	if err := p.db.QueryRowContext(ctx, `SELECT current_setting('server_version')`).Scan(&version); err != nil {
+	if err := p.db.QueryRowContext(ctx, `SELECT current_setting('server_version'), current_database(), current_user`).Scan(&version, &status.Database, &status.User); err != nil {
 		return status, err
 	}
 	status.Target = "PostgreSQL " + version
-	var installed int
-	if err := p.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pg_extension WHERE extname='vector'`).Scan(&installed); err != nil {
-		return status, err
-	}
-	if installed == 0 {
-		status.Detail = "the pgvector extension is not installed in this database"
+	if err := p.loadExtension(ctx); err != nil {
+		if !errors.Is(err, errExtensionNotEnabled) {
+			status.Detail = fmt.Sprintf("could not inspect pgvector in database %q as user %q", status.Database, status.User)
+			return status, fmt.Errorf("%s: %w", status.Detail, err)
+		}
+		var available string
+		availableErr := p.db.QueryRowContext(ctx, `SELECT default_version FROM pg_available_extensions WHERE name='vector'`).Scan(&available)
+		if availableErr == nil {
+			status.Detail = fmt.Sprintf("pgvector %s is available on the server but is not enabled in database %q for user %q", available, status.Database, status.User)
+		} else {
+			status.Detail = fmt.Sprintf("pgvector is not available to database %q on this PostgreSQL server", status.Database)
+		}
+		if cause != nil {
+			return status, fmt.Errorf("%s: %w", status.Detail, cause)
+		}
 		return status, errors.New(status.Detail)
+	}
+	status.ExtensionSchema = p.extensionSchema
+	status.ExtensionVersion = p.extensionVersion
+	if cause != nil {
+		status.Detail = cause.Error()
+		return status, cause
 	}
 	// A missing table simply means nothing has been projected yet.
 	if err := p.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s`, p.table)).Scan(&status.Vectors); err != nil {
-		status.Detail = "collection is not created yet; it is created on the first projection"
+		status.Detail = "pgvector is connected; collection is not created yet and will be created on the first projection"
 		status.Ready = true
 		return status, nil
 	}
 	status.Ready = true
 	status.Detail = "connected"
 	return status, nil
+}
+
+func (p *postgresStore) loadExtension(ctx context.Context) error {
+	err := p.db.QueryRowContext(ctx, `SELECT n.nspname, e.extversion
+FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace
+WHERE e.extname='vector'`).Scan(&p.extensionSchema, &p.extensionVersion)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errExtensionNotEnabled
+	}
+	return err
+}
+
+func (p *postgresStore) activateExtension(ctx context.Context) error {
+	if err := p.loadExtension(ctx); err == nil {
+		return nil
+	} else if !errors.Is(err, errExtensionNotEnabled) {
+		return fmt.Errorf("inspect pgvector extension: %w", err)
+	}
+	var available string
+	if err := p.db.QueryRowContext(ctx, `SELECT default_version FROM pg_available_extensions WHERE name='vector'`).Scan(&available); err != nil {
+		return errors.New("pgvector server package is not available to this PostgreSQL instance")
+	}
+	if _, err := p.db.ExecContext(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
+		var database, user string
+		_ = p.db.QueryRowContext(ctx, `SELECT current_database(), current_user`).Scan(&database, &user)
+		return fmt.Errorf("pgvector %s is installed on the server but could not be enabled in database %q as user %q (connect to the intended database and grant extension creation permission): %w", available, database, user, err)
+	}
+	if err := p.loadExtension(ctx); err != nil {
+		return fmt.Errorf("pgvector activation completed but the extension is still not visible in the connected database: %w", err)
+	}
+	return nil
 }
 
 func (p *postgresStore) Close() error { return p.db.Close() }

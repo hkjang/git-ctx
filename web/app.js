@@ -1688,6 +1688,12 @@ async function refreshVectorStatus() {
     panel.innerHTML =
       `<h4>${esc(status.provider)} · ${ready ? "연결됨" : "연결 실패"}</h4><ul class="result-list">` +
       `<li>대상: ${esc(status.target || "-")} · 컬렉션 ${esc(status.collection || "-")}</li>` +
+      (status.database
+        ? `<li>데이터베이스: <code>${esc(status.database)}</code> · 사용자: <code>${esc(status.user || "-")}</code></li>`
+        : "") +
+      (status.extensionVersion
+        ? `<li>pgvector ${esc(status.extensionVersion)} · 스키마 <code>${esc(status.extensionSchema || "-")}</code></li>`
+        : "") +
       `<li>벡터 DB ${status.vectors ?? 0}개 / 메타 DB 임베딩 ${status.storedVectors}개</li>` +
       `<li>${esc(status.error || status.detail || "")}</li></ul>`;
   } catch (error) {

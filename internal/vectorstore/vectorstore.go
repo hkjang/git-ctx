@@ -39,13 +39,17 @@ type Match struct {
 
 // Status describes a live connection for the administration screen.
 type Status struct {
-	Provider   string `json:"provider"`
-	Target     string `json:"target"`
-	Collection string `json:"collection"`
-	Dimensions int    `json:"dimensions"`
-	Vectors    int64  `json:"vectors"`
-	Ready      bool   `json:"ready"`
-	Detail     string `json:"detail"`
+	Provider         string `json:"provider"`
+	Target           string `json:"target"`
+	Database         string `json:"database,omitempty"`
+	User             string `json:"user,omitempty"`
+	Collection       string `json:"collection"`
+	Dimensions       int    `json:"dimensions"`
+	Vectors          int64  `json:"vectors"`
+	Ready            bool   `json:"ready"`
+	Detail           string `json:"detail"`
+	ExtensionVersion string `json:"extensionVersion,omitempty"`
+	ExtensionSchema  string `json:"extensionSchema,omitempty"`
 }
 
 // Store is the minimal contract every vector database integration implements.
@@ -155,6 +159,34 @@ func Open(cfg Config, fallbackDSN string) (Store, error) {
 	}
 }
 
+// TestConnection performs the setup that an administrator expects from the
+// connection-test button. In particular, pgvector may be available on the
+// server but not activated in the selected database yet; testing activates it
+// before asking Status, rather than rejecting the setting prematurely.
+func TestConnection(ctx context.Context, cfg Config, fallbackDSN string) (Status, error) {
+	store, err := Open(cfg, fallbackDSN)
+	if err != nil {
+		return Status{}, err
+	}
+	defer store.Close()
+	if postgres, ok := store.(*postgresStore); ok {
+		if err = postgres.activateExtension(ctx); err != nil {
+			return postgres.statusContext(ctx, err)
+		}
+	}
+	status, err := store.Status(ctx)
+	if err != nil {
+		return status, err
+	}
+	if cfg.Dimensions > 0 {
+		if err = store.Ensure(ctx, cfg.Dimensions); err != nil {
+			return status, err
+		}
+		status, err = store.Status(ctx)
+	}
+	return status, err
+}
+
 // Providers lists the values accepted by the provider setting.
 func Providers() []string { return []string{"none", "pgvector", "milvus"} }
 
@@ -186,4 +218,8 @@ func literal(vector []float32) string {
 	}
 	b.WriteByte(']')
 	return b.String()
+}
+
+func quoteIdentifier(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }

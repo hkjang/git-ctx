@@ -580,7 +580,7 @@
       troubleshooting: [
         {
           symptom: "연결 테스트에서 pgvector 확장 오류",
-          cause: "확장이 설치되지 않았거나 계정에 생성 권한이 없습니다.",
+          cause: "서버 패키지가 없거나, 현재 DSN의 database에는 아직 활성화되지 않았거나, 접속 계정에 확장 생성 권한이 없습니다. 상태 카드의 database와 user를 실제 설치 대상과 비교하세요.",
           fix: "DBA에게 CREATE EXTENSION vector 실행을 요청하거나 권한 있는 DSN을 사용하세요.",
         },
         {

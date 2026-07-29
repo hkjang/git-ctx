@@ -46,6 +46,9 @@ func TestVectorLiteralMatchesPostgresFormat(t *testing.T) {
 	if got := literal([]float32{0.5, -1, 0}); got != "[0.5,-1,0]" {
 		t.Fatalf("literal=%s", got)
 	}
+	if got := quoteIdentifier(`vector"schema`); got != `"vector""schema"` {
+		t.Fatalf("quoted identifier=%s", got)
+	}
 }
 
 // Milvus reports failures inside a 200 response, so the client must read the
