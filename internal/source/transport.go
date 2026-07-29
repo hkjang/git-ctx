@@ -147,6 +147,7 @@ type Breaker struct {
 	retryAt      time.Time
 	lastError    string
 	probing      bool
+	probeAt      time.Time
 	Threshold    int           // consecutive failures before opening
 	OpenDuration time.Duration // how long to stay open before a probe
 	Now          func() time.Time
@@ -165,6 +166,11 @@ type BreakerState struct {
 const (
 	defaultBreakerThreshold = 4
 	defaultBreakerOpen      = 30 * time.Second
+	// probeTimeout bounds how long one recovery probe may stay outstanding.
+	// A caller can load an adapter and return without making a call, in which
+	// case no outcome is ever reported; without this the breaker would stay
+	// half-open forever and the source would never be tried again.
+	probeTimeout = 60 * time.Second
 )
 
 func (b *Breaker) now() time.Time {
@@ -206,11 +212,12 @@ func (b *Breaker) Allow() (bool, string) {
 			b.failures, b.lastError, b.retryAt.Sub(now).Seconds())
 	}
 	// One probe at a time: a half-open breaker that lets a whole fan-out through
-	// would hammer a server that is still down.
-	if b.probing {
+	// would hammer a server that is still down. An outstanding probe expires so a
+	// caller that never reported an outcome cannot pause the source for good.
+	if b.probing && now.Sub(b.probeAt) < probeTimeout {
 		return false, "연동 복구를 확인하는 중입니다. 이번 요청은 색인된 결과만 사용합니다."
 	}
-	b.probing = true
+	b.probing, b.probeAt = true, now
 	return true, ""
 }
 
@@ -221,7 +228,7 @@ func (b *Breaker) Success() {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.failures, b.openedAt, b.retryAt, b.lastError, b.probing = 0, time.Time{}, time.Time{}, "", false
+	b.failures, b.openedAt, b.retryAt, b.lastError, b.probing, b.probeAt = 0, time.Time{}, time.Time{}, "", false, time.Time{}
 }
 
 // Failure records a failed call. Outcomes that are not the server's fault — a

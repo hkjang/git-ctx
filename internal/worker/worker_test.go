@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -300,5 +301,136 @@ func TestProjectionFailureRetriesIndexJob(t *testing.T) {
 	var status string
 	if err = db.DB.QueryRow(`SELECT status FROM index_jobs WHERE id='j2'`).Scan(&status); err != nil || status != "pending" {
 		t.Fatalf("status=%s err=%v", status, err)
+	}
+}
+
+// pausedHealth stands in for the shared circuit breaker.
+type pausedHealth struct {
+	mu       sync.Mutex
+	paused   bool
+	reported []error
+}
+
+func (p *pausedHealth) Allow(string) (bool, string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.paused {
+		return false, "연동이 일시 중단되었습니다."
+	}
+	return true, ""
+}
+
+func (p *pausedHealth) Report(_ string, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.reported = append(p.reported, err)
+}
+
+// A source outage must cost waiting time, not the retry budget. Before this a
+// ten minute outage burned five attempts on every repository and left the whole
+// catalog in `failed`, which an administrator then had to retry by hand.
+func TestSourceOutageWaitsInsteadOfExhaustingAttempts(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:worker-outage?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	if _, err = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('gitlab:1','core','api','API','gitlab','1','/core/api','main')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.DB.Exec(`INSERT INTO index_jobs(id,repository_id,ref_name,kind,status) VALUES('outage-job','gitlab:1','main','manual','pending')`); err != nil {
+		t.Fatal(err)
+	}
+	health := &pausedHealth{}
+	w := New(db, indexer.New(db, indexer.DefaultPolicy()), func(context.Context, string) (source.RepositorySource, error) {
+		return nil, errors.New("dial tcp 10.0.0.9:443: connect: connection refused")
+	})
+	w.SetSourceHealth(health)
+
+	// The connector is reachable but failing: the attempt is returned and the job
+	// stays pending rather than counting towards the failure limit.
+	for round := 0; round < 6; round++ {
+		if _, err = w.RunOnce(ctx); err == nil {
+			t.Fatalf("round %d: an outage must be reported as an error", round)
+		}
+		if _, err = db.DB.Exec(`UPDATE index_jobs SET next_run_at=datetime('now','-1 second') WHERE id='outage-job'`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var status string
+	var attempts int
+	if err = db.DB.QueryRow(`SELECT status,attempts FROM index_jobs WHERE id='outage-job'`).Scan(&status, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" || attempts > 1 {
+		t.Fatalf("an outage must not exhaust the budget: status=%s attempts=%d", status, attempts)
+	}
+	if len(health.reported) == 0 {
+		t.Fatal("the indexer must feed its outcome to the breaker")
+	}
+
+	// Once the breaker is open the job is not even attempted; it waits.
+	health.mu.Lock()
+	health.paused = true
+	health.mu.Unlock()
+	if _, err = db.DB.Exec(`UPDATE index_jobs SET next_run_at=datetime('now','-1 second') WHERE id='outage-job'`); err != nil {
+		t.Fatal(err)
+	}
+	ok, runErr := w.RunOnce(ctx)
+	if !ok || runErr != nil {
+		t.Fatalf("a paused source must not surface as a job error: ok=%v err=%v", ok, runErr)
+	}
+	var message string
+	if err = db.DB.QueryRow(`SELECT status,attempts,error_message FROM index_jobs WHERE id='outage-job'`).Scan(&status, &attempts, &message); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" || !strings.Contains(message, "일시 중단") {
+		t.Fatalf("status=%s attempts=%d message=%s", status, attempts, message)
+	}
+}
+
+// A repository-specific failure must still exhaust its attempts and be reported,
+// and must not open the breaker for the whole source.
+func TestRepositoryFailureStillFailsAndSpsaresTheBreaker(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:worker-repo-fail?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	if _, err = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('gitlab:2','core','gone','Gone','gitlab','2','/core/gone','main')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.DB.Exec(`INSERT INTO index_jobs(id,repository_id,ref_name,kind,status) VALUES('gone-job','gitlab:2','main','manual','pending')`); err != nil {
+		t.Fatal(err)
+	}
+	health := &pausedHealth{}
+	w := New(db, indexer.New(db, indexer.DefaultPolicy()), func(context.Context, string) (source.RepositorySource, error) {
+		return nil, &source.APIError{Source: "gitlab", StatusCode: 404, Status: "404 Not Found", Body: "repository not found"}
+	})
+	w.SetSourceHealth(health)
+	for attempt := 1; attempt <= 5; attempt++ {
+		if _, err = w.RunOnce(ctx); err == nil {
+			t.Fatalf("attempt %d must report the error", attempt)
+		}
+		if _, err = db.DB.Exec(`UPDATE index_jobs SET next_run_at=datetime('now','-1 second') WHERE id='gone-job'`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var status string
+	var attempts int
+	if err = db.DB.QueryRow(`SELECT status,attempts FROM index_jobs WHERE id='gone-job'`).Scan(&status, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || attempts != 5 {
+		t.Fatalf("a repository problem must still fail: status=%s attempts=%d", status, attempts)
+	}
+	health.mu.Lock()
+	defer health.mu.Unlock()
+	for _, reported := range health.reported {
+		if reported != nil {
+			t.Fatalf("a 404 must not be reported as an outage: %v", reported)
+		}
 	}
 }

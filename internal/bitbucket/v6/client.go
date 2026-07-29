@@ -600,6 +600,15 @@ func (c *Client) RegisterWebhook(ctx context.Context, r source.RepositoryRef, ta
 	body := map[string]any{"name": "git-ctx index webhook", "url": target, "active": true, "events": []string{"repo:refs_changed", "repo:modified"}, "configuration": map[string]string{"secret": secret}}
 	return c.json(ctx, http.MethodPost, c.repo(r)+"/webhooks", nil, body, nil)
 }
+
+// CloseIdleConnections releases the pooled connections of this client when the
+// adapter is replaced after a setting change.
+func (c *Client) CloseIdleConnections() {
+	if c.http != nil {
+		c.http.CloseIdleConnections()
+	}
+}
+
 func (c *Client) repo(r source.RepositoryRef) string {
 	return "/projects/" + escape(r.ProjectKey) + "/repos/" + escape(r.Slug)
 }

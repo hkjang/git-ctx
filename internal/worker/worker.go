@@ -20,6 +20,15 @@ import (
 )
 
 type SourceFactory func(context.Context, string) (source.RepositorySource, error)
+
+// SourceHealth is the circuit breaker the search path already uses. Indexing
+// consults the same state: hammering a source server that is down turns a ten
+// minute outage into hundreds of permanently failed jobs that an administrator
+// then has to retry by hand.
+type SourceHealth interface {
+	Allow(sourceType string) (bool, string)
+	Report(sourceType string, err error)
+}
 type EmbeddingFactory func(context.Context) (embedding.Provider, error)
 type Projection func(context.Context, string, string) error
 type Worker struct {
@@ -32,7 +41,11 @@ type Worker struct {
 	projection       Projection
 	lease            time.Duration
 	timeout          time.Duration
+	health           SourceHealth
 }
+
+// SetSourceHealth installs the shared circuit breaker registry.
+func (w *Worker) SetSourceHealth(health SourceHealth) { w.health = health }
 
 func (w *Worker) SetEmbeddingFactory(factory EmbeddingFactory) { w.embeddingFactory = factory }
 func (w *Worker) SetProjection(projection Projection)          { w.projection = projection }
@@ -97,6 +110,16 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil || !ok {
 		return ok, err
 	}
+	// A paused source is an outage, not a broken repository: the job goes back to
+	// the queue with its attempt returned, so a long outage costs waiting time
+	// instead of the whole retry budget of every repository.
+	sourceType, hasSource := w.repositorySource(ctx, j.RepositoryID)
+	if hasSource && w.health != nil {
+		if allowed, reason := w.health.Allow(sourceType); !allowed {
+			w.requeuePaused(ctx, j, reason)
+			return true, nil
+		}
+	}
 	timeout := w.timeout
 	if timeout <= 0 {
 		timeout = jobTimeout
@@ -104,6 +127,13 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	jobCtx, cancel := context.WithTimeout(ctx, timeout)
 	err = w.execute(jobCtx, j)
 	cancel()
+	// Indexing is the heaviest user of the source API, so its outcome is the best
+	// early signal for the breaker that the search path also reads. Only outages
+	// count: a missing repository or a policy that indexes nothing says nothing
+	// about the server.
+	if hasSource && w.health != nil {
+		w.health.Report(sourceType, outageOnly(err))
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		err = fmt.Errorf("index job exceeded the %s limit; check source server responsiveness, repository size and the embedding endpoint", timeout)
 	}
@@ -115,7 +145,20 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	delay := time.Duration(1<<min(j.Attempts, 8)) * time.Second
 	status := "pending"
 	var completed any
-	if j.Attempts >= w.maxAttempts {
+	// An outage is not this repository's fault. It is retried on a longer delay
+	// without spending an attempt, so the queue survives a source restart, while
+	// a genuine indexing error still exhausts its budget and surfaces as failed.
+	outage := sourceOutage(err)
+	if outage {
+		if j.Attempts > 0 {
+			j.Attempts--
+		}
+		if delay < 30*time.Second {
+			delay = 30 * time.Second
+		}
+		_, _ = w.store.DB.ExecContext(ctx, w.store.Rebind(`UPDATE index_jobs SET attempts=? WHERE id=?`), j.Attempts, j.ID)
+	}
+	if !outage && j.Attempts >= w.maxAttempts {
 		status = "failed"
 		completed = time.Now().UTC()
 	}
@@ -127,6 +170,64 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		w.notifyFailure(ctx, j, err)
 	}
 	return true, err
+}
+
+// outageOnly keeps repository-specific failures out of the breaker: a policy
+// that indexes nothing or a missing ref says nothing about the server.
+func outageOnly(err error) error {
+	if sourceOutage(err) {
+		return err
+	}
+	return nil
+}
+
+// repositorySource returns the source type of a repository.
+func (w *Worker) repositorySource(ctx context.Context, repositoryID string) (string, bool) {
+	var sourceType string
+	if err := w.store.DB.QueryRowContext(ctx, w.store.Rebind(`SELECT source_type FROM repositories WHERE id=?`), repositoryID).Scan(&sourceType); err != nil {
+		return "", false
+	}
+	return sourceType, sourceType != ""
+}
+
+// requeuePaused puts a job back without consuming an attempt and records why it
+// is waiting, so the operations screen shows "waiting for the connector" rather
+// than an unexplained idle queue.
+func (w *Worker) requeuePaused(ctx context.Context, j job, reason string) {
+	attempts := j.Attempts
+	if attempts > 0 {
+		attempts--
+	}
+	_, _ = w.store.DB.ExecContext(ctx, w.store.Rebind(`UPDATE index_jobs SET status='pending',attempts=?,error_message=?,next_run_at=? WHERE id=?`),
+		attempts, truncate("소스 연동 일시 중단으로 대기 중: "+reason, 1000), time.Now().UTC().Add(pausedRequeueDelay), j.ID)
+}
+
+// pausedRequeueDelay is how long a job waits while its source is paused. It is
+// longer than the breaker window so the queue does not spin.
+const pausedRequeueDelay = 45 * time.Second
+
+// sourceOutage reports whether the failure is the source server being
+// unavailable rather than a problem with this repository.
+func sourceOutage(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, source.ErrNotConfigured) {
+		return false
+	}
+	if status := source.StatusOf(err); status > 0 {
+		return source.RetryableStatus(status)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{"connection refused", "no such host", "connection reset", "i/o timeout", "eof", "tls handshake"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // notifyFailure tells the administrators that a repository stopped indexing.

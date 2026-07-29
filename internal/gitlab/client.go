@@ -509,6 +509,17 @@ func (c *Client) RegisterWebhook(ctx context.Context, r source.RepositoryRef, ta
 	body := map[string]any{"url": target, "token": secret, "push_events": true, "tag_push_events": true, "enable_ssl_verification": true}
 	return c.json(ctx, http.MethodPost, c.repo(r)+"/hooks", nil, body, nil)
 }
+
+// CloseIdleConnections releases the pooled connections of this client. The
+// application calls it when an administrator changes the setting and the
+// adapter is replaced, so the old transport does not keep sockets open to a
+// host that is no longer in use.
+func (c *Client) CloseIdleConnections() {
+	if c.http != nil {
+		c.http.CloseIdleConnections()
+	}
+}
+
 func (c *Client) repo(r source.RepositoryRef) string {
 	return "/projects/" + escape(r.ProjectKey+"/"+r.Slug)
 }

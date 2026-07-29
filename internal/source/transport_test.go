@@ -105,3 +105,32 @@ func TestBreakerOpensRecoversAndIgnoresExpectedOutcomes(t *testing.T) {
 		t.Fatalf("state after recovery=%#v", state)
 	}
 }
+
+// A granted probe that never reports back must not disable the source forever.
+// The search layer has paths that load an adapter and then return without making
+// a call (an adapter that does not implement the searcher interface, a deadline
+// that expired), and before this the breaker stayed half-open for good: every
+// later call was refused with "복구를 확인하는 중" and the integration never came
+// back without an administrator resetting it.
+func TestAbandonedProbeDoesNotPauseSourceForever(t *testing.T) {
+	now := time.Now()
+	breaker := &Breaker{Threshold: 1, OpenDuration: time.Minute, Now: func() time.Time { return now }}
+	breaker.Failure(errors.New("connection refused"))
+	if allowed, _ := breaker.Allow(); allowed {
+		t.Fatal("the breaker must be open right after the failure")
+	}
+	// The window passes and one probe is granted, but the caller never reports.
+	now = now.Add(2 * time.Minute)
+	if allowed, _ := breaker.Allow(); !allowed {
+		t.Fatal("a probe must be granted after the window")
+	}
+	if allowed, _ := breaker.Allow(); allowed {
+		t.Fatal("a second concurrent probe must be refused")
+	}
+	// After the probe deadline the source is tried again instead of staying stuck.
+	now = now.Add(probeTimeout + time.Second)
+	allowed, reason := breaker.Allow()
+	if !allowed {
+		t.Fatalf("an abandoned probe must expire: %q", reason)
+	}
+}

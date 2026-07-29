@@ -263,6 +263,7 @@ func (a *App) startBackground() {
 	backgroundWorker := worker.New(a.store, indexer.New(a.store, indexer.DefaultPolicy()), a.sourceAdapter)
 	backgroundWorker.SetEmbeddingFactory(a.embeddingProvider)
 	backgroundWorker.SetProjection(a.projectSearchStores)
+	backgroundWorker.SetSourceHealth(a)
 	backgroundScheduler := scheduler.New(a.store, a.pollingInterval)
 	backgroundScheduler.SetRetentionLoader(a.retentionPolicy)
 	backgroundScheduler.SetNotificationLoader(a.notificationPolicy)
@@ -2523,8 +2524,12 @@ func (a *App) sourceAdapter(ctx context.Context, sourceType string) (source.Repo
 	if a.adapters == nil {
 		a.adapters = map[string]cachedAdapter{}
 	}
+	previous := a.adapters[sourceType]
 	a.adapters[sourceType] = cachedAdapter{adapter: adapter, version: version}
 	a.adapterMu.Unlock()
+	// The replaced adapter keeps a connection pool to the old endpoint. Releasing
+	// it here keeps a series of setting changes from leaking sockets.
+	closeIdle(previous.adapter)
 	return adapter, nil
 }
 
@@ -2534,6 +2539,15 @@ func (a *App) sourceAdapter(ctx context.Context, sourceType string) (source.Repo
 type cachedAdapter struct {
 	adapter source.RepositorySource
 	version int
+}
+
+// closeIdle releases the connection pool of an adapter that is being replaced.
+// Adapters are not required to implement it; the ones that hold an HTTP client
+// do.
+func closeIdle(adapter source.RepositorySource) {
+	if closer, ok := adapter.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
 }
 
 func sourceAdapterFromMap(sourceType string, settings map[string]any) (source.RepositorySource, error) {
@@ -5544,8 +5558,10 @@ func (a *App) resetSourceHealth(w http.ResponseWriter, r *http.Request) {
 	// The adapter is dropped too, so a corrected credential is picked up even if
 	// the setting version did not change.
 	a.adapterMu.Lock()
+	evicted := a.adapters[sourceType]
 	delete(a.adapters, sourceType)
 	a.adapterMu.Unlock()
+	closeIdle(evicted.adapter)
 	p, _ := auth.FromContext(r.Context())
 	a.audit(r, p, "source.health.reset", "source", sourceType, "success", nil)
 	jsonOut(w, http.StatusOK, breakerPayload(a.breakers.Get(sourceType).State(sourceType)))
@@ -6147,6 +6163,11 @@ func indexState(chunks int, status, message string, files int, startedAt sql.Nul
 		return "stalled", "작업이 " + fmt.Sprint(int(now.Sub(startedAt.Time).Minutes())) + "분째 실행 중입니다.", "소스 서버 응답과 임베딩 엔드포인트를 확인하세요. 리스 시간이 지나면 자동으로 다시 큐에 넣습니다."
 	case status == "running":
 		return "indexing", "색인이 진행 중입니다. 처리 파일 " + fmt.Sprint(files) + "개.", "완료될 때까지 기다리세요. 검색은 소스 API failover로 동작합니다."
+	case status == "pending" && strings.Contains(message, "일시 중단"):
+		// The queue is not stuck: the connector is paused and the job is waiting
+		// for it on purpose. Saying so keeps an operator from "fixing" the worker.
+		return "source-paused", "소스 연동이 일시 중단되어 색인이 대기 중입니다: " + truncateText(message, 300),
+			"소스·색인 화면의 연동 상태에서 원인을 확인하고, 복구되면 [지금 재시도]를 누르세요. 복구되면 자동으로 재개됩니다."
 	case status == "pending":
 		return "queued", "색인 작업이 대기 중입니다.", "Worker 동작과 메타 DB 연결을 확인하세요."
 	case chunks == 0 && message != "":

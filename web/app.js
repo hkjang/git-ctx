@@ -3060,6 +3060,7 @@ const indexStateLabels = {
   partial: ["일부 누락", "warn"],
   indexing: ["색인 중", "warn"],
   queued: ["대기 중", "warn"],
+  "source-paused": ["연동 대기", "warn"],
   stalled: ["정체", "error"],
   failed: ["실패", "error"],
   empty: ["색인 0건", "error"],
