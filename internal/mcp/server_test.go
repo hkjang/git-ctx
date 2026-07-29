@@ -69,6 +69,9 @@ func callAs(t *testing.T, s *Server, principal auth.Principal, body string) map[
 
 func TestRepositorySearchAndAdministratorTools(t *testing.T) {
 	s := fixture(t)
+	s.SetEmbeddingHealthLoader(func(context.Context) string {
+		return "- Requested Mode: hybrid-fallback\n- Operational Mode: keyword-only\n- Degraded Reason: embedding circuit is open"
+	})
 	found := call(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search-repositories","arguments":{"query":"GPU","sourceType":"bitbucket"}}}`)
 	text := found["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
 	if !strings.Contains(text, "/kcb/clustara") {
@@ -85,7 +88,7 @@ func TestRepositorySearchAndAdministratorTools(t *testing.T) {
 	}
 	status := callAs(t, s, admin, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get-platform-status","arguments":{}}}`)
 	text = status["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
-	if !strings.Contains(text, "Metadata Database: connected") {
+	if !strings.Contains(text, "Metadata Database: connected") || !strings.Contains(text, "Embedding Retrieval") || !strings.Contains(text, "embedding circuit is open") {
 		t.Fatalf("platform status=%s", text)
 	}
 	queued := callAs(t, s, admin, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"reindex-repository","arguments":{"libraryId":"/kcb/clustara"}}}`)

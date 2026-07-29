@@ -21,7 +21,7 @@ Go 모듈형 모놀리스로 시작하되 API/MCP/indexer/scheduler 프로세스
 |---|---|
 | `search-repositories` | Library ID 없이 접근 가능한 Bitbucket/GitLab 프로젝트·저장소 검색 |
 | `search-source` | ACL 확인 후 Bitbucket/GitLab Query Search API로 코드·파일 검색 |
-| `get-platform-status` | 관리자 MCP 키로 플랫폼·DB·색인 상태 조회 |
+| `get-platform-status` | 관리자 MCP 키로 플랫폼·DB·색인·실제 임베딩 검색 상태 조회 |
 | `list-index-jobs` | 관리자 MCP 키로 최근 색인 작업 조회 |
 | `reindex-repository` | `source-admin` MCP 키로 멱등 재색인 작업 등록 |
 
@@ -48,7 +48,7 @@ Go 모듈형 모놀리스로 시작하되 API/MCP/indexer/scheduler 프로세스
 | 브라우저 Authorization Code+PKCE | 완료 | 일회성 state/verifier, HttpOnly 세션, Claim 미리보기, Single Logout |
 | Bitbucket 6.9.1 수집/Webhook | 완료 | REST v1 어댑터, 저장소·프로젝트·전역 상속 ACL과 프로젝트 기본 권한, ref 색인, HMAC webhook, 멱등 작업, polling 보정 |
 | GitLab 수집/Webhook | 완료 | API v4 어댑터, 직접·상속 멤버와 public/internal 가시성 ACL, ref 색인, token webhook, 멱등 작업, polling 보정 |
-| 하이브리드 검색 | 완료 | 동적 BM25+로컬/사내 임베딩, ACL 이후 사내 API Reranker, 장애 fallback 구현 |
+| 하이브리드 검색 | 완료 | 동적 BM25+사내 임베딩, ACL별 ref 커버리지 임계값, 모델 Circuit·쿼리 벡터 캐시, 부분 벡터 편향 방지와 장애 fallback |
 | 모델 미설정 검색 | 완료 | ACL 선검사 후 Bitbucket 6.9.1/GitLab 서버측 Query Search API, 장애·비기본 ref의 로컬 BM25 fallback |
 | 검색 품질 벤치마크 | 완료 | ACL principal별 정답 파일, Recall@K·MRR·nDCG@K 회귀 판정과 관리자 UI/API |
 | 사용자/관리자 UI | 완료 | 우측 상단 프로필 메뉴의 전체 개인화 기능, Ctrl/Cmd+K 빠른 이동, 권한 기반 상단 관리자 영역 분리, SSO, 키·사용량, MCP 연결과 세분화 관리자 역할별 화면 |

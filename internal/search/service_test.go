@@ -754,6 +754,76 @@ func TestEmbeddingPolicyKeepsQueryAndSemanticSearchAvailableWithoutVectors(t *te
 	}
 }
 
+func TestEmbeddingCoveragePreventsPartialVectorBias(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:embedding-coverage?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r','core','dify','Dify','gitlab','1','/core/dify','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r','alice','read')`)
+	_, _ = db.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding) VALUES('c','r','main','abc','api/search.go',10,20,'Search service','code','Dify source search query implementation','h',NULL)`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,total_chunks,embedded_chunks,embedding_status) VALUES('r','main','abc',10,2,'partial')`)
+
+	service := New(db)
+	service.SetConfigLoader(func(context.Context) Config {
+		return Config{
+			KeywordWeight: 1, VectorWeight: .35, FinalK: 5, CandidateLimit: 100,
+			RetrievalMode: RetrievalHybridFallback, MinimumEmbeddingCoverage: 80,
+		}
+	})
+	vectorCalls := 0
+	service.SetVectorLoader(func(context.Context, string, string, string, int) ([]VectorCandidate, error) {
+		vectorCalls++
+		return []VectorCandidate{{ID: "c", Score: 1}}, nil
+	})
+	fallbacks := map[string]int{}
+	service.SetFallbackReporter(func(reason string) { fallbacks[reason]++ })
+
+	query, err := service.Query(ctx, []string{"alice"}, "/core/dify/main", "Dify source search")
+	if err != nil || !strings.Contains(query, "api/search.go") {
+		t.Fatalf("query=%q err=%v", query, err)
+	}
+	if !strings.Contains(query, "coverage 20.0%") || !strings.Contains(query, "keyword/source-query retrieval only") {
+		t.Fatalf("partial coverage was not explained: %q", query)
+	}
+	if vectorCalls != 0 || fallbacks["coverage-below-threshold"] != 1 {
+		t.Fatalf("vectorCalls=%d fallbacks=%v", vectorCalls, fallbacks)
+	}
+
+	semantic, err := service.SemanticSearch(ctx, []string{"alice"}, "Dify source search", "", "", 5)
+	if err != nil || len(semantic.Hits) != 1 || !strings.Contains(semantic.Mode, "keyword") {
+		t.Fatalf("semantic=%#v err=%v", semantic, err)
+	}
+	if fallbacks["coverage-below-threshold"] != 2 {
+		t.Fatalf("semantic fallback was not recorded: %v", fallbacks)
+	}
+
+	remote := &querySource{}
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) { return remote, nil })
+	query, err = service.Query(ctx, []string{"alice"}, "/core/dify/main", "Dify source search")
+	if err != nil || !strings.Contains(query, "source-api.md") || !strings.Contains(query, "Retrieval notice: Embedding coverage 20.0%") {
+		t.Fatalf("remote fallback query=%q err=%v", query, err)
+	}
+	if remote.calls != 1 || fallbacks["coverage-below-threshold"] != 3 {
+		t.Fatalf("remote calls=%d fallbacks=%v", remote.calls, fallbacks)
+	}
+
+	service.SetConfigLoader(func(context.Context) Config {
+		return Config{
+			KeywordWeight: 1, VectorWeight: .35, FinalK: 5, CandidateLimit: 100,
+			RetrievalMode: RetrievalHybridRequired, MinimumEmbeddingCoverage: 80,
+		}
+	})
+	if _, err = service.Query(ctx, []string{"alice"}, "/core/dify/main", "Dify source search"); err == nil || !strings.Contains(err.Error(), "coverage 20.0%") {
+		t.Fatalf("required query error=%v", err)
+	}
+	if _, err = service.SemanticSearch(ctx, []string{"alice"}, "Dify source search", "", "", 5); err == nil || !strings.Contains(err.Error(), "coverage 20.0%") {
+		t.Fatalf("required semantic error=%v", err)
+	}
+}
+
 // Before changing shared code an agent must see every repository that uses it,
 // not only the one it happens to be reading.
 func TestFindDependentsCrossesRepositoriesAndRespectsACL(t *testing.T) {

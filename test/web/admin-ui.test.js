@@ -147,6 +147,17 @@ assert.match(script, /versions\/\$\{version\}\/restore/);
 assert.match(script, /api\/v1\/admin\/mcp\/selfcheck/);
 assert.match(script, /api\/v1\/admin\/vector\/status/);
 assert.match(script, /api\/v1\/admin\/vector\/rebuild/);
+for (const runtimeField of [
+  "minimumEmbeddingCoveragePercent",
+  "embeddingFailureThreshold",
+  "embeddingCooldownSeconds",
+  "embeddingCacheSeconds",
+]) {
+  assert.match(script, new RegExp(runtimeField), `missing embedding runtime field ${runtimeField}`);
+}
+assert.match(script, /operationalMode/);
+assert.match(script, /coverage-below-threshold|자동 폴백 사유/);
+assert.match(html, /검색 런타임·벡터 DB 상태/);
 // 새로고침해도 화면이 유지되어야 하므로 위치를 주소에 기록하고 복원한다.
 assert.match(script, /function rememberView/);
 assert.match(script, /function parseViewHash/);

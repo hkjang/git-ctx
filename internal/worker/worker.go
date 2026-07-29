@@ -392,6 +392,8 @@ func (w *Worker) execute(ctx context.Context, j job) (err error) {
 			current += "; "
 		}
 		_, _ = w.store.DB.ExecContext(ctx, w.store.Rebind(`UPDATE index_jobs SET error_message=? WHERE id=?`), truncate(current+embeddingWarning, 1000), j.ID)
+		_, _ = w.store.DB.ExecContext(ctx, w.store.Rebind(`UPDATE repository_ref_states SET embedding_status='degraded',embedding_error=? WHERE repository_id=? AND ref_name=?`),
+			truncate(embeddingWarning, 1000), j.RepositoryID, selected.Name)
 	}
 	if w.projection != nil {
 		if err := w.projection(ctx, j.RepositoryID, selected.Name); err != nil {

@@ -230,7 +230,14 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 		return fail(err)
 	}
 	if previousCommit != "" && previousCommit == ref.LatestCommit && previousEmbeddingRevision == embeddingRevision {
-		_, err = i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,indexed_at,embedding_revision) VALUES(?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET commit_id=excluded.commit_id,indexed_at=excluded.indexed_at,embedding_revision=excluded.embedding_revision`), repoID, ref.Name, ref.LatestCommit, time.Now().UTC(), embeddingRevision)
+		var totalChunks, embeddedChunks int
+		if err = i.store.DB.QueryRowContext(ctx, i.store.Rebind(`SELECT COUNT(*),COUNT(embedding) FROM document_chunks WHERE repository_id=? AND ref_name=?`), repoID, ref.Name).Scan(&totalChunks, &embeddedChunks); err != nil {
+			return fail(err)
+		}
+		embeddingStatus, embeddingError := describeEmbeddingState(embeddingRevision, totalChunks, embeddedChunks, nil)
+		_, err = i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,indexed_at,embedding_revision,total_chunks,embedded_chunks,embedding_status,embedding_error)
+VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET commit_id=excluded.commit_id,indexed_at=excluded.indexed_at,embedding_revision=excluded.embedding_revision,total_chunks=excluded.total_chunks,embedded_chunks=excluded.embedded_chunks,embedding_status=excluded.embedding_status,embedding_error=excluded.embedding_error`),
+			repoID, ref.Name, ref.LatestCommit, time.Now().UTC(), embeddingRevision, totalChunks, embeddedChunks, embeddingStatus, embeddingError)
 		if err != nil {
 			return fail(err)
 		}
@@ -537,7 +544,15 @@ FROM code_dependencies_staging WHERE generation_id=?`), generationID); err != ni
 		_ = tx.Rollback()
 		return fail(err)
 	}
-	if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,indexed_at,embedding_revision) VALUES(?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET commit_id=excluded.commit_id,indexed_at=excluded.indexed_at,embedding_revision=excluded.embedding_revision`), repoID, ref.Name, ref.LatestCommit, time.Now().UTC(), embeddingRevision); err != nil {
+	var totalChunks, embeddedChunks int
+	if err = tx.QueryRowContext(ctx, i.store.Rebind(`SELECT COUNT(*),COUNT(embedding) FROM document_chunks WHERE repository_id=? AND ref_name=?`), repoID, ref.Name).Scan(&totalChunks, &embeddedChunks); err != nil {
+		_ = tx.Rollback()
+		return fail(err)
+	}
+	embeddingStatus, embeddingError := describeEmbeddingState(embeddingRevision, totalChunks, embeddedChunks, embeddingWarnings)
+	if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,indexed_at,embedding_revision,total_chunks,embedded_chunks,embedding_status,embedding_error)
+VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET commit_id=excluded.commit_id,indexed_at=excluded.indexed_at,embedding_revision=excluded.embedding_revision,total_chunks=excluded.total_chunks,embedded_chunks=excluded.embedded_chunks,embedding_status=excluded.embedding_status,embedding_error=excluded.embedding_error`),
+		repoID, ref.Name, ref.LatestCommit, time.Now().UTC(), embeddingRevision, totalChunks, embeddedChunks, embeddingStatus, embeddingError); err != nil {
 		_ = tx.Rollback()
 		return fail(err)
 	}
@@ -595,6 +610,30 @@ FROM code_dependencies_staging WHERE generation_id=?`), generationID); err != ni
 		warning = fmt.Sprintf("%d file(s) listed but none matched the index policy; adjust the repository extension policy", len(files))
 	}
 	return complete(processed, warning)
+}
+
+func describeEmbeddingState(revision string, total, embedded int, warnings []string) (string, string) {
+	message := ""
+	if len(warnings) > 0 {
+		message = truncate(strings.Join(warnings[:min(len(warnings), 3)], "; "), 1000)
+	}
+	switch {
+	case total == 0:
+		return "empty", message
+	case revision == "keyword-only":
+		if message != "" {
+			return "degraded", message
+		}
+		return "disabled", ""
+	case message != "":
+		return "degraded", message
+	case embedded == total:
+		return "ready", ""
+	case embedded == 0:
+		return "unavailable", "no chunks have embeddings"
+	default:
+		return "partial", fmt.Sprintf("%d of %d chunks have embeddings", embedded, total)
+	}
 }
 
 func (i *Indexer) refreshRepositoryMap(ctx context.Context, repoID, ref, commit string) error {

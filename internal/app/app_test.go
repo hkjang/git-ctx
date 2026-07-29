@@ -58,6 +58,7 @@ func TestOperationalSettingsValidation(t *testing.T) {
 		{"security", map[string]any{"trustedProxyCidrs": []any{"10.20.0.0/16"}}},
 		{"logging", map[string]any{"level": "debug"}},
 		{"operations", map[string]any{"listenAddress": ":4747", "readTimeoutSeconds": float64(30), "maintenanceMode": true}},
+		{"search", map[string]any{"retrievalMode": "hybrid-fallback", "minimumEmbeddingCoveragePercent": float64(80), "embeddingFailureThreshold": float64(2), "embeddingCooldownSeconds": float64(60), "embeddingCacheSeconds": float64(120)}},
 	}
 	for _, test := range valid {
 		if err := a.validateSetting(context.Background(), test.category, test.value); err != nil {
@@ -74,6 +75,10 @@ func TestOperationalSettingsValidation(t *testing.T) {
 		{"security", map[string]any{"trustedProxyCidrs": []any{"not-a-cidr"}}},
 		{"logging", map[string]any{"level": "verbose"}},
 		{"operations", map[string]any{"listenAddress": "all-interfaces", "readTimeoutSeconds": float64(0)}},
+		{"search", map[string]any{"retrievalMode": "hybrid-fallback", "minimumEmbeddingCoveragePercent": float64(101)}},
+		{"search", map[string]any{"retrievalMode": "hybrid-fallback", "embeddingFailureThreshold": float64(0)}},
+		{"search", map[string]any{"retrievalMode": "hybrid-fallback", "embeddingCooldownSeconds": float64(4)}},
+		{"search", map[string]any{"retrievalMode": "hybrid-fallback", "embeddingCacheSeconds": float64(3601)}},
 	}
 	for _, test := range invalid {
 		if err := a.validateSetting(context.Background(), test.category, test.value); err == nil {
@@ -818,8 +823,44 @@ func TestPublicAndAdminDatabaseStatus(t *testing.T) {
 	adminRequest.Header.Set("Authorization", "Bearer bootstrap")
 	admin := httptest.NewRecorder()
 	a.Handler().ServeHTTP(admin, adminRequest)
-	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"latest":"038_mcp_call_steps.sql"`) || !strings.Contains(admin.Body.String(), `"pool"`) {
+	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"latest":"039_embedding_coverage.sql"`) || !strings.Contains(admin.Body.String(), `"pool"`) {
 		t.Fatalf("admin status=%d body=%s", admin.Code, admin.Body.String())
+	}
+}
+
+func TestAdministrativeEmbeddingHealthReportsOperationalFallback(t *testing.T) {
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "embedding-health.db") + "?_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
+		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(t.TempDir(), "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	_, _ = a.store.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r','core','dify','Dify','gitlab','1','/core/dify','main')`)
+	_, _ = a.store.DB.Exec(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,total_chunks,embedded_chunks,embedding_status) VALUES('r','main','abc',10,2,'partial')`)
+
+	request := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer bootstrap")
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	vector := request("/api/v1/admin/vector/status")
+	for _, expected := range []string{`"requestedRetrievalMode":"hybrid-fallback"`, `"operationalMode":"keyword-only"`, `"embeddingCoveragePercent":20`, `"partialRefs":1`, `"minimumEmbeddingCoveragePercent":80`} {
+		if vector.Code != http.StatusOK || !strings.Contains(vector.Body.String(), expected) {
+			t.Fatalf("vector status=%d body=%s missing=%s", vector.Code, vector.Body.String(), expected)
+		}
+	}
+	health := request("/api/v1/admin/health")
+	if health.Code != http.StatusOK || !strings.Contains(health.Body.String(), `"operationalMode":"keyword-only"`) || !strings.Contains(health.Body.String(), `"coveragePercent":20`) {
+		t.Fatalf("health=%d body=%s", health.Code, health.Body.String())
+	}
+	metrics := request("/metrics")
+	if metrics.Code != http.StatusOK || !strings.Contains(metrics.Body.String(), "git_ctx_embedding_coverage_percent 20.000") || !strings.Contains(metrics.Body.String(), "git_ctx_embedding_circuit_open 0") {
+		t.Fatalf("metrics=%d body=%s", metrics.Code, metrics.Body.String())
 	}
 }
 

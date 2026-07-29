@@ -34,6 +34,9 @@ type Config struct {
 	RerankLimit       int
 	SourceQuerySearch bool
 	RetrievalMode     string
+	// MinimumEmbeddingCoverage prevents a partially embedded corpus from
+	// silently biasing ranking toward the few refs that have vectors.
+	MinimumEmbeddingCoverage float64
 }
 
 const (
@@ -96,6 +99,7 @@ type Service struct {
 	vector       VectorLoader
 	globalVector GlobalVectorLoader
 	breakers     BreakerRegistry
+	fallback     func(string)
 }
 
 func (s *Service) SetKeywordLoader(loader KeywordLoader) { s.keyword = loader }
@@ -144,6 +148,16 @@ var ErrSourcePaused = errors.New("source integration is paused after repeated fa
 
 // SetBreakers installs the per source circuit breaker registry.
 func (s *Service) SetBreakers(registry BreakerRegistry) { s.breakers = registry }
+
+// SetFallbackReporter exposes automatic retrieval degradation to metrics and
+// administrative health without coupling the search package to one backend.
+func (s *Service) SetFallbackReporter(reporter func(string)) { s.fallback = reporter }
+
+func (s *Service) reportFallback(reason string) {
+	if s.fallback != nil {
+		s.fallback(reason)
+	}
+}
 
 // remoteSource loads an adapter unless the source is currently paused. Every
 // live call in this service goes through it, so one dead instance can never
@@ -1659,6 +1673,7 @@ func (s *Service) SemanticSearch(ctx context.Context, principals []string, query
 	cfg := s.load(ctx)
 	cfg.RetrievalMode = NormalizeRetrievalMode(cfg.RetrievalMode)
 	if !cfg.UsesEmbeddings() {
+		s.reportFallback("policy-disabled")
 		return s.lexicalSemanticFallback(ctx, principals, query, libraryID, sourceType, limit,
 			"keyword/source-query fallback", "embedding use is disabled by the administrator.")
 	}
@@ -1677,6 +1692,26 @@ func (s *Service) SemanticSearch(ctx context.Context, principals []string, query
 		scoped += ` AND r.source_type=?`
 		scopeArgs = append(scopeArgs, sourceType)
 	}
+	if cfg.MinimumEmbeddingCoverage > 0 {
+		coverage, coverageErr := s.semanticEmbeddingCoverage(ctx, join, predicate, aclArgs, scoped, scopeArgs)
+		if coverageErr == nil && coverage.Total == 0 {
+			if cfg.RequiresEmbeddings() {
+				return SemanticSearch{}, errors.New("embedding retrieval is required but no accessible indexed chunks are available")
+			}
+			s.reportFallback("coverage-empty")
+			return s.lexicalSemanticFallback(ctx, principals, query, libraryID, sourceType, limit,
+				"keyword/source-query fallback", "no accessible embedding coverage is available.")
+		}
+		if coverageErr == nil && coverage.Percent() < cfg.MinimumEmbeddingCoverage {
+			message := fmt.Sprintf("embedding coverage %.1f%% is below the configured %.1f%% minimum", coverage.Percent(), cfg.MinimumEmbeddingCoverage)
+			if cfg.RequiresEmbeddings() {
+				return SemanticSearch{}, errors.New("embedding retrieval is required but " + message)
+			}
+			s.reportFallback("coverage-below-threshold")
+			return s.lexicalSemanticFallback(ctx, principals, query, libraryID, sourceType, limit,
+				"keyword/source-query fallback", message+".")
+		}
+	}
 	selectClause := `SELECT c.id,r.library_id,r.source_type,c.ref_name,c.commit_id,c.file_path,c.heading,c.content,c.line_start,c.line_end,c.embedding
 FROM document_chunks c JOIN repositories r ON r.id=c.repository_id ` + join + `
 WHERE r.enabled=1 AND c.embedding IS NOT NULL AND ` + predicate
@@ -1692,6 +1727,7 @@ WHERE r.enabled=1 AND c.embedding IS NOT NULL AND ` + predicate
 			}
 			return SemanticSearch{}, fmt.Errorf("embedding retrieval is required but unavailable: %w", providerErr)
 		}
+		s.reportFallback("provider-unavailable")
 		return s.lexicalSemanticFallback(ctx, principals, query, libraryID, sourceType, limit,
 			"keyword/source-query fallback", "the embedding provider is unavailable; "+errorText(providerErr))
 	}
@@ -1704,6 +1740,7 @@ WHERE r.enabled=1 AND c.embedding IS NOT NULL AND ` + predicate
 			}
 			return SemanticSearch{}, fmt.Errorf("embedding retrieval is required but the query could not be embedded: %w", embedErr)
 		}
+		s.reportFallback("query-embedding-failed")
 		return s.lexicalSemanticFallback(ctx, principals, query, libraryID, sourceType, limit,
 			"keyword/source-query fallback", "the query embedding failed; "+errorText(embedErr))
 	} else {
@@ -1775,6 +1812,7 @@ semanticScan:
 		if cfg.RequiresEmbeddings() {
 			return SemanticSearch{}, errors.New("embedding retrieval is required but no accessible indexed embeddings are available; reindex the repository or change the search execution mode")
 		}
+		s.reportFallback("embeddings-unavailable")
 		return s.lexicalSemanticFallback(ctx, principals, query, libraryID, sourceType, limit,
 			"keyword/source-query fallback", "no accessible indexed embeddings were available.")
 	}
@@ -1784,6 +1822,27 @@ semanticScan:
 	}
 	result.Diagnostics = append(result.Diagnostics, scanDiagnostic)
 	return result, nil
+}
+
+type EmbeddingCoverage struct {
+	Total, Embedded int64
+}
+
+func (c EmbeddingCoverage) Percent() float64 {
+	if c.Total == 0 {
+		return 0
+	}
+	return float64(c.Embedded) * 100 / float64(c.Total)
+}
+
+func (s *Service) semanticEmbeddingCoverage(ctx context.Context, join, predicate string, aclArgs []any, scoped string, scopeArgs []any) (EmbeddingCoverage, error) {
+	statement := `SELECT COALESCE(SUM(rs.total_chunks),0),COALESCE(SUM(rs.embedded_chunks),0)
+FROM repository_ref_states rs JOIN repositories r ON r.id=rs.repository_id ` + join + `
+WHERE r.enabled=1 AND ` + predicate + scoped
+	args := append(append([]any{}, aclArgs...), scopeArgs...)
+	var coverage EmbeddingCoverage
+	err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(statement), args...).Scan(&coverage.Total, &coverage.Embedded)
+	return coverage, err
 }
 
 func errorText(err error) string {
@@ -3040,6 +3099,26 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 		cfg.VectorWeight = 0
 		cfg.SourceQuerySearch = true
 	}
+	coverageFallback := ""
+	if cfg.UsesEmbeddings() && cfg.MinimumEmbeddingCoverage > 0 {
+		var coverage EmbeddingCoverage
+		coverageErr := s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT total_chunks,embedded_chunks FROM repository_ref_states WHERE repository_id=? AND ref_name=?`), repoID, ref).
+			Scan(&coverage.Total, &coverage.Embedded)
+		if errors.Is(coverageErr, sql.ErrNoRows) {
+			coverage = EmbeddingCoverage{}
+			coverageErr = nil
+		}
+		if coverageErr == nil && (coverage.Total == 0 || coverage.Percent() < cfg.MinimumEmbeddingCoverage) {
+			message := fmt.Sprintf("Embedding coverage %.1f%% is below the configured %.1f%% minimum.", coverage.Percent(), cfg.MinimumEmbeddingCoverage)
+			if cfg.RequiresEmbeddings() {
+				return "", errors.New("embedding retrieval is required but " + strings.ToLower(message))
+			}
+			cfg.VectorWeight = 0
+			cfg.SourceQuerySearch = true
+			coverageFallback = message + " This answer used keyword/source-query retrieval only."
+			s.reportFallback("coverage-below-threshold")
+		}
+	}
 	// remoteDocuments asks the source code search API for this repository. It is
 	// used both as the primary mode when no embedding model is configured and as
 	// the failover below when the local index has nothing to offer yet.
@@ -3065,7 +3144,11 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 	if cfg.SourceQuerySearch {
 		if safeHits := remoteDocuments(); len(safeHits) > 0 {
 			span.SetAttributes(attribute.Int("git_ctx.search.result_count", len(safeHits)), attribute.String("git_ctx.search.mode", "source-query-api"))
-			return assembleSourceQueryResults(name, sourceType, baseID, projectKey+"/"+repositorySlug, ref, safeHits, "source-query-api"), nil
+			answer := assembleSourceQueryResults(name, sourceType, baseID, projectKey+"/"+repositorySlug, ref, safeHits, "source-query-api")
+			if coverageFallback != "" {
+				answer += "\n> Retrieval notice: " + coverageFallback + "\n"
+			}
+			return answer, nil
 		}
 	}
 	keywordScores := map[string]float64{}
@@ -3162,11 +3245,13 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 	}
 	avgLength := float64(totalLength) / math.Max(1, float64(len(hits)))
 	var queryVector []float32
-	embeddingFallback := ""
+	embeddingFallback := coverageFallback
 	if cfg.VectorWeight > 0 {
 		provider, providerErr := s.embedder(ctx)
+		fallbackReason := "provider-unavailable"
 		if providerErr == nil && provider != nil {
 			queryVector, providerErr = provider.Embed(ctx, query)
+			fallbackReason = "query-embedding-failed"
 		}
 		if providerErr != nil || len(queryVector) == 0 {
 			if cfg.RequiresEmbeddings() {
@@ -3178,6 +3263,7 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 			cfg.VectorWeight = 0
 			vectorScores = map[string]float64{}
 			embeddingFallback = "Embedding retrieval was unavailable, so this answer used keyword/source-query retrieval only."
+			s.reportFallback(fallbackReason)
 		}
 	}
 	filtered := hits[:0]

@@ -35,12 +35,13 @@ type Server struct {
 	store  *store.Store
 	// health reports the state of the source connectors, so an administrator
 	// asking an agent for platform status sees a paused integration.
-	health     func() []source.BreakerState
-	strictMode func(context.Context) bool
-	mu         sync.Mutex
-	sessions   map[string]*session
-	cacheMu    sync.Mutex
-	cache      map[string]cacheEntry
+	health          func() []source.BreakerState
+	embeddingHealth func(context.Context) string
+	strictMode      func(context.Context) bool
+	mu              sync.Mutex
+	sessions        map[string]*session
+	cacheMu         sync.Mutex
+	cache           map[string]cacheEntry
 }
 type session struct {
 	clientName    string
@@ -456,7 +457,7 @@ func catalog() []map[string]any {
 				"query":     map[string]string{"type": "string"},
 				"ref":       map[string]string{"type": "string"},
 				"limit":     map[string]any{"type": "integer", "minimum": 1, "maximum": 50}}}},
-		{"name": "get-platform-status", "description": "Returns administrative MCP, source, index, and database status. Requires an administrator MCP API key.",
+		{"name": "get-platform-status", "description": "Returns administrative MCP, source, index, database, and effective embedding retrieval status. Requires an administrator MCP API key.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}}},
 		{"name": "list-index-jobs", "description": "Lists recent indexing jobs for source administrators and operators using an MCP API key.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
@@ -965,6 +966,12 @@ func clip(value string, limit int) string {
 // SetHealthLoader installs the source connector health source.
 func (s *Server) SetHealthLoader(loader func() []source.BreakerState) { s.health = loader }
 
+// SetEmbeddingHealthLoader adds the effective retrieval policy and model
+// circuit state to the administrator-only platform status tool.
+func (s *Server) SetEmbeddingHealthLoader(loader func(context.Context) string) {
+	s.embeddingHealth = loader
+}
+
 func catalogContains(name string) bool {
 	for _, tool := range Catalog() {
 		if tool["name"] == name {
@@ -1180,6 +1187,11 @@ func (s *Server) platformStatus(ctx context.Context) (string, error) {
 				}
 				status += "\n"
 			}
+		}
+	}
+	if s.embeddingHealth != nil {
+		if embeddingStatus := strings.TrimSpace(s.embeddingHealth(ctx)); embeddingStatus != "" {
+			status += "\n### Embedding Retrieval\n" + embeddingStatus + "\n"
 		}
 	}
 	return status, nil

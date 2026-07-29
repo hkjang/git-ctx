@@ -306,6 +306,17 @@ func TestOptionalEmbeddingFailureCompletesLexicalGeneration(t *testing.T) {
 	if status != "completed" || !strings.Contains(warning, "embedding disabled") {
 		t.Fatalf("status=%s warning=%q", status, warning)
 	}
+	var embeddingStatus string
+	var totalChunks, embeddedChunks int
+	if err = s.DB.QueryRow(`SELECT embedding_status,total_chunks,embedded_chunks
+FROM repository_ref_states WHERE repository_id='bitbucket:71' AND ref_name='main'`).Scan(
+		&embeddingStatus, &totalChunks, &embeddedChunks,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if embeddingStatus != "degraded" || totalChunks != chunks || embeddedChunks != 0 {
+		t.Fatalf("embedding status=%s coverage=%d/%d want degraded 0/%d", embeddingStatus, embeddedChunks, totalChunks, chunks)
+	}
 }
 
 func TestIncrementalIndexOnlyFetchesChangesAndReusesEmbeddings(t *testing.T) {

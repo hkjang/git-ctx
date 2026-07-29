@@ -15,7 +15,7 @@
 | Confluence/Jira 어댑터 | 완료(계약 시험) | Capability 기반 소스 어댑터, Bearer 및 Basic Auth, 문서·이슈 검색, 관리자 설정·연결 시험과 명시적 ACL Principal |
 | 색인 | 완료 | ref별 작업, 저장소 정책, Markdown/코드 청킹, Secret 차단·마스킹, 재시도·polling |
 | 검색 | 완료 | DB BM25·벡터와 선택적 OpenSearch projection, 후보 질의 ACL 필터, DB 원문 재검증, 사내 `/v1/rerank`와 장애 fallback |
-| 임베딩 실행 정책 | 완료 | 관리자 `keyword-only`·`hybrid-fallback`·`hybrid-required`, Worker/MCP 공통 동적 적용, 실패 시 NULL 벡터 lexical-safe 세대, 자동 재색인, 설정 버전형 MCP 캐시 무효화와 커버리지 진단 |
+| 임베딩 실행 정책 | 완료 | 관리자 `keyword-only`·`hybrid-fallback`·`hybrid-required`, Worker/MCP 공통 동적 적용, 실패 시 NULL 벡터 lexical-safe 세대, ACL/ref 커버리지 임계값, 모델 Circuit·쿼리 벡터 캐시, 관리자 UI/API/MCP/Prometheus 진단 |
 | 모델 미설정 검색 | 완료 | ACL 검증 뒤 Bitbucket/GitLab source query API, Context7 출력 조립과 안전한 BM25 fallback 계약 시험 |
 | 사용자 기능 | 완료 | 우측 상단 프로필 메뉴와 Ctrl/Cmd+K 빠른 이동, 관리자와 분리된 내 공간, 저장소·키·제한·사용량·호출·알림·MCP 설정 UI/API |
 | 관리자 기능 | 완료(구현 범위) | 설정 자동 조회·시험·저장·삭제 CRUD, 저장소·정책·작업, MCP 도구, 키·감사·보안·상태 UI/API와 역할별 메뉴·쓰기 통제 |
@@ -34,7 +34,7 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
-2026-07-28 로컬 검증 결과:
+2026-07-29 로컬 검증 결과:
 
 - Keycloak 26.3.3에서 별도 `groups` Client Scope나 ID Token 역할 Mapper 없이
   Authorization Code+PKCE 로그인, `/admin` 복귀, `/api/v1/me` 200,
@@ -46,7 +46,7 @@ go vet ./...                                PASS
 node --check web/app.js                     PASS
 node test/web/roles.test.js                 PASS
 kubectl kustomize deploy/kubernetes/base    PASS
-PostgreSQL 16 migration 001..028            PASS
+PostgreSQL 16 migration 001..039            PASS
 PostgreSQL 16 backup/restore round trip     PASS
 PostgreSQL 16 quality benchmark contract    PASS
 PostgreSQL 16 notification outbox delivery  PASS

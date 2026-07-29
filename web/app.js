@@ -161,6 +161,10 @@ const integrationSettingFields = {
     ["candidateLimit", "초기 후보 수", "number", 5000],
     ["finalK", "최종 문서 수", "number", 8],
     ["rerankLimit", "재순위화 후보 수", "number", 30],
+    ["minimumEmbeddingCoveragePercent", "최소 임베딩 커버리지(%)", "number", 80],
+    ["embeddingFailureThreshold", "Circuit Open 연속 실패 횟수", "number", 2],
+    ["embeddingCooldownSeconds", "Circuit 재시도 대기(초)", "number", 60],
+    ["embeddingCacheSeconds", "질의 벡터 캐시(초, 0=미사용)", "number", 120],
   ],
   index: [
     ["pollingMinutes", "무결성 Polling 주기(분)", "number", 30],
@@ -1425,6 +1429,16 @@ const connectionTestCategories = [
 ];
 function renderSettingFields(category, value) {
   const fields = integrationSettingFields[category] || [];
+  const fieldHelp = {
+    minimumEmbeddingCoveragePercent:
+      "이 비율보다 낮으면 일부 벡터만 섞지 않고 질의 전체를 키워드·원격 검색으로 전환합니다.",
+    embeddingFailureThreshold:
+      "모델 연속 실패가 이 횟수에 도달하면 Circuit을 열어 반복 Timeout을 막습니다.",
+    embeddingCooldownSeconds:
+      "Circuit이 열린 뒤 한 요청으로 모델 복구를 다시 시험할 때까지 기다리는 시간입니다.",
+    embeddingCacheSeconds:
+      "동일 질의·청크 벡터 재사용 시간입니다. 0이면 캐시를 사용하지 않습니다.",
+  };
   $("#setting-fields").hidden = fields.length === 0;
   $("#test-connection").hidden = !connectionTestCategories.includes(category);
   $("#preview-keycloak").hidden = category !== "keycloak";
@@ -1470,7 +1484,10 @@ function renderSettingFields(category, value) {
       const shown = Array.isArray(current) ? current.join(",") : current;
       const numeric = type === "number" ? ' step="any"' : "";
       const required = category === "keycloak" && ["baseUrl", "realm", "clientId"].includes(key) ? " required" : "";
-      return `<label data-field-key="${key}">${esc(label)}<input data-setting-key="${key}" data-setting-type="${type}" type="${inputType}"${numeric}${required} value="${esc(shown)}" /></label>`;
+      const help = fieldHelp[key]
+        ? `<small class="field-help">${esc(fieldHelp[key])}</small>`
+        : "";
+      return `<label data-field-key="${key}">${esc(label)}<input data-setting-key="${key}" data-setting-type="${type}" type="${inputType}"${numeric}${required} value="${esc(shown)}" />${help}</label>`;
     })
     .join("");
   document.querySelectorAll("[data-setting-key]").forEach(
@@ -1707,9 +1724,23 @@ async function refreshVectorStatus() {
   panel.textContent = "벡터 DB 상태를 확인하는 중…";
   try {
     const status = await api("/api/v1/admin/vector/status");
+    const circuit = status.circuit || {};
+    const retryAt =
+      circuit.retryAt && !String(circuit.retryAt).startsWith("0001-")
+        ? ` · 다음 시험 ${new Date(circuit.retryAt).toLocaleString()}`
+        : "";
+    const circuitLine = `모델 Circuit: ${circuit.state || "idle"} · 연속 실패 ${circuit.consecutiveFailures || 0} · 요청 ${circuit.requests || 0} · 실패 ${circuit.failures || 0} · 캐시 적중 ${circuit.cacheHits || 0} / 보관 ${circuit.cacheEntries || 0}${retryAt}`;
+    const fallbackSummary = Object.entries(circuit.fallbacks || {})
+      .filter(([, count]) => count > 0)
+      .map(([reason, count]) => `${reason} ${count}회`)
+      .join(" · ");
+    const runtimeDetails =
+      `<li>${esc(circuitLine)}</li>` +
+      (fallbackSummary ? `<li>프로세스 자동 폴백: ${esc(fallbackSummary)}</li>` : "") +
+      (circuit.lastError ? `<li>마지막 모델 오류: ${esc(circuit.lastError)}</li>` : "");
     if (!status.configured) {
       panel.className = "result-panel";
-      panel.innerHTML = `<h4>벡터 DB 미사용 · ${esc(status.retrievalMode || "keyword-only")}</h4><ul class="result-list"><li>${esc(status.detail)}</li><li>임베딩 커버리지 ${Number(status.embeddingCoveragePercent || 0).toFixed(1)}% · 전체 청크 ${status.totalChunks || 0}개 / 임베딩 ${status.storedVectors || 0}개</li></ul>`;
+      panel.innerHTML = `<h4>벡터 DB 미사용 · 실제 동작 ${esc(status.operationalMode || status.retrievalMode || "keyword-only")}</h4><ul class="result-list"><li>${esc(status.detail)}</li><li>요청 정책 ${esc(status.requestedRetrievalMode || "-")} · 적용 설정 ${esc(status.retrievalMode || "-")}</li><li>임베딩 커버리지 ${Number(status.embeddingCoveragePercent || 0).toFixed(1)}% · 최소 ${Number(status.minimumEmbeddingCoveragePercent || 0).toFixed(1)}% · 전체 청크 ${status.totalChunks || 0}개 / 임베딩 ${status.storedVectors || 0}개</li>${status.degradedReason ? `<li>자동 폴백 사유: ${esc(status.degradedReason)}</li>` : ""}${runtimeDetails}</ul>`;
       return;
     }
     const ready = status.ready && !status.error;
@@ -1723,8 +1754,11 @@ async function refreshVectorStatus() {
       (status.extensionVersion
         ? `<li>pgvector ${esc(status.extensionVersion)} · 스키마 <code>${esc(status.extensionSchema || "-")}</code></li>`
         : "") +
-      `<li>검색 정책: <code>${esc(status.retrievalMode || "-")}</code> · 임베딩 ${status.embeddingEnabled ? "사용" : "사용 안 함"}</li>` +
-      `<li>벡터 DB ${status.vectors ?? 0}개 / 메타 DB 임베딩 ${status.storedVectors}개 · 전체 청크 ${status.totalChunks || 0}개 (커버리지 ${Number(status.embeddingCoveragePercent || 0).toFixed(1)}%)</li>` +
+      `<li>검색 정책: 요청 <code>${esc(status.requestedRetrievalMode || "-")}</code> · 실제 <code>${esc(status.operationalMode || status.retrievalMode || "-")}</code></li>` +
+      `<li>벡터 DB ${status.vectors ?? 0}개 / 메타 DB 임베딩 ${status.storedVectors}개 · 전체 청크 ${status.totalChunks || 0}개 (커버리지 ${Number(status.embeddingCoveragePercent || 0).toFixed(1)}% / 최소 ${Number(status.minimumEmbeddingCoveragePercent || 0).toFixed(1)}%)</li>` +
+      `<li>Ref 상태: 준비 ${status.readyRefs || 0} · 부분 ${status.partialRefs || 0} · 저하 ${status.degradedRefs || 0} · 사용불가 ${status.unavailableRefs || 0}</li>` +
+      runtimeDetails +
+      (status.degradedReason ? `<li>자동 폴백 사유: ${esc(status.degradedReason)}</li>` : "") +
       `<li>${esc(status.error || status.detail || "")}</li></ul>`;
   } catch (error) {
     panel.className = "result-panel error";
@@ -1942,8 +1976,8 @@ function setupAdmin(roles, capabilities) {
     $("#advanced-setting-json").hidden = category === "keycloak";
     $("#keycloak-mapping-card").hidden = category !== "keycloak";
     $("#source-test-card").hidden = !["bitbucket", "gitlab"].includes(category);
-    $("#vector-card").hidden = category !== "vector";
-    if (category === "vector") refreshVectorStatus();
+    $("#vector-card").hidden = !["search", "vector"].includes(category);
+    if (["search", "vector"].includes(category)) refreshVectorStatus();
     $("#setting-test-result").hidden = true;
     $("#setting-guide-button").hidden = !GitCtxGuides.has(category);
     $("#setting-guide-button").dataset.guide = category;

@@ -83,6 +83,7 @@ type App struct {
 	traces             *observability.Manager
 	backup             *backup.Service
 	quality            *quality.Service
+	embeddingRuntime   *embedding.Runtime
 	secrets            *secretstore.Service
 	notifier           *outboundnotification.Service
 	rootCtx            context.Context
@@ -226,6 +227,7 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 	}
 	a.oidc = auth.NewOIDCVerifier(a.loadOIDCConfig)
 	a.hooks = webhook.New(s)
+	a.embeddingRuntime = embedding.NewRuntime()
 	a.search = search.New(s)
 	a.search.SetConfigLoader(a.searchConfig)
 	a.search.SetEmbeddingLoader(a.semanticEmbeddingProvider)
@@ -239,12 +241,14 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 	a.search.SetSourceLoader(a.sourceAdapter)
 	a.breakers = source.NewBreakers()
 	a.search.SetBreakers(a)
+	a.search.SetFallbackReporter(a.embeddingRuntime.RecordFallback)
 	a.search.SetKeywordLoader(a.openSearchCandidates)
 	a.search.SetVectorLoader(a.vectorCandidates)
 	a.search.SetGlobalVectorLoader(a.globalVectorCandidates)
 	a.quality = quality.New(s, a.search)
 	a.mcp = mcp.New(a.search, s)
 	a.mcp.SetHealthLoader(func() []source.BreakerState { return a.breakers.States() })
+	a.mcp.SetEmbeddingHealthLoader(a.embeddingHealthMarkdown)
 	a.mcp.SetStrictCompatibilityLoader(a.strictMCPCompatibility)
 	a.routes()
 	a.startBackground()
@@ -2832,6 +2836,10 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 			return errors.New("search.retrievalMode must be keyword-only, hybrid-fallback, or hybrid-required")
 		}
 		finalK, candidates, rerankLimit := number("finalK", 8), number("candidateLimit", 5000), number("rerankLimit", 30)
+		coverage := number("minimumEmbeddingCoveragePercent", 80)
+		failureThreshold := number("embeddingFailureThreshold", 2)
+		cooldown := number("embeddingCooldownSeconds", 60)
+		cacheSeconds := number("embeddingCacheSeconds", 120)
 		if keyword < 0 || vector < 0 || keyword+vector == 0 {
 			return errors.New("search weights must be non-negative and not both zero")
 		}
@@ -2840,6 +2848,18 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 		}
 		if rerankLimit < 1 || rerankLimit > 100 {
 			return errors.New("search rerankLimit must be 1..100")
+		}
+		if coverage < 0 || coverage > 100 {
+			return errors.New("search.minimumEmbeddingCoveragePercent must be 0..100")
+		}
+		if failureThreshold < 1 || failureThreshold > 10 {
+			return errors.New("search.embeddingFailureThreshold must be 1..10")
+		}
+		if cooldown < 5 || cooldown > 3600 {
+			return errors.New("search.embeddingCooldownSeconds must be 5..3600")
+		}
+		if cacheSeconds < 0 || cacheSeconds > 3600 {
+			return errors.New("search.embeddingCacheSeconds must be 0..3600")
 		}
 		if mode == search.RetrievalHybridRequired {
 			model, modelErr := a.loadSettingMap(ctx, "model")
@@ -3256,7 +3276,10 @@ func (a *App) rateLimitAlertsEnabled(ctx context.Context) bool {
 	return true
 }
 func (a *App) searchConfig(ctx context.Context) search.Config {
-	cfg := search.Config{KeywordWeight: 1, VectorWeight: .35, FinalK: 8, CandidateLimit: 5000, RetrievalMode: search.RetrievalHybridFallback}
+	cfg := search.Config{
+		KeywordWeight: 1, VectorWeight: .35, FinalK: 8, CandidateLimit: 5000,
+		RetrievalMode: search.RetrievalHybridFallback, MinimumEmbeddingCoverage: 80,
+	}
 	modelSettings, modelErr := a.loadSettingMap(ctx, "model")
 	provider, _ := modelSettings["provider"].(string)
 	noRemoteModel := modelErr != nil || provider != "openai-compatible"
@@ -3290,6 +3313,9 @@ func (a *App) searchConfig(ctx context.Context) search.Config {
 	if value, ok := settings["rerankLimit"].(float64); ok {
 		cfg.RerankLimit = int(value)
 	}
+	if value, ok := settings["minimumEmbeddingCoveragePercent"].(float64); ok {
+		cfg.MinimumEmbeddingCoverage = value
+	}
 	if cfg.RetrievalMode == search.RetrievalKeywordOnly || (noRemoteModel && cfg.RetrievalMode == search.RetrievalHybridFallback) {
 		cfg.VectorWeight = 0
 		cfg.SourceQuerySearch = true
@@ -3298,6 +3324,44 @@ func (a *App) searchConfig(ctx context.Context) search.Config {
 		}
 	}
 	return cfg
+}
+
+func (a *App) requestedRetrievalMode(ctx context.Context) string {
+	settings, err := a.loadSettingMap(ctx, "search")
+	if err != nil {
+		return search.RetrievalHybridFallback
+	}
+	return retrievalModeFromSetting(settings)
+}
+
+func (a *App) embeddingRuntimePolicy(ctx context.Context) embedding.RuntimePolicy {
+	policy := embedding.RuntimePolicy{
+		FailureThreshold: 2, Cooldown: time.Minute, CacheTTL: 2 * time.Minute, CacheEntries: 1000,
+	}
+	settings, err := a.loadSettingMap(ctx, "search")
+	if err != nil {
+		return policy
+	}
+	if value, ok := settings["embeddingFailureThreshold"].(float64); ok {
+		policy.FailureThreshold = int(value)
+	}
+	if value, ok := settings["embeddingCooldownSeconds"].(float64); ok {
+		policy.Cooldown = time.Duration(value * float64(time.Second))
+	}
+	if value, ok := settings["embeddingCacheSeconds"].(float64); ok {
+		policy.CacheTTL = time.Duration(value * float64(time.Second))
+	}
+	return policy
+}
+
+func embeddingRuntimeIdentity(settings map[string]any) string {
+	provider, _ := settings["provider"].(string)
+	model, _ := settings["model"].(string)
+	baseURL, _ := settings["baseUrl"].(string)
+	if provider == "" {
+		return "unconfigured"
+	}
+	return provider + ":" + model + "@" + strings.TrimRight(baseURL, "/")
 }
 
 func (a *App) retrievalMode(ctx context.Context) string {
@@ -3363,7 +3427,13 @@ func (a *App) semanticEmbeddingProvider(ctx context.Context) (embedding.Provider
 	if provider != "openai-compatible" {
 		return nil, errors.New("an OpenAI-compatible embedding model is not configured")
 	}
-	return embeddingProviderFromMap(settings)
+	identity := embeddingRuntimeIdentity(settings)
+	if a.embeddingRuntime == nil {
+		return embeddingProviderFromMap(settings)
+	}
+	return a.embeddingRuntime.Guard(identity, a.embeddingRuntimePolicy(ctx), func() (embedding.Provider, error) {
+		return embeddingProviderFromMap(settings)
+	})
 }
 
 func openSearchConfigFromMap(settings map[string]any) (opensearch.Config, error) {
@@ -5972,6 +6042,95 @@ func safeDatabaseError(err error, dsn string) string {
 	message := strings.ReplaceAll(err.Error(), dsn, "[redacted DSN]")
 	return truncateText(message, 500)
 }
+
+type embeddingHealthView struct {
+	RequestedMode   string                    `json:"requestedMode"`
+	EffectiveMode   string                    `json:"effectiveMode"`
+	OperationalMode string                    `json:"operationalMode"`
+	DegradedReason  string                    `json:"degradedReason,omitempty"`
+	ModelConfigured bool                      `json:"modelConfigured"`
+	TotalChunks     int64                     `json:"totalChunks"`
+	EmbeddedChunks  int64                     `json:"embeddedChunks"`
+	CoveragePercent float64                   `json:"coveragePercent"`
+	MinimumCoverage float64                   `json:"minimumCoveragePercent"`
+	ReadyRefs       int64                     `json:"readyRefs"`
+	PartialRefs     int64                     `json:"partialRefs"`
+	DegradedRefs    int64                     `json:"degradedRefs"`
+	UnavailableRefs int64                     `json:"unavailableRefs"`
+	Circuit         embedding.RuntimeSnapshot `json:"circuit"`
+}
+
+func (a *App) embeddingHealth(ctx context.Context) embeddingHealthView {
+	cfg := a.searchConfig(ctx)
+	view := embeddingHealthView{
+		RequestedMode: a.requestedRetrievalMode(ctx), EffectiveMode: cfg.RetrievalMode,
+		OperationalMode: cfg.RetrievalMode, MinimumCoverage: cfg.MinimumEmbeddingCoverage,
+	}
+	modelSettings, modelErr := a.loadSettingMap(ctx, "model")
+	provider, _ := modelSettings["provider"].(string)
+	view.ModelConfigured = modelErr == nil && provider == "openai-compatible"
+	identity := embeddingRuntimeIdentity(modelSettings)
+	if a.embeddingRuntime != nil {
+		view.Circuit = a.embeddingRuntime.Snapshot(identity)
+	} else {
+		view.Circuit = embedding.RuntimeSnapshot{Identity: identity, State: "idle"}
+	}
+	var trackedRefs int64
+	_ = a.store.DB.QueryRowContext(ctx, `SELECT
+COUNT(*),
+COALESCE(SUM(total_chunks),0),
+COALESCE(SUM(embedded_chunks),0),
+COALESCE(SUM(CASE WHEN embedding_status='ready' THEN 1 ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN embedding_status='partial' THEN 1 ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN embedding_status='degraded' THEN 1 ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN embedding_status='unavailable' THEN 1 ELSE 0 END),0)
+FROM repository_ref_states`).Scan(
+		&trackedRefs, &view.TotalChunks, &view.EmbeddedChunks,
+		&view.ReadyRefs, &view.PartialRefs, &view.DegradedRefs, &view.UnavailableRefs,
+	)
+	// Installations upgraded from a version before ref coverage tracking can
+	// temporarily have chunks but no ref state. Keep diagnostics accurate until
+	// the next index run backfills the aggregate.
+	if trackedRefs == 0 {
+		_ = a.store.DB.QueryRowContext(ctx, `SELECT COUNT(*),COUNT(embedding) FROM document_chunks`).Scan(&view.TotalChunks, &view.EmbeddedChunks)
+	}
+	if view.TotalChunks > 0 {
+		view.CoveragePercent = float64(view.EmbeddedChunks) * 100 / float64(view.TotalChunks)
+	}
+	switch {
+	case view.RequestedMode == search.RetrievalKeywordOnly:
+		view.OperationalMode = search.RetrievalKeywordOnly
+	case !view.ModelConfigured && view.RequestedMode == search.RetrievalHybridFallback:
+		view.OperationalMode = search.RetrievalKeywordOnly
+		view.DegradedReason = "embedding model is not configured"
+	case view.Circuit.State == "open" && view.RequestedMode == search.RetrievalHybridFallback:
+		view.OperationalMode = search.RetrievalKeywordOnly
+		view.DegradedReason = "embedding circuit is open"
+	case view.TotalChunks > 0 && view.CoveragePercent < view.MinimumCoverage && view.RequestedMode == search.RetrievalHybridFallback:
+		view.OperationalMode = search.RetrievalKeywordOnly
+		view.DegradedReason = fmt.Sprintf("embedding coverage %.1f%% is below %.1f%%", view.CoveragePercent, view.MinimumCoverage)
+	}
+	return view
+}
+
+func (a *App) embeddingHealthMarkdown(ctx context.Context) string {
+	view := a.embeddingHealth(ctx)
+	var b strings.Builder
+	fmt.Fprintf(&b, "- Requested Mode: %s\n- Effective Configuration: %s\n- Operational Mode: %s\n", view.RequestedMode, view.EffectiveMode, view.OperationalMode)
+	fmt.Fprintf(&b, "- Coverage: %.1f%% (%d/%d chunks, minimum %.1f%%)\n", view.CoveragePercent, view.EmbeddedChunks, view.TotalChunks, view.MinimumCoverage)
+	fmt.Fprintf(&b, "- Model Circuit: %s · requests %d · failures %d · cache hits %d\n", view.Circuit.State, view.Circuit.Requests, view.Circuit.Failures, view.Circuit.CacheHits)
+	if view.DegradedReason != "" {
+		fmt.Fprintf(&b, "- Degraded Reason: %s\n", view.DegradedReason)
+	}
+	if view.Circuit.LastError != "" {
+		fmt.Fprintf(&b, "- Last Model Error: %s\n", view.Circuit.LastError)
+	}
+	if !view.Circuit.RetryAt.IsZero() && view.Circuit.RetryAt.After(time.Now()) {
+		fmt.Fprintf(&b, "- Next Model Probe: %s\n", view.Circuit.RetryAt.UTC().Format(time.RFC3339))
+	}
+	return b.String()
+}
+
 func (a *App) adminHealth(w http.ResponseWriter, r *http.Request) {
 	var repositories, chunks, pending, failed, activeKeys, activeSecrets, notificationPending, notificationFailed, notificationDead int64
 	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM repositories WHERE enabled=1`).Scan(&repositories)
@@ -5985,7 +6144,7 @@ func (a *App) adminHealth(w http.ResponseWriter, r *http.Request) {
 	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM notification_deliveries WHERE status='dead'`).Scan(&notificationDead)
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
-	jsonOut(w, 200, map[string]any{"status": "ok", "version": version.Version, "build": version.Full(), "database": "ok", "repositories": repositories, "chunks": chunks, "indexJobs": map[string]int64{"pending": pending, "failed": failed}, "notificationDeliveries": map[string]int64{"pending": notificationPending, "failed": notificationFailed, "dead": notificationDead}, "activeApiKeys": activeKeys, "activeManagedSecrets": activeSecrets, "observability": map[string]bool{"tracingEnabled": a.traces.Enabled()}, "go": map[string]any{"goroutines": runtime.NumGoroutine(), "allocatedBytes": memory.Alloc}})
+	jsonOut(w, 200, map[string]any{"status": "ok", "version": version.Version, "build": version.Full(), "database": "ok", "repositories": repositories, "chunks": chunks, "indexJobs": map[string]int64{"pending": pending, "failed": failed}, "notificationDeliveries": map[string]int64{"pending": notificationPending, "failed": notificationFailed, "dead": notificationDead}, "activeApiKeys": activeKeys, "activeManagedSecrets": activeSecrets, "embedding": a.embeddingHealth(r.Context()), "observability": map[string]bool{"tracingEnabled": a.traces.Enabled()}, "go": map[string]any{"goroutines": runtime.NumGoroutine(), "allocatedBytes": memory.Alloc}})
 }
 
 // setupStatus reports how far the initial configuration has progressed. A fresh
@@ -6154,16 +6313,21 @@ func (a *App) settingVersions(w http.ResponseWriter, r *http.Request) {
 // vectorStatus reports whether the configured vector database is reachable and
 // how many vectors it holds compared with the metadata database.
 func (a *App) vectorStatus(w http.ResponseWriter, r *http.Request) {
-	var chunks, stored int64
-	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*),COUNT(embedding) FROM document_chunks`).Scan(&chunks, &stored)
 	searchCfg := a.searchConfig(r.Context())
+	embeddingHealth := a.embeddingHealth(r.Context())
+	chunks, stored := embeddingHealth.TotalChunks, embeddingHealth.EmbeddedChunks
 	coverage := 0.0
 	if chunks > 0 {
 		coverage = float64(stored) * 100 / float64(chunks)
 	}
 	policy := map[string]any{
-		"retrievalMode": searchCfg.RetrievalMode, "embeddingEnabled": searchCfg.UsesEmbeddings(),
+		"retrievalMode": searchCfg.RetrievalMode, "requestedRetrievalMode": embeddingHealth.RequestedMode,
+		"operationalMode": embeddingHealth.OperationalMode, "degradedReason": embeddingHealth.DegradedReason,
+		"embeddingEnabled": searchCfg.UsesEmbeddings(), "circuit": embeddingHealth.Circuit,
 		"storedVectors": stored, "totalChunks": chunks, "chunksWithoutEmbeddings": chunks - stored, "embeddingCoveragePercent": coverage,
+		"minimumEmbeddingCoveragePercent": embeddingHealth.MinimumCoverage,
+		"readyRefs":                       embeddingHealth.ReadyRefs, "partialRefs": embeddingHealth.PartialRefs,
+		"degradedRefs": embeddingHealth.DegradedRefs, "unavailableRefs": embeddingHealth.UnavailableRefs,
 	}
 	store, err := a.vectorStore(r.Context())
 	if errors.Is(err, vectorstore.ErrNotConfigured) {
@@ -6555,6 +6719,21 @@ func (a *App) metrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "# HELP git_ctx_database_up Metadata database connectivity\n# TYPE git_ctx_database_up gauge\ngit_ctx_database_up %d\n", databaseUp)
 	fmt.Fprintf(w, "# HELP git_ctx_go_goroutines Current goroutines\n# TYPE git_ctx_go_goroutines gauge\ngit_ctx_go_goroutines %d\n", runtime.NumGoroutine())
 	fmt.Fprintf(w, "# HELP git_ctx_tracing_enabled OTLP tracing provider enabled\n# TYPE git_ctx_tracing_enabled gauge\ngit_ctx_tracing_enabled %d\n", boolInt(a.traces.Enabled()))
+	embeddingHealth := a.embeddingHealth(r.Context())
+	fmt.Fprintf(w, "# HELP git_ctx_embedding_coverage_percent Percentage of indexed chunks with embeddings\n# TYPE git_ctx_embedding_coverage_percent gauge\ngit_ctx_embedding_coverage_percent %.3f\n", embeddingHealth.CoveragePercent)
+	fmt.Fprintf(w, "# HELP git_ctx_embedding_circuit_open Whether the embedding endpoint circuit is open\n# TYPE git_ctx_embedding_circuit_open gauge\ngit_ctx_embedding_circuit_open %d\n", boolInt(embeddingHealth.Circuit.State == "open"))
+	fmt.Fprintf(w, "# HELP git_ctx_embedding_requests_total Process-local embedding provider requests\n# TYPE git_ctx_embedding_requests_total counter\ngit_ctx_embedding_requests_total %d\n", embeddingHealth.Circuit.Requests)
+	fmt.Fprintf(w, "# HELP git_ctx_embedding_failures_total Process-local embedding provider failures\n# TYPE git_ctx_embedding_failures_total counter\ngit_ctx_embedding_failures_total %d\n", embeddingHealth.Circuit.Failures)
+	fmt.Fprintf(w, "# HELP git_ctx_embedding_cache_hits_total Process-local query and chunk embedding cache hits\n# TYPE git_ctx_embedding_cache_hits_total counter\ngit_ctx_embedding_cache_hits_total %d\n", embeddingHealth.Circuit.CacheHits)
+	reasons := make([]string, 0, len(embeddingHealth.Circuit.Fallbacks))
+	for reason := range embeddingHealth.Circuit.Fallbacks {
+		reasons = append(reasons, reason)
+	}
+	sort.Strings(reasons)
+	fmt.Fprint(w, "# HELP git_ctx_embedding_fallback_total Automatic embedding fallback decisions by reason\n# TYPE git_ctx_embedding_fallback_total counter\n")
+	for _, reason := range reasons {
+		fmt.Fprintf(w, "git_ctx_embedding_fallback_total{reason=%q} %d\n", reason, embeddingHealth.Circuit.Fallbacks[reason])
+	}
 }
 func (a *App) audit(r *http.Request, p auth.Principal, action, rt, rid, outcome string, metadata any) {
 	raw, _ := json.Marshal(metadata)

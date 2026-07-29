@@ -373,7 +373,11 @@ localhost 시험 서버에만 허용된다.
   "vectorWeight": 0.35,
   "candidateLimit": 5000,
   "finalK": 8,
-  "rerankLimit": 30
+  "rerankLimit": 30,
+  "minimumEmbeddingCoveragePercent": 80,
+  "embeddingFailureThreshold": 2,
+  "embeddingCooldownSeconds": 60,
+  "embeddingCacheSeconds": 120
 }
 ```
 
@@ -385,11 +389,26 @@ localhost 시험 서버에만 허용된다.
 | `hybrid-fallback` | 임베딩이 정상이면 하이브리드 검색을 사용하고 모델·벡터 데이터 장애 시 키워드 검색으로 자동 전환 (기본값) |
 | `hybrid-required` | 모델 또는 접근 가능한 임베딩 데이터가 없으면 오류를 반환해 품질 계약 위반을 숨기지 않음 |
 
+접근 가능한 저장소/ref의 임베딩 커버리지가 `minimumEmbeddingCoveragePercent`보다
+낮으면 벡터가 존재하는 일부 문서만 과대평가하지 않도록 해당 질의 전체를
+키워드·Bitbucket/GitLab Query Search API로 전환한다. `hybrid-required`에서는 같은
+상황을 오류로 반환한다. 커버리지는 ACL 적용 뒤 ref별 집계로 계산하며 색인 상태에는
+`ready`, `partial`, `degraded`, `unavailable`, `disabled`가 기록된다.
+
+임베딩 endpoint가 `embeddingFailureThreshold`회 연속 실패하면 프로세스별 Circuit이
+열리고 `embeddingCooldownSeconds` 동안 느린 모델 재시도를 즉시 차단한다. 대기 후에는
+한 요청만 시험해 성공 시 자동 복구한다. `embeddingCacheSeconds`는 동일한 질의와
+색인 청크의 벡터를 짧게 재사용하며 `0`이면 캐시를 사용하지 않는다. Kubernetes에서는
+Circuit과 캐시 지표가 Pod별 값이므로 Prometheus에서 instance label로 관찰한다.
+
 실행 모드 또는 임베딩 모델 identity가 바뀌면 알려진 저장소 ref를 자동으로 재색인
 큐에 등록한다. 새 staging 세대가 원자적으로 완료될 때까지 기존 검색 데이터는 유지된다.
 `hybrid-fallback`에서 모델 probe나 배치 임베딩이 실패하면 청크·심볼·의존성은 NULL
 벡터로 정상 커밋되고 색인 작업에 경고가 기록된다. MCP 캐시는 `search`, `model`,
 `vector`, `opensearch` 설정 버전을 키에 포함하므로 설정 저장 즉시 이전 응답과 분리된다.
+관리자 검색·벡터 DB 탭과 `/api/v1/admin/health`, 관리자 MCP
+`get-platform-status`는 요청 정책, 실제 동작 모드, 커버리지, Circuit과 마지막 장애를
+함께 표시한다.
 
 선택적으로 사내 AI Gateway가 `/v1/rerank` 계약(`query`, `documents`, `model`,
 `top_n`)을 제공하면 같은 `model` 설정에 다음 필드를 추가한다. Reranker에는 ACL을
