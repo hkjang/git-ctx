@@ -23,6 +23,7 @@ import (
 	"git-ctx/internal/observability"
 	"git-ctx/internal/recovery"
 	"git-ctx/internal/search"
+	"git-ctx/internal/store"
 	"git-ctx/internal/version"
 )
 
@@ -78,6 +79,33 @@ func TestOperationalSettingsValidation(t *testing.T) {
 		if err := a.validateSetting(context.Background(), test.category, test.value); err == nil {
 			t.Fatalf("invalid %s setting was accepted: %#v", test.category, test.value)
 		}
+	}
+}
+
+func TestRetrievalPolicyChangeQueuesEachRefOnce(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:retrieval-reindex?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r','p','repo','Repo','gitlab','1','/p/repo','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,embedding_revision) VALUES('r','main','abc','old-model')`)
+	a := &App{store: db}
+	queued, err := a.enqueueRetrievalReindex(ctx)
+	if err != nil || queued != 1 {
+		t.Fatalf("queued=%d err=%v", queued, err)
+	}
+	queued, err = a.enqueueRetrievalReindex(ctx)
+	if err != nil || queued != 0 {
+		t.Fatalf("duplicate queued=%d err=%v", queued, err)
+	}
+	var kind, status string
+	if err = db.DB.QueryRow(`SELECT kind,status FROM index_jobs WHERE repository_id='r' AND ref_name='main'`).Scan(&kind, &status); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "retrieval-policy" || status != "pending" {
+		t.Fatalf("kind=%s status=%s", kind, status)
 	}
 }
 

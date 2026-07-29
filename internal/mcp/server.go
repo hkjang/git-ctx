@@ -373,7 +373,7 @@ func catalog() []map[string]any {
 				"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"},
 				"startLine":  map[string]any{"type": "integer", "minimum": 1, "description": "Optional first line, 1-based"},
 				"endLine":    map[string]any{"type": "integer", "minimum": 1, "description": "Optional last line, inclusive"}}}},
-		{"name": "search-semantic", "description": "Finds code and documentation by meaning across every accessible repository, without needing a library ID or a shared keyword. Use it for a described behaviour (\"where do we retry failed webhooks\") when search-code returns nothing because the wording differs.",
+		{"name": "search-semantic", "description": "Finds code and documentation across accessible repositories without requiring a library ID. In hybrid mode it searches by meaning; when embeddings are disabled or unavailable it transparently uses ACL-safe keyword and Bitbucket/GitLab query search.",
 			"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
 				"query":      map[string]string{"type": "string", "description": "Describe the behaviour or concept in natural language"},
 				"libraryId":  map[string]string{"type": "string", "description": "Optional library scope"},
@@ -906,6 +906,8 @@ func retrievalMode(text string) string {
 		return "vector"
 	case strings.Contains(text, "retrieval: in-database scan"):
 		return "scan"
+	case strings.Contains(text, "retrieval: keyword/source-query"), strings.Contains(text, "keyword/source-query retrieval"):
+		return "keyword"
 	case strings.Contains(text, "answered live"), strings.Contains(text, "live source code search"):
 		return "remote"
 	case strings.Contains(text, "still indexing"):
@@ -1271,7 +1273,26 @@ func (s *Server) cacheKey(ctx context.Context, p auth.Principal, tool string, ar
 	repositories := append([]string(nil), p.AllowedRepositories...)
 	sort.Strings(repositories)
 	aclRevision := s.aclRevision(ctx, principals)
-	return tool + "|" + strings.Join(principals, ",") + "|" + strings.Join(repositories, ",") + "|" + aclRevision + "|" + string(raw)
+	configRevision := s.searchConfigRevision(ctx)
+	return tool + "|" + strings.Join(principals, ",") + "|" + strings.Join(repositories, ",") + "|" + aclRevision + "|" + configRevision + "|" + string(raw)
+}
+
+func (s *Server) searchConfigRevision(ctx context.Context) string {
+	rows, err := s.store.DB.QueryContext(ctx, `SELECT category,version FROM system_settings
+WHERE category IN ('search','model','vector','opensearch') ORDER BY category`)
+	if err != nil {
+		return "unavailable"
+	}
+	defer rows.Close()
+	digest := sha256.New()
+	for rows.Next() {
+		var category string
+		var version int
+		if rows.Scan(&category, &version) == nil {
+			_, _ = fmt.Fprintf(digest, "%s:%d\n", category, version)
+		}
+	}
+	return hex.EncodeToString(digest.Sum(nil))
 }
 
 func (s *Server) aclRevision(ctx context.Context, principals []string) string {
@@ -1555,13 +1576,17 @@ func firstNonEmpty(values ...string) string {
 func formatSemanticSearch(result search.SemanticSearch) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "## Semantic Search\n\nQuery: `%s`\nMatches: %d · retrieval: %s\n", result.Query, len(result.Hits), result.Mode)
+	scoreLabel := "similarity"
+	if strings.Contains(result.Mode, "keyword") || strings.Contains(result.Mode, "source-query") {
+		scoreLabel = "rank score"
+	}
 	for _, hit := range result.Hits {
-		fmt.Fprintf(&b, "\n### %s · %s (similarity %.2f)\n\n%s\n\nSource: `%s://%s@%s/%s#L%d-L%d`\n",
-			hit.LibraryID, hit.FilePath, hit.Score, strings.TrimSpace(hit.Content),
+		fmt.Fprintf(&b, "\n### %s · %s (%s %.2f)\n\n%s\n\nSource: `%s://%s@%s/%s#L%d-L%d`\n",
+			hit.LibraryID, hit.FilePath, scoreLabel, hit.Score, strings.TrimSpace(hit.Content),
 			hit.SourceType, strings.TrimPrefix(hit.LibraryID, "/"), firstNonEmpty(hit.CommitID, hit.Ref), hit.FilePath, hit.LineStart, hit.LineEnd)
 	}
 	if len(result.Hits) == 0 {
-		b.WriteString("\nNothing was close enough in meaning. Try describing the behaviour differently, or use search-code for an exact term.\n")
+		b.WriteString("\nNo accessible code or documentation matched. Try another term, source type, or repository scope.\n")
 	}
 	if len(result.Diagnostics) > 0 {
 		b.WriteString("\n### Notes\n")

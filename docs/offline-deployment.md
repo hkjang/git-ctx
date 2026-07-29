@@ -7,7 +7,7 @@ AMD64 환경으로 반입할 수 있는 Docker/OCI 이미지 보관 파일이다
 ## 무결성 확인과 Docker 로드
 
 ```bash
-VERSION=0.35.6
+VERSION=0.36.0
 sha256sum -c "git-ctx-v${VERSION}.tar.gz.sha256"
 gzip -dc "git-ctx-v${VERSION}.tar.gz" | docker load
 docker image inspect "git-ctx:v${VERSION}" --format '{{.Id}} {{.Architecture}} {{.Os}}'
@@ -17,7 +17,7 @@ docker image inspect "git-ctx:v${VERSION}" --format '{{.Id}} {{.Architecture}} {
 별도로 준비한다. 기본 포트는 `4747`이며 PostgreSQL은 DSN 하나로 연결한다.
 
 ```bash
-VERSION=0.35.6
+VERSION=0.36.0
 docker run -d --name git-ctx \
   --restart unless-stopped \
   -p 4747:4747 \
@@ -39,7 +39,7 @@ Kubernetes Secret 또는 사내 Secret Store를 사용한다. 최초 관리자 �
 같다.
 
 ```bash
-VERSION=0.35.6
+VERSION=0.36.0
 gzip -dc "git-ctx-v${VERSION}.tar.gz" \
   | sudo ctr --namespace k8s.io images import -
 sudo ctr --namespace k8s.io images list | grep git-ctx
@@ -73,8 +73,8 @@ docker inspect <container> --format '{{.Config.Image}}'
 ```
 
 `build` 값에는 커밋과 빌드 시각이 포함되므로, 같은 버전 문자열이라도 다른 빌드인지
-구분할 수 있습니다. 이미지 빌드 시 `--build-arg VERSION=v0.35.6` 을 주면 소스의
+구분할 수 있습니다. 이미지 빌드 시 `--build-arg VERSION=v0.36.0` 을 주면 소스의
 버전과 다를 때 빌드가 실패하므로, 태그와 코드가 어긋난 이미지가 만들어지지 않습니다.
 
-릴리스 아카이브에는 정식 태그 `git-ctx:v0.35.6`와 호환 태그
-`git-ctx:0.35.6`가 함께 들어 있습니다. 신규 배포 구성에는 정식 태그를 사용합니다.
+릴리스 아카이브에는 정식 태그 `git-ctx:v0.36.0`와 호환 태그
+`git-ctx:0.36.0`가 함께 들어 있습니다. 신규 배포 구성에는 정식 태그를 사용합니다.

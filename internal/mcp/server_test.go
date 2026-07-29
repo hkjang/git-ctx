@@ -400,6 +400,32 @@ func TestACLChangeInvalidatesCachedSearch(t *testing.T) {
 	}
 }
 
+func TestSearchSettingChangeInvalidatesToolCache(t *testing.T) {
+	s := fixture(t)
+	_, _ = s.store.DB.Exec(`UPDATE mcp_tools SET cache_seconds=300 WHERE name='resolve-library-id'`)
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"resolve-library-id","arguments":{"libraryName":"clustara","query":"GPU"}}}`
+	first := call(t, s, body)
+	firstText := first["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(firstText, "Name: Clustara") {
+		t.Fatalf("fixture result=%s", firstText)
+	}
+	_, _ = s.store.DB.Exec(`UPDATE repositories SET name='Clustara Changed' WHERE id='r1'`)
+	cached := call(t, s, body)
+	cachedText := cached["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if strings.Contains(cachedText, "Clustara Changed") {
+		t.Fatal("expected the unchanged settings revision to use the cached response")
+	}
+	_, err := s.store.DB.Exec(`INSERT INTO system_settings(category,version,value_encrypted,updated_by) VALUES('search',1,X'01','admin')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := call(t, s, body)
+	changedText := changed["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(changedText, "Clustara Changed") {
+		t.Fatalf("settings revision did not invalidate the cache: %s", changedText)
+	}
+}
+
 func TestStreamableHTTPGETKeepsSSEOpenUntilSessionDelete(t *testing.T) {
 	s := fixture(t)
 	httpServer := httptest.NewServer(s)

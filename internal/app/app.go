@@ -228,13 +228,7 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 	a.hooks = webhook.New(s)
 	a.search = search.New(s)
 	a.search.SetConfigLoader(a.searchConfig)
-	a.search.SetEmbeddingLoader(func(ctx context.Context) embedding.Provider {
-		provider, err := a.embeddingProvider(ctx)
-		if err != nil {
-			return embedding.Local{}
-		}
-		return provider
-	})
+	a.search.SetEmbeddingLoader(a.semanticEmbeddingProvider)
 	a.search.SetRerankerLoader(func(ctx context.Context) rerank.Provider {
 		provider, err := a.rerankerProvider(ctx)
 		if err != nil {
@@ -262,7 +256,8 @@ func (a *App) startBackground() {
 	workerCtx, cancel := context.WithCancel(a.rootCtx)
 	a.cancel = cancel
 	backgroundWorker := worker.New(a.store, indexer.New(a.store, indexer.DefaultPolicy()), a.sourceAdapter)
-	backgroundWorker.SetEmbeddingFactory(a.embeddingProvider)
+	backgroundWorker.SetEmbeddingFactory(a.semanticEmbeddingProvider)
+	backgroundWorker.SetRetrievalModeLoader(a.retrievalMode)
 	backgroundWorker.SetProjection(a.projectSearchStores)
 	backgroundWorker.SetSourceHealth(a)
 	backgroundScheduler := scheduler.New(a.store, a.pollingInterval)
@@ -2053,10 +2048,18 @@ func (a *App) putSetting(w http.ResponseWriter, r *http.Request) {
 	force := r.URL.Query().Get("force") == "true"
 	unresolvedSecrets := []string{}
 	previous, err := a.loadSettingMapRaw(r.Context(), category)
+	previouslyConfigured := err == nil
 	if err != nil {
 		previous = map[string]any{}
 	}
 	unresolvedSecrets = preserveMasked(previous, value)
+	previousRetrievalMode := ""
+	previousEmbeddingFingerprint := ""
+	if category == "search" {
+		previousRetrievalMode = retrievalModeFromSetting(previous)
+	} else if category == "model" {
+		previousEmbeddingFingerprint = embeddingConfigFingerprint(previous)
+	}
 	if err := a.normalizeSetting(r.Context(), category, value); err != nil {
 		problem(w, 400, "setting_normalization_failed", err.Error())
 		return
@@ -2149,7 +2152,85 @@ func (a *App) putSetting(w http.ResponseWriter, r *http.Request) {
 		result["redirectUrl"] = value["redirectUrl"]
 		result["loginTestUrl"] = "/auth/login?return_to=/"
 	}
+	retrievalPolicyChanged := category == "search" && (!previouslyConfigured || previousRetrievalMode != retrievalModeFromSetting(value))
+	embeddingModelChanged := category == "model" && (!previouslyConfigured || previousEmbeddingFingerprint != embeddingConfigFingerprint(value))
+	if retrievalPolicyChanged || embeddingModelChanged {
+		queued, queueErr := a.enqueueRetrievalReindex(r.Context())
+		if queueErr != nil {
+			result["warning"] = "검색 실행 모드는 즉시 적용됐지만 자동 재색인 작업을 등록하지 못했습니다: " + queueErr.Error()
+		} else {
+			result["reindexJobsQueued"] = queued
+			result["indexTransition"] = "기존 검색 데이터는 계속 제공되며, 새 정책으로 저장소를 순차 재색인합니다."
+		}
+	}
 	jsonOut(w, 200, result)
+}
+
+func embeddingConfigFingerprint(value map[string]any) string {
+	keys := []string{"provider", "baseUrl", "model", "apiKey"}
+	digest := sha256.New()
+	for _, key := range keys {
+		_, _ = fmt.Fprintf(digest, "%s=%v\n", key, value[key])
+	}
+	return hex.EncodeToString(digest.Sum(nil))
+}
+
+func retrievalModeFromSetting(value map[string]any) string {
+	if mode, ok := value["retrievalMode"].(string); ok {
+		return search.NormalizeRetrievalMode(mode)
+	}
+	if enabled, ok := value["embeddingEnabled"].(bool); ok && !enabled {
+		return search.RetrievalKeywordOnly
+	}
+	return search.RetrievalHybridFallback
+}
+
+// enqueueRetrievalReindex safely moves every known ref toward the new vector
+// policy. Existing answers remain active until each staging generation commits.
+func (a *App) enqueueRetrievalReindex(ctx context.Context) (int, error) {
+	rows, err := a.store.DB.QueryContext(ctx, `SELECT DISTINCT r.id,COALESCE(NULLIF(s.ref_name,''),r.default_branch)
+FROM repositories r LEFT JOIN repository_ref_states s ON s.repository_id=r.id
+WHERE r.enabled=1 ORDER BY r.id`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	type target struct{ repository, ref string }
+	var targets []target
+	for rows.Next() {
+		var item target
+		if err = rows.Scan(&item.repository, &item.ref); err != nil {
+			return 0, err
+		}
+		if item.ref != "" {
+			targets = append(targets, item)
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return 0, err
+	}
+	queued := 0
+	for _, item := range targets {
+		var existing string
+		err = a.store.DB.QueryRowContext(ctx, a.store.Rebind(`SELECT id FROM index_jobs WHERE repository_id=? AND ref_name=? AND status IN ('pending','running') LIMIT 1`), item.repository, item.ref).Scan(&existing)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return queued, err
+		}
+		id, tokenErr := randomToken(16)
+		if tokenErr != nil {
+			return queued, tokenErr
+		}
+		_, err = a.store.DB.ExecContext(ctx, a.store.Rebind(`INSERT INTO index_jobs(id,repository_id,ref_name,kind,status,next_run_at) VALUES(?,?,?,'retrieval-policy','pending',?)`),
+			"policy:"+id, item.repository, item.ref, time.Now().UTC())
+		if err != nil {
+			return queued, err
+		}
+		queued++
+	}
+	return queued, nil
 }
 
 func (a *App) deleteSetting(w http.ResponseWriter, r *http.Request) {
@@ -2172,7 +2253,15 @@ func (a *App) deleteSetting(w http.ResponseWriter, r *http.Request) {
 	if category == "logging" {
 		runtimelogging.Reset()
 	}
-	a.audit(r, p, "settings.delete", category, category, "success", nil)
+	detail := map[string]any{}
+	if category == "search" || category == "model" {
+		queued, queueErr := a.enqueueRetrievalReindex(r.Context())
+		detail["reindexJobsQueued"] = queued
+		if queueErr != nil {
+			detail["reindexQueueError"] = queueErr.Error()
+		}
+	}
+	a.audit(r, p, "settings.delete", category, category, "success", detail)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -2598,6 +2687,11 @@ func sourceAdapterFromMap(sourceType string, settings map[string]any) (source.Re
 	}
 }
 func (a *App) normalizeSetting(ctx context.Context, category string, value map[string]any) error {
+	if category == "search" {
+		value["retrievalMode"] = retrievalModeFromSetting(value)
+		delete(value, "embeddingEnabled")
+		return nil
+	}
 	if category != "keycloak" {
 		return nil
 	}
@@ -2731,6 +2825,12 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 			return fallback
 		}
 		keyword, vector := number("keywordWeight", 1), number("vectorWeight", .35)
+		mode := retrievalModeFromSetting(value)
+		switch mode {
+		case search.RetrievalKeywordOnly, search.RetrievalHybridFallback, search.RetrievalHybridRequired:
+		default:
+			return errors.New("search.retrievalMode must be keyword-only, hybrid-fallback, or hybrid-required")
+		}
 		finalK, candidates, rerankLimit := number("finalK", 8), number("candidateLimit", 5000), number("rerankLimit", 30)
 		if keyword < 0 || vector < 0 || keyword+vector == 0 {
 			return errors.New("search weights must be non-negative and not both zero")
@@ -2740,6 +2840,13 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 		}
 		if rerankLimit < 1 || rerankLimit > 100 {
 			return errors.New("search rerankLimit must be 1..100")
+		}
+		if mode == search.RetrievalHybridRequired {
+			model, modelErr := a.loadSettingMap(ctx, "model")
+			provider, _ := model["provider"].(string)
+			if modelErr != nil || provider != "openai-compatible" {
+				return errors.New("hybrid-required needs a tested OpenAI-compatible embedding model setting")
+			}
 		}
 	case "model":
 		provider, err := embeddingProviderFromMap(value)
@@ -3149,17 +3256,24 @@ func (a *App) rateLimitAlertsEnabled(ctx context.Context) bool {
 	return true
 }
 func (a *App) searchConfig(ctx context.Context) search.Config {
-	cfg := search.Config{KeywordWeight: 1, VectorWeight: .35, FinalK: 8, CandidateLimit: 5000}
+	cfg := search.Config{KeywordWeight: 1, VectorWeight: .35, FinalK: 8, CandidateLimit: 5000, RetrievalMode: search.RetrievalHybridFallback}
 	modelSettings, modelErr := a.loadSettingMap(ctx, "model")
 	provider, _ := modelSettings["provider"].(string)
-	noRemoteModel := modelErr != nil || provider == "" || provider == "local"
+	noRemoteModel := modelErr != nil || provider != "openai-compatible"
 	settings, err := a.loadSettingMap(ctx, "search")
 	if err != nil {
 		if noRemoteModel {
 			cfg.VectorWeight = 0
 			cfg.SourceQuerySearch = true
+			cfg.RetrievalMode = search.RetrievalKeywordOnly
 		}
 		return cfg
+	}
+	if value, ok := settings["retrievalMode"].(string); ok {
+		cfg.RetrievalMode = search.NormalizeRetrievalMode(value)
+	} else if enabled, ok := settings["embeddingEnabled"].(bool); ok && !enabled {
+		// Backward-compatible import of the short-lived boolean setting.
+		cfg.RetrievalMode = search.RetrievalKeywordOnly
 	}
 	if value, ok := settings["keywordWeight"].(float64); ok {
 		cfg.KeywordWeight = value
@@ -3176,11 +3290,18 @@ func (a *App) searchConfig(ctx context.Context) search.Config {
 	if value, ok := settings["rerankLimit"].(float64); ok {
 		cfg.RerankLimit = int(value)
 	}
-	if noRemoteModel {
+	if cfg.RetrievalMode == search.RetrievalKeywordOnly || (noRemoteModel && cfg.RetrievalMode == search.RetrievalHybridFallback) {
 		cfg.VectorWeight = 0
 		cfg.SourceQuerySearch = true
+		if noRemoteModel {
+			cfg.RetrievalMode = search.RetrievalKeywordOnly
+		}
 	}
 	return cfg
+}
+
+func (a *App) retrievalMode(ctx context.Context) string {
+	return a.searchConfig(ctx).RetrievalMode
 }
 
 func (a *App) strictMCPCompatibility(ctx context.Context) bool {
@@ -3226,6 +3347,21 @@ func (a *App) embeddingProvider(ctx context.Context) (embedding.Provider, error)
 	settings, err := a.loadSettingMap(ctx, "model")
 	if err != nil {
 		return embedding.Local{}, nil
+	}
+	return embeddingProviderFromMap(settings)
+}
+
+// semanticEmbeddingProvider deliberately excludes the legacy hash-based local
+// provider. It is useful for deterministic unit tests, but it must never be
+// mixed with vectors produced by a configured model.
+func (a *App) semanticEmbeddingProvider(ctx context.Context) (embedding.Provider, error) {
+	settings, err := a.loadSettingMap(ctx, "model")
+	if err != nil {
+		return nil, errors.New("embedding model is not configured")
+	}
+	provider, _ := settings["provider"].(string)
+	if provider != "openai-compatible" {
+		return nil, errors.New("an OpenAI-compatible embedding model is not configured")
 	}
 	return embeddingProviderFromMap(settings)
 }
@@ -3362,6 +3498,9 @@ func (a *App) projectSearchStores(ctx context.Context, repositoryID, ref string)
 
 // projectVectors republishes the embeddings of one ref to the vector database.
 func (a *App) projectVectors(ctx context.Context, repositoryID, ref string) error {
+	if !a.searchConfig(ctx).UsesEmbeddings() {
+		return nil
+	}
 	store, err := a.vectorStore(ctx)
 	if errors.Is(err, vectorstore.ErrNotConfigured) {
 		return nil
@@ -3438,6 +3577,9 @@ WHERE c.embedding IS NOT NULL`
 
 // vectorCandidates is the search side of the integration.
 func (a *App) vectorCandidates(ctx context.Context, repositoryID, ref, query string, limit int) ([]search.VectorCandidate, error) {
+	if !a.searchConfig(ctx).UsesEmbeddings() {
+		return nil, nil
+	}
 	store, err := a.vectorStore(ctx)
 	if errors.Is(err, vectorstore.ErrNotConfigured) {
 		return nil, nil
@@ -3446,7 +3588,7 @@ func (a *App) vectorCandidates(ctx context.Context, repositoryID, ref, query str
 		return nil, err
 	}
 	defer store.Close()
-	provider, providerErr := a.embeddingProvider(ctx)
+	provider, providerErr := a.semanticEmbeddingProvider(ctx)
 	if providerErr != nil {
 		return nil, providerErr
 	}
@@ -3468,6 +3610,9 @@ func (a *App) vectorCandidates(ctx context.Context, repositoryID, ref, query str
 // globalVectorCandidates asks the vector database for nearest neighbours across
 // every repository. The repository ACL is applied by the caller afterwards.
 func (a *App) globalVectorCandidates(ctx context.Context, query string, limit int) ([]search.VectorCandidate, error) {
+	if !a.searchConfig(ctx).UsesEmbeddings() {
+		return nil, nil
+	}
 	store, err := a.vectorStore(ctx)
 	if errors.Is(err, vectorstore.ErrNotConfigured) {
 		return nil, nil
@@ -3476,7 +3621,7 @@ func (a *App) globalVectorCandidates(ctx context.Context, query string, limit in
 		return nil, err
 	}
 	defer store.Close()
-	provider, providerErr := a.embeddingProvider(ctx)
+	provider, providerErr := a.semanticEmbeddingProvider(ctx)
 	if providerErr != nil {
 		return nil, providerErr
 	}
@@ -6009,14 +6154,26 @@ func (a *App) settingVersions(w http.ResponseWriter, r *http.Request) {
 // vectorStatus reports whether the configured vector database is reachable and
 // how many vectors it holds compared with the metadata database.
 func (a *App) vectorStatus(w http.ResponseWriter, r *http.Request) {
-	var stored int64
-	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM document_chunks WHERE embedding IS NOT NULL`).Scan(&stored)
+	var chunks, stored int64
+	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*),COUNT(embedding) FROM document_chunks`).Scan(&chunks, &stored)
+	searchCfg := a.searchConfig(r.Context())
+	coverage := 0.0
+	if chunks > 0 {
+		coverage = float64(stored) * 100 / float64(chunks)
+	}
+	policy := map[string]any{
+		"retrievalMode": searchCfg.RetrievalMode, "embeddingEnabled": searchCfg.UsesEmbeddings(),
+		"storedVectors": stored, "totalChunks": chunks, "chunksWithoutEmbeddings": chunks - stored, "embeddingCoveragePercent": coverage,
+	}
 	store, err := a.vectorStore(r.Context())
 	if errors.Is(err, vectorstore.ErrNotConfigured) {
-		jsonOut(w, http.StatusOK, map[string]any{
-			"configured": false, "provider": "none", "storedVectors": stored,
-			"detail": "벡터 DB를 사용하지 않습니다. 임베딩은 메타 DB에 저장되어 애플리케이션에서 직접 채점합니다.",
-		})
+		policy["configured"], policy["provider"] = false, "none"
+		if searchCfg.UsesEmbeddings() {
+			policy["detail"] = "외부 벡터 DB 없이 메타 DB에 저장된 임베딩을 애플리케이션에서 직접 채점합니다."
+		} else {
+			policy["detail"] = "관리자 검색 정책이 키워드 전용입니다. 임베딩과 벡터 DB는 검색에 사용되지 않습니다."
+		}
+		jsonOut(w, http.StatusOK, policy)
 		return
 	}
 	if err != nil {
@@ -6027,11 +6184,14 @@ func (a *App) vectorStatus(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 	status, statusErr := store.Status(ctx)
-	response := map[string]any{
+	response := policy
+	for key, value := range map[string]any{
 		"configured": true, "provider": status.Provider, "target": status.Target, "collection": status.Collection,
 		"dimensions": status.Dimensions, "vectors": status.Vectors, "ready": status.Ready,
-		"detail": status.Detail, "storedVectors": stored, "database": status.Database, "user": status.User,
+		"detail": status.Detail, "database": status.Database, "user": status.User,
 		"extensionVersion": status.ExtensionVersion, "extensionSchema": status.ExtensionSchema,
+	} {
+		response[key] = value
 	}
 	if statusErr != nil {
 		response["ready"] = false
@@ -6044,6 +6204,10 @@ func (a *App) vectorStatus(w http.ResponseWriter, r *http.Request) {
 // migrates to a vector database or switches between pgvector and Milvus.
 func (a *App) vectorRebuild(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
+	if !a.searchConfig(r.Context()).UsesEmbeddings() {
+		problem(w, http.StatusConflict, "embedding_disabled", "검색 실행 모드에서 임베딩 사용이 비활성화되어 있습니다. 하이브리드 모드와 임베딩 모델을 먼저 설정하세요.")
+		return
+	}
 	store, err := a.vectorStore(r.Context())
 	if errors.Is(err, vectorstore.ErrNotConfigured) {
 		problem(w, http.StatusBadRequest, "vector_not_configured", "Select a vector database provider in the vector setting first")

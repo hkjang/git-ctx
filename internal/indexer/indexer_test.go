@@ -283,6 +283,31 @@ func TestFailedGenerationPreservesActiveChunksAndCleansStaging(t *testing.T) {
 	}
 }
 
+func TestOptionalEmbeddingFailureCompletesLexicalGeneration(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file:optional-embedding?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+	repo := source.Repository{ID: 71, ProjectKey: "KCB", Slug: "lexical", Name: "Lexical", DefaultBranch: "main"}
+	err = NewWithOptionalEmbedder(s, DefaultPolicy(), failingEmbedder{}).SyncRepository(ctx, fakeSource{}, "bitbucket", repo,
+		[]source.Reference{{Name: "main", LatestCommit: "abc123"}})
+	if err != nil {
+		t.Fatalf("optional embedding must not fail indexing: %v", err)
+	}
+	var chunks, vectors int
+	_ = s.DB.QueryRow(`SELECT COUNT(*),COUNT(embedding) FROM document_chunks WHERE repository_id='bitbucket:71'`).Scan(&chunks, &vectors)
+	if chunks == 0 || vectors != 0 {
+		t.Fatalf("chunks=%d vectors=%d", chunks, vectors)
+	}
+	var status, warning string
+	_ = s.DB.QueryRow(`SELECT status,COALESCE(error_message,'') FROM index_jobs ORDER BY created_at DESC LIMIT 1`).Scan(&status, &warning)
+	if status != "completed" || !strings.Contains(warning, "embedding disabled") {
+		t.Fatalf("status=%s warning=%q", status, warning)
+	}
+}
+
 func TestIncrementalIndexOnlyFetchesChangesAndReusesEmbeddings(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(ctx, "sqlite", "file::memory:?cache=shared&_foreign_keys=on")

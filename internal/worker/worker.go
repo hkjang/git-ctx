@@ -11,6 +11,7 @@ import (
 
 	"git-ctx/internal/embedding"
 	"git-ctx/internal/indexer"
+	"git-ctx/internal/search"
 	"git-ctx/internal/source"
 	"git-ctx/internal/store"
 	"go.opentelemetry.io/otel"
@@ -30,6 +31,7 @@ type SourceHealth interface {
 	Report(sourceType string, err error)
 }
 type EmbeddingFactory func(context.Context) (embedding.Provider, error)
+type RetrievalModeLoader func(context.Context) string
 type Projection func(context.Context, string, string) error
 type Worker struct {
 	store            *store.Store
@@ -38,6 +40,7 @@ type Worker struct {
 	poll             time.Duration
 	maxAttempts      int
 	embeddingFactory EmbeddingFactory
+	retrievalMode    RetrievalModeLoader
 	projection       Projection
 	lease            time.Duration
 	timeout          time.Duration
@@ -48,7 +51,10 @@ type Worker struct {
 func (w *Worker) SetSourceHealth(health SourceHealth) { w.health = health }
 
 func (w *Worker) SetEmbeddingFactory(factory EmbeddingFactory) { w.embeddingFactory = factory }
-func (w *Worker) SetProjection(projection Projection)          { w.projection = projection }
+func (w *Worker) SetRetrievalModeLoader(loader RetrievalModeLoader) {
+	w.retrievalMode = loader
+}
+func (w *Worker) SetProjection(projection Projection) { w.projection = projection }
 
 func New(s *store.Store, idx *indexer.Indexer, f SourceFactory) *Worker {
 	return &Worker{store: s, indexer: idx, factory: f, poll: 2 * time.Second, maxAttempts: 5, lease: jobLease, timeout: jobTimeout}
@@ -334,32 +340,58 @@ func (w *Worker) execute(ctx context.Context, j job) (err error) {
 		}
 		return fmt.Errorf("source ref %q does not exist in %s/%s; available refs include %s", refName, r.ProjectKey, r.Slug, strings.Join(available, ", "))
 	}
-	activeIndexer := w.indexer
 	policy := indexer.DefaultPolicy()
 	var extensions, excludes string
 	var maxBytes int64
 	if err := w.store.DB.QueryRowContext(ctx, w.store.Rebind(`SELECT include_extensions,exclude_prefixes,max_file_bytes FROM repository_index_policies WHERE repository_id=?`), j.RepositoryID).Scan(&extensions, &excludes, &maxBytes); err == nil {
 		policy = indexer.Policy{IncludeExtensions: split(extensions), ExcludePrefixes: split(excludes), MaxFileBytes: maxBytes}
-		activeIndexer = indexer.New(w.store, policy)
 	}
-	if w.embeddingFactory != nil {
+	mode := search.RetrievalHybridRequired
+	if w.retrievalMode != nil {
+		mode = search.NormalizeRetrievalMode(w.retrievalMode(ctx))
+	} else if w.embeddingFactory == nil {
+		// Preserve the standalone worker's historical local-vector behaviour.
+		mode = search.RetrievalHybridFallback
+	}
+	activeIndexer := indexer.NewWithoutEmbeddings(w.store, policy)
+	if w.retrievalMode == nil && w.embeddingFactory == nil && w.indexer != nil {
+		activeIndexer = w.indexer
+	}
+	embeddingWarning := ""
+	if mode != search.RetrievalKeywordOnly && w.embeddingFactory != nil {
 		provider, err := w.embeddingFactory(ctx)
 		if err != nil {
-			return fmt.Errorf("embedding provider: %w (check the model setting)", err)
+			if mode == search.RetrievalHybridRequired {
+				return fmt.Errorf("embedding provider: %w (check the model setting)", err)
+			}
+			embeddingWarning = "Embedding provider unavailable; completed as keyword-only: " + truncate(err.Error(), 240)
+		} else {
+			// Probe the model before downloading anything. In fallback mode a bad
+			// endpoint is an operational warning, not a reason to lose the
+			// repository's lexical index.
+			probeCtx, cancelProbe := context.WithTimeout(ctx, 30*time.Second)
+			_, probeErr := provider.Embed(probeCtx, "git-ctx embedding probe")
+			cancelProbe()
+			if probeErr != nil {
+				if mode == search.RetrievalHybridRequired {
+					return fmt.Errorf("embedding endpoint rejected a probe request: %w (model setting: run the connection test)", probeErr)
+				}
+				embeddingWarning = "Embedding probe failed; completed as keyword-only: " + truncate(probeErr.Error(), 240)
+			} else {
+				activeIndexer = indexer.NewWithOptionalEmbedder(w.store, policy, provider)
+			}
 		}
-		// Probe the model before downloading anything. A wrong URL, model name or
-		// API key then fails in a second with a precise message instead of after
-		// the whole repository has been fetched.
-		probeCtx, cancelProbe := context.WithTimeout(ctx, 30*time.Second)
-		_, probeErr := provider.Embed(probeCtx, "git-ctx embedding probe")
-		cancelProbe()
-		if probeErr != nil {
-			return fmt.Errorf("embedding endpoint rejected a probe request: %w (model setting: run the connection test)", probeErr)
-		}
-		activeIndexer = indexer.NewWithEmbedder(w.store, policy, provider)
 	}
 	if err := activeIndexer.ApplyPendingJob(ctx, adapter, r.SourceType, r.Repository, []source.Reference{*selected}, j.ID); err != nil {
 		return fmt.Errorf("index %s@%s: %w", r.ProjectKey+"/"+r.Slug, selected.Name, err)
+	}
+	if embeddingWarning != "" {
+		var current string
+		_ = w.store.DB.QueryRowContext(ctx, w.store.Rebind(`SELECT COALESCE(error_message,'') FROM index_jobs WHERE id=?`), j.ID).Scan(&current)
+		if current != "" {
+			current += "; "
+		}
+		_, _ = w.store.DB.ExecContext(ctx, w.store.Rebind(`UPDATE index_jobs SET error_message=? WHERE id=?`), truncate(current+embeddingWarning, 1000), j.ID)
 	}
 	if w.projection != nil {
 		if err := w.projection(ctx, j.RepositoryID, selected.Name); err != nil {

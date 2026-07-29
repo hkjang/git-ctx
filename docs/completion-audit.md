@@ -15,6 +15,7 @@
 | Confluence/Jira 어댑터 | 완료(계약 시험) | Capability 기반 소스 어댑터, Bearer 및 Basic Auth, 문서·이슈 검색, 관리자 설정·연결 시험과 명시적 ACL Principal |
 | 색인 | 완료 | ref별 작업, 저장소 정책, Markdown/코드 청킹, Secret 차단·마스킹, 재시도·polling |
 | 검색 | 완료 | DB BM25·벡터와 선택적 OpenSearch projection, 후보 질의 ACL 필터, DB 원문 재검증, 사내 `/v1/rerank`와 장애 fallback |
+| 임베딩 실행 정책 | 완료 | 관리자 `keyword-only`·`hybrid-fallback`·`hybrid-required`, Worker/MCP 공통 동적 적용, 실패 시 NULL 벡터 lexical-safe 세대, 자동 재색인, 설정 버전형 MCP 캐시 무효화와 커버리지 진단 |
 | 모델 미설정 검색 | 완료 | ACL 검증 뒤 Bitbucket/GitLab source query API, Context7 출력 조립과 안전한 BM25 fallback 계약 시험 |
 | 사용자 기능 | 완료 | 우측 상단 프로필 메뉴와 Ctrl/Cmd+K 빠른 이동, 관리자와 분리된 내 공간, 저장소·키·제한·사용량·호출·알림·MCP 설정 UI/API |
 | 관리자 기능 | 완료(구현 범위) | 설정 자동 조회·시험·저장·삭제 CRUD, 저장소·정책·작업, MCP 도구, 키·감사·보안·상태 UI/API와 역할별 메뉴·쓰기 통제 |

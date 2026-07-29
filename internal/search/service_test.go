@@ -709,6 +709,51 @@ func TestSemanticSearchUsesVectorDatabaseAndFallsBackToScan(t *testing.T) {
 	}
 }
 
+func TestEmbeddingPolicyKeepsQueryAndSemanticSearchAvailableWithoutVectors(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:embedding-policy?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r','core','dify','Dify','gitlab','1','/core/dify','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r','alice','read')`)
+	_, _ = db.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding) VALUES('c','r','main','abc','api/search.go',10,20,'Search service','code','Dify source search query implementation','h',NULL)`)
+
+	service := New(db)
+	service.SetConfigLoader(func(context.Context) Config {
+		return Config{KeywordWeight: 1, VectorWeight: .35, FinalK: 5, CandidateLimit: 100, RetrievalMode: RetrievalKeywordOnly}
+	})
+	service.SetEmbeddingLoader(func(context.Context) (embedding.Provider, error) {
+		return nil, errors.New("embedding endpoint is down")
+	})
+	semantic, err := service.SemanticSearch(ctx, []string{"alice"}, "Dify source search", "", "", 5)
+	if err != nil || len(semantic.Hits) != 1 || semantic.Hits[0].FilePath != "api/search.go" {
+		t.Fatalf("semantic=%#v err=%v", semantic, err)
+	}
+	if !strings.Contains(semantic.Mode, "keyword") {
+		t.Fatalf("mode=%q", semantic.Mode)
+	}
+	query, err := service.Query(ctx, []string{"alice"}, "/core/dify/main", "Dify source search")
+	if err != nil || !strings.Contains(query, "api/search.go") || !strings.Contains(query, "Embedding use is disabled") {
+		t.Fatalf("query=%q err=%v", query, err)
+	}
+
+	service.SetConfigLoader(func(context.Context) Config {
+		return Config{KeywordWeight: 1, VectorWeight: .35, FinalK: 5, CandidateLimit: 100, RetrievalMode: RetrievalHybridFallback}
+	})
+	query, err = service.Query(ctx, []string{"alice"}, "/core/dify/main", "Dify source search")
+	if err != nil || !strings.Contains(query, "keyword/source-query retrieval only") {
+		t.Fatalf("fallback query=%q err=%v", query, err)
+	}
+	service.SetConfigLoader(func(context.Context) Config {
+		return Config{KeywordWeight: 1, VectorWeight: .35, FinalK: 5, CandidateLimit: 100, RetrievalMode: RetrievalHybridRequired}
+	})
+	if _, err = service.Query(ctx, []string{"alice"}, "/core/dify/main", "Dify source search"); err == nil || !strings.Contains(err.Error(), "required") {
+		t.Fatalf("required mode error=%v", err)
+	}
+}
+
 // Before changing shared code an agent must see every repository that uses it,
 // not only the one it happens to be reading.
 func TestFindDependentsCrossesRepositoriesAndRespectsACL(t *testing.T) {

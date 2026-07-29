@@ -368,6 +368,7 @@ localhost 시험 서버에만 허용된다.
 
 ```json
 {
+  "retrievalMode": "hybrid-fallback",
   "keywordWeight": 1.0,
   "vectorWeight": 0.35,
   "candidateLimit": 5000,
@@ -375,6 +376,20 @@ localhost 시험 서버에만 허용된다.
   "rerankLimit": 30
 }
 ```
+
+`retrievalMode`은 색인 Worker와 모든 MCP 검색 도구가 공유하는 실행 정책이다.
+
+| 값 | 동작 |
+|---|---|
+| `keyword-only` | 임베딩 생성과 벡터 DB 조회를 하지 않고 로컬 키워드 및 Bitbucket/GitLab Query Search API만 사용 |
+| `hybrid-fallback` | 임베딩이 정상이면 하이브리드 검색을 사용하고 모델·벡터 데이터 장애 시 키워드 검색으로 자동 전환 (기본값) |
+| `hybrid-required` | 모델 또는 접근 가능한 임베딩 데이터가 없으면 오류를 반환해 품질 계약 위반을 숨기지 않음 |
+
+실행 모드 또는 임베딩 모델 identity가 바뀌면 알려진 저장소 ref를 자동으로 재색인
+큐에 등록한다. 새 staging 세대가 원자적으로 완료될 때까지 기존 검색 데이터는 유지된다.
+`hybrid-fallback`에서 모델 probe나 배치 임베딩이 실패하면 청크·심볼·의존성은 NULL
+벡터로 정상 커밋되고 색인 작업에 경고가 기록된다. MCP 캐시는 `search`, `model`,
+`vector`, `opensearch` 설정 버전을 키에 포함하므로 설정 저장 즉시 이전 응답과 분리된다.
 
 선택적으로 사내 AI Gateway가 `/v1/rerank` 계약(`query`, `documents`, `model`,
 `top_n`)을 제공하면 같은 `model` 설정에 다음 필드를 추가한다. Reranker에는 ACL을
@@ -391,7 +406,8 @@ localhost 시험 서버에만 허용된다.
 }
 ```
 
-기본 `model.provider`는 외부 호출이 없는 256차원 `local`이다. 사내 vLLM 또는 AI
+`model.provider=local`은 이전 설정과 시험 호환용이며 운영 의미 검색 벡터로 사용하지
+않는다. 모델이 없으면 `hybrid-fallback`은 키워드 전용으로 동작한다. 사내 vLLM 또는 AI
 Gateway가 OpenAI embeddings API를 제공하면 다음처럼 변경한다. 저장 전에 실제
 embedding 요청으로 연결을 시험한다. 색인 청크에는 provider, model, dimension,
 revision이 함께 저장되며 모델 identity가 변경되면 동일 commit이라도 전체 재색인한다.
@@ -557,20 +573,22 @@ Bootstrap PostgreSQL에 연결할 수 없으면 `backups/recovery.db` SQLite로 
 
 ## 모델 미설정 검색 모드
 
-`model.provider`가 없거나 `local`이면 벡터와 Reranker 점수를 사용하지 않는다. 저장소
+`retrievalMode=keyword-only`이거나 `hybrid-fallback`에서 모델이 없으면 벡터 점수를
+사용하지 않는다. Reranker는 별도 설정이며 활성화된 경우 키워드 후보에도 적용할 수 있다. 저장소
 ACL과 Library ID를 먼저 검증한 다음 GitLab은 프로젝트 `/search?scope=blobs`,
 Bitbucket Server 6.9.1은 `/rest/search/latest/search`를 해당 저장소로 제한해 호출한다.
 서버측 검색이 결과를 반환하면 Context7 형식 Markdown과 원문 출처로 조립한다. 검색
-API 결과 경로가 현재 ref의 승인된 색인에 존재할 때만 채택하고, 반환 본문은 Secret
-Scan·경로 정책을 통과한 로컬 청크로 대체한다. 검색 API가 비활성·장애이면 로컬
+API 결과 본문은 Secret Scan과 크기 제한을 통과한 경우에만 사용하고, 승인된 색인이
+있으면 해당 로컬 청크와 인접 문맥으로 대체한다. 검색 API가 비활성·장애이면 로컬
 색인의 BM25 키워드 검색으로 Fail Safe fallback한다.
 Bitbucket code search는 기본 브랜치 계약이므로 비기본 branch/tag 질의는 버전별 로컬
 색인만 사용한다.
 
 ## 벡터 데이터베이스
 
-기본값은 미사용이다. 임베딩은 `document_chunks.embedding`에 저장되고 애플리케이션이
-코사인 점수를 직접 계산하므로 추가 인프라 없이 동작한다. 벡터 DB를 연동하면 키워드
+기본값은 미사용이다. 하이브리드 모드의 임베딩은 `document_chunks.embedding`에 저장되고
+애플리케이션이 코사인 점수를 직접 계산하므로 추가 인프라 없이 동작한다. 키워드 전용
+모드에서는 이 컬럼을 NULL로 저장한다. 벡터 DB를 연동하면 키워드
 후보에 걸리지 않는 의미 후보를 ANN으로 추가하고, 청크 수가 늘어도 성능이 유지된다.
 
 ```json

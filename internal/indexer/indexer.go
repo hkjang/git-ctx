@@ -66,9 +66,10 @@ var indexableByName = map[string]bool{
 }
 
 type Indexer struct {
-	store    *store.Store
-	policy   Policy
-	embedder embedding.Provider
+	store             *store.Store
+	policy            Policy
+	embedder          embedding.Provider
+	embeddingRequired bool
 }
 
 func New(s *store.Store, p Policy) *Indexer {
@@ -82,6 +83,25 @@ func NewWithEmbedder(s *store.Store, p Policy, provider embedding.Provider) *Ind
 	if provider != nil {
 		index.embedder = provider
 	}
+	index.embeddingRequired = true
+	return index
+}
+
+// NewWithoutEmbeddings builds the lexical-only indexing path. Chunks, symbols,
+// dependencies and source metadata are still indexed; only the vector column is
+// omitted.
+func NewWithoutEmbeddings(s *store.Store, p Policy) *Indexer {
+	index := New(s, p)
+	index.embedder = nil
+	return index
+}
+
+// NewWithOptionalEmbedder keeps indexing usable when an embedding service
+// becomes unavailable mid-batch. The completed generation contains lexical
+// chunks with NULL vectors and the job records a warning for operators.
+func NewWithOptionalEmbedder(s *store.Store, p Policy, provider embedding.Provider) *Indexer {
+	index := NewWithoutEmbeddings(s, p)
+	index.embedder = provider
 	return index
 }
 func LibraryID(projectKey, slug string) string {
@@ -192,11 +212,14 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 	}
 	embeddingMetadata := embedding.Metadata{}
 	metadataKnown := false
-	if provider, ok := i.embedder.(embedding.MetadataProvider); ok {
+	if provider, ok := i.embedder.(embedding.MetadataProvider); ok && i.embedder != nil {
 		embeddingMetadata = provider.EmbeddingMetadata()
 		metadataKnown = embeddingMetadata.Provider != "" && embeddingMetadata.Model != ""
 	}
 	embeddingRevision := embeddingMetadata.Provider + "\x00" + embeddingMetadata.Model + "\x00" + embeddingMetadata.Revision
+	if i.embedder == nil {
+		embeddingRevision = "keyword-only"
+	}
 	previousCommit := ""
 	previousEmbeddingRevision := ""
 	err := i.store.DB.QueryRowContext(ctx, i.store.Rebind(`SELECT commit_id,embedding_revision FROM repository_ref_states WHERE repository_id=? AND ref_name=?`), repoID, ref.Name).Scan(&previousCommit, &previousEmbeddingRevision)
@@ -273,6 +296,7 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 		embedText                                                string
 	}
 	var pending []pendingChunk
+	var embeddingWarnings []string
 	flush := func() error {
 		if len(pending) == 0 {
 			return nil
@@ -285,14 +309,27 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 				positions = append(positions, index)
 			}
 		}
-		if len(texts) > 0 {
+		if len(texts) > 0 && i.embedder != nil {
 			vectors, embedErr := embedding.EmbedAll(ctx, i.embedder, texts)
 			if embedErr != nil {
-				return fmt.Errorf("embedding %d chunks near %s: %w", len(texts), pending[positions[0]].filePath, embedErr)
+				if i.embeddingRequired {
+					return fmt.Errorf("embedding %d chunks near %s: %w", len(texts), pending[positions[0]].filePath, embedErr)
+				}
+				embeddingWarnings = append(embeddingWarnings,
+					fmt.Sprintf("embedding disabled for %d chunk(s) near %s after model error: %s", len(texts), pending[positions[0]].filePath, truncate(embedErr.Error(), 160)))
+				// Do not keep calling a broken endpoint for every remaining
+				// batch in this generation.
+				i.embedder = nil
+				embeddingMetadata = embedding.Metadata{}
+				embeddingRevision = "keyword-only"
+				metadataKnown = false
+				texts = nil
 			}
-			for position, vector := range vectors {
-				pending[positions[position]].vector = embedding.Encode(vector)
-				embeddingMetadata.Dimensions = len(vector)
+			if embedErr == nil {
+				for position, vector := range vectors {
+					pending[positions[position]].vector = embedding.Encode(vector)
+					embeddingMetadata.Dimensions = len(vector)
+				}
 			}
 		}
 		for _, chunk := range pending {
@@ -545,6 +582,12 @@ FROM code_dependencies_staging WHERE generation_id=?`), generationID); err != ni
 	warning := ""
 	if len(skipped) > 0 {
 		warning = fmt.Sprintf("%d file(s) skipped: %s", len(skipped), strings.Join(skipped[:min(len(skipped), 5)], "; "))
+	}
+	if len(embeddingWarnings) > 0 {
+		if warning != "" {
+			warning += "; "
+		}
+		warning += strings.Join(embeddingWarnings[:min(len(embeddingWarnings), 3)], "; ")
 	}
 	// A completed job with nothing indexed is the most confusing outcome of all,
 	// so name the reason instead of leaving a silent zero.

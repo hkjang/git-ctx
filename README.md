@@ -42,6 +42,8 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - Keycloak 역할·Claim 매핑 편집기와 `GET /api/v1/me/access` 권한 진단
 - 초기 설정 진행 상황 대시보드, 저장소 일괄 등록과 설정 변경 이력 조회
 - 새로고침·링크 공유에도 유지되는 화면 위치, 저장소별 색인 정책 편집
+- 관리자 검색 실행 모드(`keyword-only`, `hybrid-fallback`, `hybrid-required`)와 MCP 전체 공통 적용
+- 임베딩 장애 시 NULL 벡터로 완료되는 lexical-safe 색인, 자동 재색인·MCP 캐시 버전 분리
 - 배치 임베딩과 재시도, 파일 단위 색인 내결함성, 실시간 색인 진행 표시
 - 중단된 색인 작업 자동 재큐, 작업 실행 시간 제한, 임베딩 사전 probe
 - 저장소별 색인 상태·원인·조치를 설명하는 색인 진단 화면과 API
@@ -53,9 +55,9 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - 관리자 설정 기반 OTLP HTTP tracing과 W3C trace context 전파
 - 인앱 알림과 Webhook·사내 메신저·SMTP 외부 전달 Outbox, 연결 시험·재시도·관리 이력
 - SQLite/PostgreSQL 공통 암호화 예약 백업, 보존 및 트랜잭션 복원 UI/API
-- BM25와 256차원 로컬 벡터 결합 검색, 색인 전 Secret 차단·마스킹
-- 선택적 pgvector·Milvus 연동, 미연동 시 메타 DB 내장 벡터로 동일 동작
-- Library ID 없이 의미로 찾는 저장소 전 범위 `search-semantic` (벡터 DB 없으면 제한 스캔)
+- BM25와 사내 OpenAI 호환 임베딩 결합 검색, 색인 전 Secret 차단·마스킹
+- 선택적 pgvector·Milvus 연동, 미연동 시 메타 DB 저장 벡터로 동일 동작
+- Library ID 없이 찾는 저장소 전 범위 `search-semantic` (임베딩 미사용·장애 시 키워드/소스 Query API 자동 폴백)
 - 도구별 응답 예산으로 에이전트 컨텍스트 보호, 잘린 응답은 남은 결과 수와 좁히는 방법을 함께 반환
 - MCP 호출 감사(세션·클라이언트·질의 요약·검색 경로·결과 수)와 기간별 통계·권장 조치·CSV 내보내기
 - 호출 X-ray: 단계별 후보→통과 수와 소요 시간, 같은 세션의 호출 순서로 결과가 사라진 지점 추적

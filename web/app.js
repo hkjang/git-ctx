@@ -150,6 +150,12 @@ const integrationSettingFields = {
     ["maxRequestBytes", "최대 요청 크기(Byte)", "number", 1048576],
   ],
   search: [
+    [
+      "retrievalMode",
+      "검색 실행 모드",
+      "select:keyword-only|hybrid-fallback|hybrid-required",
+      "hybrid-fallback",
+    ],
     ["keywordWeight", "키워드 검색 가중치", "number", 1],
     ["vectorWeight", "벡터 검색 가중치", "number", 0.35],
     ["candidateLimit", "초기 후보 수", "number", 5000],
@@ -308,7 +314,7 @@ const settingCategoryMeta = {
   confluence: ["Confluence", "Space와 Page 문서 수집·검색, Fail-Closed Principal ACL"],
   jira: ["Jira", "Project와 Issue·Comment 지식 수집, Fail-Closed Principal ACL"],
   mcp: ["MCP", "Transport, Origin, 호출 제한"],
-  search: ["검색", "키워드·벡터 가중치와 결과 수"],
+  search: ["검색", "임베딩 사용 정책·자동 폴백·검색 가중치"],
   model: ["모델", "Embedding과 Reranker"],
   opensearch: ["OpenSearch", "BM25 projection과 인증"],
   vector: ["벡터 DB", "pgvector·Milvus 연동, 미설정 시 메타 DB 내장 벡터 사용"],
@@ -1433,7 +1439,15 @@ function renderSettingFields(category, value) {
         return `<label class="wide" data-field-key="${key}">${esc(label)}<textarea data-setting-key="${key}" data-setting-type="json" rows="4">${esc(JSON.stringify(current || {}, null, 2))}</textarea></label>`;
       if (type.startsWith("select:")) {
         const choices = type.slice(7).split("|");
-        return `<label data-field-key="${key}">${esc(label)}<select data-setting-key="${key}" data-setting-type="string">${choices.map((choice) => `<option ${choice === current ? "selected" : ""}>${esc(choice)}</option>`).join("")}</select></label>`;
+        const labels =
+          key === "retrievalMode"
+            ? {
+                "keyword-only": "키워드 전용 (임베딩 사용 안 함)",
+                "hybrid-fallback": "하이브리드 + 자동 폴백 (권장)",
+                "hybrid-required": "하이브리드 필수 (장애 시 오류)",
+              }
+            : {};
+        return `<label data-field-key="${key}">${esc(label)}<select data-setting-key="${key}" data-setting-type="string">${choices.map((choice) => `<option value="${esc(choice)}" ${choice === current ? "selected" : ""}>${esc(labels[choice] || choice)}</option>`).join("")}</select>${key === "retrievalMode" ? '<small class="field-help">색인 Worker와 query-docs, search-code, search-semantic을 포함한 모든 MCP 검색 도구에 즉시 적용됩니다.</small>' : ""}</label>`;
       }
       if (type === "password") {
         const stored = current === "********";
@@ -1496,6 +1510,8 @@ function renderSettingFields(category, value) {
           if (field.dataset.settingKey === "tlsVerify") applyTLSFieldState();
           if (category === "vector" && field.dataset.settingKey === "provider")
             applyVectorFieldState();
+          if (category === "search" && field.dataset.settingKey === "retrievalMode")
+            applySearchRetrievalFieldState();
         } catch {
           field.setCustomValidity("올바른 JSON을 입력하세요.");
         }
@@ -1523,6 +1539,19 @@ function renderSettingFields(category, value) {
   );
   applyTLSFieldState();
   if (category === "vector") applyVectorFieldState();
+  if (category === "search") applySearchRetrievalFieldState();
+}
+
+function applySearchRetrievalFieldState() {
+  const mode = document.querySelector('[data-setting-key="retrievalMode"]')?.value;
+  const vector = document.querySelector('[data-setting-key="vectorWeight"]');
+  if (!vector) return;
+  const disabled = mode === "keyword-only";
+  vector.disabled = disabled;
+  vector.closest("label")?.classList.toggle("field-disabled", disabled);
+  vector.title = disabled
+    ? "키워드 전용 모드에서는 벡터 DB와 임베딩 점수를 사용하지 않습니다."
+    : "";
 }
 
 // 저장 중인 설정의 버전. 다른 관리자가 먼저 저장했으면 서버가 409 로 막고,
@@ -1680,7 +1709,7 @@ async function refreshVectorStatus() {
     const status = await api("/api/v1/admin/vector/status");
     if (!status.configured) {
       panel.className = "result-panel";
-      panel.innerHTML = `<h4>벡터 DB 미사용</h4><ul class="result-list"><li>${esc(status.detail)}</li><li>메타 DB에 저장된 임베딩 ${status.storedVectors}개</li></ul>`;
+      panel.innerHTML = `<h4>벡터 DB 미사용 · ${esc(status.retrievalMode || "keyword-only")}</h4><ul class="result-list"><li>${esc(status.detail)}</li><li>임베딩 커버리지 ${Number(status.embeddingCoveragePercent || 0).toFixed(1)}% · 전체 청크 ${status.totalChunks || 0}개 / 임베딩 ${status.storedVectors || 0}개</li></ul>`;
       return;
     }
     const ready = status.ready && !status.error;
@@ -1694,7 +1723,8 @@ async function refreshVectorStatus() {
       (status.extensionVersion
         ? `<li>pgvector ${esc(status.extensionVersion)} · 스키마 <code>${esc(status.extensionSchema || "-")}</code></li>`
         : "") +
-      `<li>벡터 DB ${status.vectors ?? 0}개 / 메타 DB 임베딩 ${status.storedVectors}개</li>` +
+      `<li>검색 정책: <code>${esc(status.retrievalMode || "-")}</code> · 임베딩 ${status.embeddingEnabled ? "사용" : "사용 안 함"}</li>` +
+      `<li>벡터 DB ${status.vectors ?? 0}개 / 메타 DB 임베딩 ${status.storedVectors}개 · 전체 청크 ${status.totalChunks || 0}개 (커버리지 ${Number(status.embeddingCoveragePercent || 0).toFixed(1)}%)</li>` +
       `<li>${esc(status.error || status.detail || "")}</li></ul>`;
   } catch (error) {
     panel.className = "result-panel error";
@@ -2123,7 +2153,11 @@ function setupAdmin(roles, capabilities) {
         const restart = x.restartRequired
           ? " 점검 모드는 즉시 반영되며 수신 주소와 Timeout은 서비스 재기동 후 반영됩니다."
           : "";
-        showAdmin(`버전 ${x.version} 저장 완료.${restart}`, true);
+        const reindex =
+          x.reindexJobsQueued !== undefined
+            ? ` 새 검색 정책 적용을 위해 재색인 ${x.reindexJobsQueued}건을 등록했습니다. 기존 검색 데이터는 완료 전까지 유지됩니다.`
+            : "";
+        showAdmin(`버전 ${x.version} 저장 완료.${restart}${reindex}`, true);
       }
       if (x.validationSkipped) {
         renderSettingResult(false, "연결 검증을 건너뛰고 저장했습니다", [x.validationSkipped, x.warning]);

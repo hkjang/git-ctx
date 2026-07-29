@@ -11,6 +11,7 @@ import (
 	"git-ctx/internal/embedding"
 
 	"git-ctx/internal/indexer"
+	"git-ctx/internal/search"
 	"git-ctx/internal/source"
 	"git-ctx/internal/store"
 )
@@ -265,6 +266,35 @@ func TestEmbeddingProbeFailsFastWithActionableMessage(t *testing.T) {
 	}
 	if downloads != 0 {
 		t.Fatalf("the probe must run before any file download, downloads=%d", downloads)
+	}
+}
+
+func TestEmbeddingProbeFailureFallsBackToLexicalIndex(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:embedding-probe-fallback?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('bitbucket:16','KCB','demo','Demo','bitbucket','16','/kcb/demo','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO index_jobs(id,repository_id,ref_name,kind,status) VALUES('fallback','bitbucket:16','main','initial','pending')`)
+	downloads := 0
+	counting := countingSource{downloads: &downloads}
+	w := New(db, indexer.New(db, indexer.DefaultPolicy()), func(context.Context, string) (source.RepositorySource, error) { return counting, nil })
+	w.SetRetrievalModeLoader(func(context.Context) string { return search.RetrievalHybridFallback })
+	w.SetEmbeddingFactory(func(context.Context) (embedding.Provider, error) { return brokenEmbedder{}, nil })
+	if ok, runErr := w.RunOnce(ctx); !ok || runErr != nil {
+		t.Fatalf("ok=%v err=%v", ok, runErr)
+	}
+	var status, message string
+	_ = db.DB.QueryRow(`SELECT status,COALESCE(error_message,'') FROM index_jobs WHERE id='fallback'`).Scan(&status, &message)
+	if status != "completed" || !strings.Contains(message, "completed as keyword-only") {
+		t.Fatalf("status=%s message=%q", status, message)
+	}
+	var chunks, vectors int
+	_ = db.DB.QueryRow(`SELECT COUNT(*),COUNT(embedding) FROM document_chunks WHERE repository_id='bitbucket:16'`).Scan(&chunks, &vectors)
+	if downloads == 0 || chunks == 0 || vectors != 0 {
+		t.Fatalf("downloads=%d chunks=%d vectors=%d", downloads, chunks, vectors)
 	}
 }
 
