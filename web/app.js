@@ -687,7 +687,7 @@ async function boot() {
     }
     setupWorkspaceNavigation(hasAdmin);
     setupProfileMenu();
-    setupQuickNavigation(capabilities);
+    setupQuickNavigation(capabilities, me.Roles || []);
     applyInitialNavigation(hasAdmin);
     loadKeys();
     loadActivity();
@@ -1176,13 +1176,14 @@ function setupProfileMenu() {
     if (!$("#profile-menu").contains(event.target)) close();
   });
 }
-function setupQuickNavigation(capabilities) {
+function setupQuickNavigation(capabilities, roles) {
   const dialog = $("#quick-nav-dialog");
   const query = $("#quick-nav-query");
   const personal = [
     ["프로필", "내 공간", () => navigatePersonal("account")],
     ["MCP 연결", "내 공간", () => navigatePersonal("connections")],
     ["API 키 관리", "내 공간", () => navigatePersonal("keys")],
+    ["코드 지식 검색", "내 공간", () => navigatePersonal("knowledge")],
     ["내 활동·저장소", "내 공간", () => navigatePersonal("activity")],
   ];
   const admin = [
@@ -1201,7 +1202,27 @@ function setupQuickNavigation(capabilities) {
     document.querySelector(`[data-admin-target="${target}"]`)?.click();
     window.scrollTo({ top: 0, behavior: "smooth" });
   }]);
-  const entries = [...personal, ...admin];
+  // 관리자 설정의 하위 탭도 빠른 이동에 자동 등록합니다. 새 설정 카테고리를
+  // categories에 추가하면 역할 필터를 거쳐 이 목록에도 함께 나타납니다.
+  const settingEntries = capabilities.settings
+    ? GitCtxRoles.categoriesFor(categories, roles).map((category) => {
+        const [label, description] =
+          settingCategoryMeta[category] || [category, "동적 운영 설정"];
+        return [
+          `${label} 설정`,
+          `관리자 설정 · ${description}`,
+          () => {
+            openWorkspaceView("admin");
+            document
+              .querySelector('[data-admin-target="settings-admin"]')
+              ?.click();
+            openSettingCategory(category);
+            window.scrollTo({ top: 0, behavior: "smooth" });
+          },
+        ];
+      })
+    : [];
+  const entries = [...personal, ...admin, ...settingEntries];
   let selected = 0;
   const render = () => {
     const needle = query.value.trim().toLowerCase();
@@ -1390,6 +1411,7 @@ const connectionTestCategories = [
   "jira",
   "model",
   "opensearch",
+  "vector",
   "observability",
   "backup",
   "vault",
@@ -1472,6 +1494,8 @@ function renderSettingFields(category, value) {
           $("#setting-json").value = JSON.stringify(next, null, 2);
           field.setCustomValidity("");
           if (field.dataset.settingKey === "tlsVerify") applyTLSFieldState();
+          if (category === "vector" && field.dataset.settingKey === "provider")
+            applyVectorFieldState();
         } catch {
           field.setCustomValidity("올바른 JSON을 입력하세요.");
         }
@@ -1498,6 +1522,7 @@ function renderSettingFields(category, value) {
       }),
   );
   applyTLSFieldState();
+  if (category === "vector") applyVectorFieldState();
 }
 
 // 저장 중인 설정의 버전. 다른 관리자가 먼저 저장했으면 서버가 409 로 막고,
@@ -1783,6 +1808,41 @@ function applyTLSFieldState() {
   if (caField) {
     caField.hidden = !enabled;
     caField.querySelectorAll("input,textarea").forEach((field) => (field.disabled = !enabled));
+  }
+}
+// 벡터 공급자에 필요한 값만 보여 주어 pgvector 설정에서 Milvus 자격 증명이,
+// Milvus 설정에서 PostgreSQL DSN이 필수처럼 보이지 않게 합니다.
+function applyVectorFieldState() {
+  if ($("#category")?.value !== "vector") return;
+  const provider =
+    document.querySelector('[data-setting-key="provider"]')?.value || "none";
+  const pgvectorFields = new Set(["dsn"]);
+  const milvusFields = new Set([
+    "baseUrl",
+    "database",
+    "token",
+    "username",
+    "password",
+    "tlsVerify",
+    "caCertificate",
+    "proxyUrl",
+  ]);
+  for (const field of document.querySelectorAll("#setting-fields [data-field-key]")) {
+    const key = field.dataset.fieldKey;
+    if (key === "provider") {
+      field.hidden = false;
+      continue;
+    }
+    field.hidden =
+      provider === "none" ||
+      (provider === "pgvector" && milvusFields.has(key)) ||
+      (provider === "milvus" && pgvectorFields.has(key));
+  }
+  // TLS 상태 갱신이 CA 필드를 다시 표시할 수 있으므로 공급자 필터 뒤에 적용합니다.
+  applyTLSFieldState();
+  if (provider !== "milvus") {
+    const caField = document.querySelector('[data-field-key="caCertificate"]');
+    if (caField) caField.hidden = true;
   }
 }
 function setupAdmin(roles, capabilities) {

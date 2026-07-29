@@ -13,6 +13,7 @@
     search: "search-admin",
     model: "search-admin",
     opensearch: "search-admin",
+    vector: "search-admin",
     security: "security-admin",
     vault: "security-admin",
   };

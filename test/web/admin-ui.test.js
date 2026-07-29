@@ -201,5 +201,9 @@ for (const category of [
 assert.match(styles, /\[hidden\]\s*\{[^}]*display:\s*none\s*!important/s);
 assert.match(script, /maintenanceMode/);
 assert.match(script, /서비스 재기동 후 반영/);
+assert.match(script, /"vector",\s*"observability"/);
+assert.match(script, /function applyVectorFieldState/);
+assert.match(script, /GitCtxRoles\.categoriesFor\(categories, roles\)\.map/);
+assert.match(script, /코드 지식 검색/);
 assert.match(html, /class=["']status-row["']/);
 console.log("admin UI structure tests passed");
