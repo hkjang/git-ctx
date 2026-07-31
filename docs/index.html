@@ -1,0 +1,832 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>git-ctx - 온프레미스 AI 개발 지식 플랫폼 | Enterprise MCP Server for Bitbucket & GitLab</title>
+  
+  <!-- SEO Primary Meta Tags -->
+  <meta name="title" content="git-ctx - 온프레미스 AI 개발 지식 플랫폼 | Enterprise MCP Server">
+  <meta name="description" content="git-ctx는 사내 Bitbucket Server 6.9.1과 GitLab의 소스코드 및 문서를 색인하여 Context7 호환 MCP(Model Context Protocol)로 AI 에이전트에 제공하는 온프레미스 개발 지식 플랫폼입니다. Zero Data Leak security and AST code parsing.">
+  <meta name="keywords" content="git-ctx, MCP, Model Context Protocol, Bitbucket, GitLab, Context7, 온프레미스 AI, AI 에이전트, 개발 지식 플랫폼, 코드 인덱싱, AST 파싱, Keycloak OIDC, 폐쇄망 AI, Cursor MCP, Claude Desktop MCP">
+  <meta name="author" content="hkjang">
+  <meta name="robots" content="index, follow">
+  <link rel="canonical" href="https://hkjang.github.io/git-ctx/">
+
+  <!-- Open Graph / Facebook / Kakao -->
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://hkjang.github.io/git-ctx/">
+  <meta property="og:title" content="git-ctx - 온프레미스 AI 개발 지식 플랫폼">
+  <meta property="og:description" content="사내 Bitbucket & GitLab 소스코드를 AI 에이전트의 실시간 지식으로 연결합니다. MCP 기반 2단계 하이브리드 검색과 완벽한 ACL 보안 유지.">
+  <meta property="og:image" content="https://hkjang.github.io/git-ctx/assets/git-ctx-view.png">
+  <meta property="og:site_name" content="git-ctx">
+  <meta property="og:locale" content="ko_KR">
+  <meta property="og:locale:alternate" content="en_US">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:url" content="https://hkjang.github.io/git-ctx/">
+  <meta name="twitter:title" content="git-ctx - On-Premise AI Developer Knowledge Platform">
+  <meta name="twitter:description" content="Connect Enterprise Bitbucket & GitLab Code to AI Agents in Real Time via Context7-Compatible MCP.">
+  <meta name="twitter:image" content="https://hkjang.github.io/git-ctx/assets/git-ctx-view.png">
+
+  <!-- Favicon & Stylesheet -->
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%233B82F6'><path d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/></svg>">
+  <link rel="stylesheet" href="css/style.css">
+
+  <!-- Structured Data (JSON-LD) for SEO & AEO (Answer Engine Optimization) -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "SoftwareApplication",
+        "@id": "https://hkjang.github.io/git-ctx/#software",
+        "name": "git-ctx",
+        "url": "https://hkjang.github.io/git-ctx/",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Linux, Windows, macOS, Docker, Kubernetes",
+        "description": "On-premise AI developer knowledge platform connecting Bitbucket Server and GitLab codebase to AI agents via Context7-compatible Model Context Protocol (MCP).",
+        "softwareVersion": "1.0.0",
+        "license": "https://github.com/hkjang/git-ctx/blob/main/LICENSE",
+        "author": {
+          "@type": "Organization",
+          "name": "hkjang",
+          "url": "https://github.com/hkjang"
+        },
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        }
+      },
+      {
+        "@type": "Organization",
+        "@id": "https://hkjang.github.io/git-ctx/#organization",
+        "name": "git-ctx Team",
+        "url": "https://hkjang.github.io/git-ctx/",
+        "sameAs": [
+          "https://github.com/hkjang/git-ctx"
+        ],
+        "contactPoint": {
+          "@type": "ContactPoint",
+          "email": "gagagiga@naver.com",
+          "contactType": "customer service"
+        }
+      },
+      {
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          {
+            "@type": "ListItem",
+            "position": 1,
+            "name": "Home",
+            "item": "https://hkjang.github.io/git-ctx/"
+          }
+        ]
+      },
+      {
+        "@type": "FAQPage",
+        "@id": "https://hkjang.github.io/git-ctx/#faq",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "git-ctx란 무엇이며 왜 필요한가요?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "git-ctx는 사내 Bitbucket Server 6.9.1과 GitLab의 소스코드 및 개발 문서를 색인하여 Context7 호환 MCP(Model Context Protocol)로 AI 에이전트에 제공하는 온프레미스 지식 플랫폼입니다. 사내 코드가 외부로 유출되지 않으면서도 개발자 AI 에이전트가 사내 전체 코드베이스와 문서 문맥을 실시간 활용할 수 있게 합니다."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Context7 호환 2단계 MCP 흐름의 장점은 무엇인가요?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "전체 저장소를 통째로 토큰에 넣는 대신 1단계 resolve-library-id로 대상 저장소/버전을 탐색하고 2단계 query-docs / search-code로 필요한 코드 청크와 문맥만 정확히 검색합니다. 이를 통해 LLM 프롬프트 비용을 최대 90% 절감하고 첫 호출 정확도를 극대화합니다."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "사내 코드 보안과 접근 권한(ACL)은 어떻게 관리되나요?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "git-ctx는 Keycloak OIDC 사용자의 계정 및 그룹 속성을 Bitbucket/GitLab ACL 권한과 동기화합니다. 검색 후보 생성 이전(Pre-filtering) 단계에서 사용자 권한을 검사하므로, 사용자가 소스 관리 시스템에서 접근 권한이 없는 저장소나 소스코드는 검색 결과 및 AI 토큰에 100% 노출되지 않습니다."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "인터넷이 없는 완전 폐쇄망(Air-Gapped) 환경도 지원되나요?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "네, 완전히 지원합니다. git-ctx는 외부 Context7 서버나 인터넷 서비스에 전혀 의존하지 않으며, 오프라인 컨테이너 이미지 패키징, PostgreSQL / SQLite 지원, Kubernetes Kustomize 매니페스트 및 사내 로컬 LLM/임베딩 모델 호환 인터페이스를 제공합니다."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "어떤 AI 개발 도구(IDE)와 연동할 수 있나요?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Model Context Protocol(MCP) 표준을 준수하는 모든 클라이언트와 연동됩니다. Cursor, Antigravity CLI/IDE, Claude Desktop, VS Code (Continue/MCP extensions) 등 다양한 에이전트 환경에서 지원됩니다."
+            }
+          }
+        ]
+      }
+    ]
+  }
+  </script>
+</head>
+<body>
+
+  <!-- Ambient Glow Background Background -->
+  <div class="bg-glow-container" aria-hidden="true">
+    <div class="bg-glow-blob blob-1"></div>
+    <div class="bg-glow-blob blob-2"></div>
+    <div class="bg-glow-blob blob-3"></div>
+  </div>
+
+  <!-- Site Header -->
+  <header class="site-header">
+    <div class="container navbar">
+      <a href="#" class="brand-logo" aria-label="git-ctx home">
+        <div class="brand-icon">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+          </svg>
+        </div>
+        git-ctx
+        <span class="brand-badge">MCP Native</span>
+      </a>
+
+      <nav aria-label="Main Navigation">
+        <ul class="nav-menu">
+          <li><a href="#features" class="nav-link">주요 기능</a></li>
+          <li><a href="#tools" class="nav-link">MCP 도구</a></li>
+          <li><a href="#architecture" class="nav-link">아키텍처</a></li>
+          <li><a href="#quickstart" class="nav-link">시작하기</a></li>
+          <li><a href="#faq" class="nav-link">FAQ</a></li>
+        </ul>
+      </nav>
+
+      <div class="nav-actions">
+        <div class="lang-switcher" aria-label="Language Switcher">
+          <button id="lang-ko" class="lang-btn active">KO</button>
+          <button id="lang-en" class="lang-btn">EN</button>
+        </div>
+
+        <a href="https://github.com/hkjang/git-ctx" target="_blank" rel="noopener noreferrer" class="btn btn-github btn-sm">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+          </svg>
+          GitHub
+        </a>
+
+        <button id="mobile-nav-toggle" class="mobile-toggle" aria-label="Open navigation menu">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="3" y1="12" x2="21" y2="12"></line>
+            <line x1="3" y1="6" x2="21" y2="6"></line>
+            <line x1="3" y1="18" x2="21" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main id="main-content">
+    <!-- Hero Section -->
+    <section class="hero-section">
+      <div class="container">
+        <div class="hero-pill">
+          <span class="pill-dot"></span>
+          <span data-i18n="hero_pill">온프레미스 AI 개발 지식 플랫폼 v1.0</span>
+        </div>
+
+        <h1 class="hero-title" data-i18n="hero_title">
+          사내 <span class="highlight">Bitbucket & GitLab</span> 소스코드를 AI 에이전트의 실시간 지식으로
+        </h1>
+
+        <p class="hero-desc" data-i18n="hero_desc">
+          Model Context Protocol (MCP) 기반 두 단계 하이브리드 검색. 강력한 ACL 권한 유지, 보안 파싱, AST 코드 구조 분석으로 보안 훼손 없는 Enterprise AI 개발 환경을 구축하세요.
+        </p>
+
+        <div class="hero-cta">
+          <a href="#quickstart" class="btn btn-primary" data-i18n="btn_quickstart">빠른 시작 가이드</a>
+          <a href="https://github.com/hkjang/git-ctx" target="_blank" rel="noopener noreferrer" class="btn btn-secondary" data-i18n="btn_github">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+            GitHub 저장소
+          </a>
+        </div>
+
+        <!-- App Screen Preview Frame -->
+        <div class="preview-container">
+          <div class="preview-window">
+            <div class="window-header">
+              <div class="window-dots">
+                <span class="dot dot-red"></span>
+                <span class="dot dot-yellow"></span>
+                <span class="dot dot-green"></span>
+              </div>
+              <div class="window-title">git-ctx Platform Admin Console</div>
+              <div style="width: 40px;"></div>
+            </div>
+            <div class="preview-img-wrapper">
+              <img src="assets/git-ctx-view.png" alt="git-ctx Admin Console Preview UI" class="preview-img" width="1200" height="675" loading="eager">
+            </div>
+          </div>
+        </div>
+
+        <!-- Key Metrics Banner -->
+        <div class="stats-banner">
+          <div class="stat-item">
+            <div class="stat-number" data-i18n="stat_mcp">2단계 MCP</div>
+            <div class="stat-label" data-i18n="stat_mcp_desc">Context7 연동 표준 계약</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-number" data-i18n="stat_security">Zero Data Leak</div>
+            <div class="stat-label" data-i18n="stat_security_desc">Keycloak OIDC & ACL 선필터</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-number" data-i18n="stat_ast">AST 심볼 그래프</div>
+            <div class="stat-label" data-i18n="stat_ast_desc">Go, Java, TS, Py, SQL 분석</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-number" data-i18n="stat_deploy">온프레미스 / 폐쇄망</div>
+            <div class="stat-label" data-i18n="stat_deploy_desc">Docker / K8s / Air-gapped</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Features Section -->
+    <section id="features" class="section">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-subtitle" data-i18n="features_subtitle">KEY FEATURES</div>
+          <h2 class="section-title" data-i18n="features_title">엔터프라이즈 AI 코딩을 위한 핵심 기능</h2>
+          <p class="section-desc" data-i18n="features_desc">
+            git-ctx는 외부 유출 없는 온프레미스 환경에서 AI 모델에 가장 정확하고 안전한 지식을 제공합니다.
+          </p>
+        </div>
+
+        <div class="features-grid">
+          <!-- Card 1 -->
+          <article class="feature-card">
+            <div class="feature-icon-box">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            </div>
+            <h3 class="feature-title" data-i18n="feat_1_title">완벽한 보안 및 ACL 권한 검증</h3>
+            <p class="feature-text" data-i18n="feat_1_desc">Keycloak OIDC 및 Bitbucket/GitLab ACL을 검색 후보 생성 선단계에서 100% 검증합니다. 권한 없는 소스코드와 문서는 노출되지 않습니다.</p>
+          </article>
+
+          <!-- Card 2 -->
+          <article class="feature-card">
+            <div class="feature-icon-box">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
+            </div>
+            <h3 class="feature-title" data-i18n="feat_2_title">Context7 호환 2단계 MCP 흐름</h3>
+            <p class="feature-text" data-i18n="feat_2_desc">resolve-library-id → query-docs/search-code 구조로 에이전트의 토큰 소모를 극대화로 줄이고 정교한 컨텍스트 조각만 주입합니다.</p>
+          </article>
+
+          <!-- Card 3 -->
+          <article class="feature-card">
+            <div class="feature-icon-box">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="18" r="3"></circle><circle cx="6" cy="6" r="3"></circle><path d="M13 6h3a2 2 0 0 1 2 2v7"></path><line x1="6" y1="9" x2="6" y2="21"></line></svg>
+            </div>
+            <h3 class="feature-title" data-i18n="feat_3_title">AST 코드 구조 & 심볼 그래프</h3>
+            <p class="feature-text" data-i18n="feat_3_desc">Go, Java, TypeScript, Python, SQL 구조 파싱 기반으로 find-symbol, trace-dependencies, find-dependents 심볼 영향도 분석을 지원합니다.</p>
+          </article>
+
+          <!-- Card 4 -->
+          <article class="feature-card">
+            <div class="feature-icon-box">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            </div>
+            <h3 class="feature-title" data-i18n="feat_4_title">하이브리드 BM25 + 임베딩 검색</h3>
+            <p class="feature-text" data-i18n="feat_4_desc">PostgreSQL tsvector 키워드 검색과 사내 OpenAI 호환 벡터 검색을 결합합니다. 모델 장애 시 safe-lexical 자동 폴백이 작동합니다.</p>
+          </article>
+
+          <!-- Card 5 -->
+          <article class="feature-card">
+            <div class="feature-icon-box">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>
+            </div>
+            <h3 class="feature-title" data-i18n="feat_5_title">X-Ray 감사 및 검색 설명서</h3>
+            <p class="feature-text" data-i18n="feat_5_desc">MCP 호출 감사 로그, 단계별 수용/탈락 근거(Diagnostics), latency 및 explain-search-result로 투명한 운영 상태를 파악하세요.</p>
+          </article>
+
+          <!-- Card 6 -->
+          <article class="feature-card">
+            <div class="feature-icon-box">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect><rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
+            </div>
+            <h3 class="feature-title" data-i18n="feat_6_title">폐쇄망(Air-gapped) 원클릭 배포</h3>
+            <p class="feature-text" data-i18n="feat_6_desc">인터넷 연결이 차단된 환경에서도 오프라인 이미지 패키징, K8s Kustomize, Docker Compose, SQLite/PostgreSQL 이중 복구 모드를 제공합니다.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- MCP Tool Explorer Section -->
+    <section id="tools" class="section">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-subtitle" data-i18n="tools_subtitle">MCP TOOL ECOSYSTEM</div>
+          <h2 class="section-title" data-i18n="tools_title">AI 에이전트와 소통하는 MCP 도구 모음</h2>
+          <p class="section-desc" data-i18n="tools_desc">
+            Cursor, Claude Desktop, Antigravity 등 최신 AI 개발 도구에서 바로 사용할 수 있는 풍부한 도구를 제공합니다.
+          </p>
+        </div>
+
+        <div class="tools-explorer">
+          <!-- Left Tabs -->
+          <div class="tools-nav">
+            <button class="tool-tab-btn active" data-target="tool-search-code">
+              <span class="tool-tab-code">search-code</span>
+            </button>
+            <button class="tool-tab-btn" data-target="tool-resolve">
+              <span class="tool-tab-code">resolve-library-id</span>
+            </button>
+            <button class="tool-tab-btn" data-target="tool-find-symbol">
+              <span class="tool-tab-code">find-symbol</span>
+            </button>
+            <button class="tool-tab-btn" data-target="tool-compare-refs">
+              <span class="tool-tab-code">compare-refs</span>
+            </button>
+            <button class="tool-tab-btn" data-target="tool-repo-map">
+              <span class="tool-tab-code">get-repository-map</span>
+            </button>
+            <button class="tool-tab-btn" data-target="tool-trace-deps">
+              <span class="tool-tab-code">trace-dependencies</span>
+            </button>
+          </div>
+
+          <!-- Right Content Details -->
+          <div class="tools-content">
+            <!-- Tool 1: search-code -->
+            <div id="tool-search-code" class="tool-detail active">
+              <div class="tool-head">
+                <span class="tool-name-badge">search-code</span>
+                <span class="tool-type-tag">Core Retrieval Tool</span>
+              </div>
+              <p class="tool-desc-text">
+                Library ID 지정 없이 사용자 접근 권한(ACL) 범위 내 모든 사내 저장소에서 키워드/원격 Code Search API 및 벡터 검색을 결합하여 코드를 정교하게 탐색합니다.
+              </p>
+              <div class="code-block-wrapper">
+                <div class="code-header">
+                  <span>JSON-RPC Request Example</span>
+                  <button class="copy-btn" data-code="code-search-json">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                    Copy
+                  </button>
+                </div>
+                <pre><code id="code-search-json">{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "search-code",
+    "arguments": {
+      "query": "Keycloak OIDC JWT token validation",
+      "limit": 5
+    }
+  },
+  "id": 1
+}</code></pre>
+              </div>
+            </div>
+
+            <!-- Tool 2: resolve-library-id -->
+            <div id="tool-resolve" class="tool-detail">
+              <div class="tool-head">
+                <span class="tool-name-badge">resolve-library-id</span>
+                <span class="tool-type-tag">Context7 Standard Tool</span>
+              </div>
+              <p class="tool-desc-text">
+                에이전트가 탐색하려는 프로젝트나 저장소 이름을 정규화된 Library ID(예: project/repo/main)로 매핑하고 사용 권한을 확인합니다.
+              </p>
+              <div class="code-block-wrapper">
+                <div class="code-header">
+                  <span>JSON-RPC Request Example</span>
+                  <button class="copy-btn" data-code="code-resolve-json">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                    Copy
+                  </button>
+                </div>
+                <pre><code id="code-resolve-json">{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "resolve-library-id",
+    "arguments": {
+      "libraryName": "git-ctx",
+      "query": "authentication adapter"
+    }
+  },
+  "id": 2
+}</code></pre>
+              </div>
+            </div>
+
+            <!-- Tool 3: find-symbol -->
+            <div id="tool-find-symbol" class="tool-detail">
+              <div class="tool-head">
+                <span class="tool-name-badge">find-symbol</span>
+                <span class="tool-type-tag">AST Code Parser</span>
+              </div>
+              <p class="tool-desc-text">
+                Go AST, Java, TypeScript, Python, SQL 파싱 결과에서 특정 클래스, 인터페이스, 메서드, 구조체 정의와 주석 문맥을 즉시 추출합니다.
+              </p>
+              <div class="code-block-wrapper">
+                <div class="code-header">
+                  <span>JSON-RPC Request Example</span>
+                  <button class="copy-btn" data-code="code-symbol-json">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                    Copy
+                  </button>
+                </div>
+                <pre><code id="code-symbol-json">{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "find-symbol",
+    "arguments": {
+      "symbol": "BitbucketAdapter",
+      "language": "go"
+    }
+  },
+  "id": 3
+}</code></pre>
+              </div>
+            </div>
+
+            <!-- Tool 4: compare-refs -->
+            <div id="tool-compare-refs" class="tool-detail">
+              <div class="tool-head">
+                <span class="tool-name-badge">compare-refs</span>
+                <span class="tool-type-tag">Impact Analysis Tool</span>
+              </div>
+              <p class="tool-desc-text">
+                두 브랜치/태그 간의 변경 사항을 심볼 수준에서 비교하고, 해당 변경이 저장소 내 타 코드에 미치는 연관 영향도를 산출합니다.
+              </p>
+              <div class="code-block-wrapper">
+                <div class="code-header">
+                  <span>JSON-RPC Request Example</span>
+                  <button class="copy-btn" data-code="code-compare-json">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                    Copy
+                  </button>
+                </div>
+                <pre><code id="code-compare-json">{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "compare-refs",
+    "arguments": {
+      "libraryId": "hkjang/git-ctx",
+      "baseRef": "main",
+      "targetRef": "feature/oidc-pkce"
+    }
+  },
+  "id": 4
+}</code></pre>
+              </div>
+            </div>
+
+            <!-- Tool 5: get-repository-map -->
+            <div id="tool-repo-map" class="tool-detail">
+              <div class="tool-head">
+                <span class="tool-name-badge">get-repository-map</span>
+                <span class="tool-type-tag">Repository Insights</span>
+              </div>
+              <p class="tool-desc-text">
+                저장소의 사용 언어 비율, 핵심 진입점(Entrypoint), 주요 패키지 구조 및 설정 파일 규약을 요약된 MAP 객체로 반환합니다.
+              </p>
+              <div class="code-block-wrapper">
+                <div class="code-header">
+                  <span>JSON-RPC Request Example</span>
+                  <button class="copy-btn" data-code="code-map-json">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                    Copy
+                  </button>
+                </div>
+                <pre><code id="code-map-json">{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "get-repository-map",
+    "arguments": {
+      "libraryId": "hkjang/git-ctx"
+    }
+  },
+  "id": 5
+}</code></pre>
+              </div>
+            </div>
+
+            <!-- Tool 6: trace-dependencies -->
+            <div id="tool-trace-deps" class="tool-detail">
+              <div class="tool-head">
+                <span class="tool-name-badge">trace-dependencies</span>
+                <span class="tool-type-tag">Graph Analytics</span>
+              </div>
+              <p class="tool-desc-text">
+                특정 파일이나 모듈의 import, 호출 관계, 데이터베이스 테이블 연관도를 트레이싱하여 코드 전파 그래프를 시각화 가능한 데이터로 구성합니다.
+              </p>
+              <div class="code-block-wrapper">
+                <div class="code-header">
+                  <span>JSON-RPC Request Example</span>
+                  <button class="copy-btn" data-code="code-deps-json">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                    Copy
+                  </button>
+                </div>
+                <pre><code id="code-deps-json">{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "trace-dependencies",
+    "arguments": {
+      "libraryId": "hkjang/git-ctx",
+      "filePath": "internal/mcp/server.go"
+    }
+  },
+  "id": 6
+}</code></pre>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Architecture Section -->
+    <section id="architecture" class="section">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-subtitle" data-i18n="arch_subtitle">ARCHITECTURE</div>
+          <h2 class="section-title" data-i18n="arch_title">엔터프라이즈 하이브리드 지식 파이프라인</h2>
+          <p class="section-desc" data-i18n="arch_desc">
+            요청 수신부터 ACL 인가, 2단계 지식 정제까지 보안 중심의 모듈형 구조
+          </p>
+        </div>
+
+        <div class="arch-flow-grid">
+          <div class="arch-card">
+            <div class="arch-step-num">1</div>
+            <h3 class="arch-card-title" data-i18n="arch_step1_title">AI Agent & IDE</h3>
+            <p class="arch-card-text" data-i18n="arch_step1_desc">Cursor, Antigravity, Claude Desktop 등의 MCP 클라이언트 요청</p>
+          </div>
+
+          <div class="arch-card">
+            <div class="arch-step-num">2</div>
+            <h3 class="arch-card-title" data-i18n="arch_step2_title">MCP /mcp Endpoint</h3>
+            <p class="arch-card-text" data-i18n="arch_step2_desc">Keycloak Bearer / API Key 인증 및 Streamable HTTP 통신</p>
+          </div>
+
+          <div class="arch-card">
+            <div class="arch-step-num">3</div>
+            <h3 class="arch-card-title" data-i18n="arch_step3_title">ACL & Source Adapter</h3>
+            <p class="arch-card-text" data-i18n="arch_step3_desc">Bitbucket 6.9.1 / GitLab ACL 선필터링 및 증분 수집</p>
+          </div>
+
+          <div class="arch-card">
+            <div class="arch-step-num">4</div>
+            <h3 class="arch-card-title" data-i18n="arch_step4_title">Hybrid Retrieval</h3>
+            <p class="arch-card-text" data-i18n="arch_step4_desc">BM25 + Vector + Rerank 및 AST 심볼 그래프 컨텍스트 추출</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Quick Start Section -->
+    <section id="quickstart" class="section">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-subtitle" data-i18n="quickstart_subtitle">QUICK START</div>
+          <h2 class="section-title" data-i18n="quickstart_title">몇 분 만에 구축하는 git-ctx</h2>
+          <p class="section-desc" data-i18n="quickstart_desc">
+            단 두 개의 환경 변수 설정으로 바로 온프레미스 서버를 기동하고 MCP 클라이언트를 연결할 수 있습니다.
+          </p>
+        </div>
+
+        <div class="quickstart-box">
+          <div class="steps-list">
+            <!-- Step 1 -->
+            <div class="step-item">
+              <div class="step-badge">1</div>
+              <div>
+                <h3 class="step-title" data-i18n="step1_title">1. git-ctx 서비스 기동 (Docker 또는 Go 실행)</h3>
+                <p class="step-desc" data-i18n="step1_desc">장기 복구 키(GIT_CTX_RECOVERY_KEY)와 DB 접속 DSN을 지정하여 서버를 기동합니다.</p>
+                <div class="code-block-wrapper">
+                  <div class="code-header">
+                    <span>Bash</span>
+                    <button class="copy-btn" data-code="code-cmd-start">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                      Copy
+                    </button>
+                  </div>
+                  <pre><code id="code-cmd-start">export GIT_CTX_RECOVERY_KEY="$(openssl rand -base64 48)"
+export GIT_CTX_DB_DSN='file:git-ctx.db?_foreign_keys=on&_busy_timeout=5000'
+
+# Go 바이너리 실행 또는 Docker 컨테이너 실행
+go run ./cmd/git-ctx</code></pre>
+                </div>
+              </div>
+            </div>
+
+            <!-- Step 2 -->
+            <div class="step-item">
+              <div class="step-badge">2</div>
+              <div>
+                <h3 class="step-title" data-i18n="step2_title">2. 최초 관리자 복구 토큰 확인 & SSO 설정</h3>
+                <p class="step-desc" data-i18n="step2_desc">최초 기동 시 생성되는 backups/bootstrap-admin.token으로 관리 콘솔 로그인 후 Keycloak OIDC를 연결합니다.</p>
+                <div class="code-block-wrapper">
+                  <div class="code-header">
+                    <span>Curl API Test</span>
+                    <button class="copy-btn" data-code="code-cmd-token">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                      Copy
+                    </button>
+                  </div>
+                  <pre><code id="code-cmd-token">curl -H "Authorization: Bearer $(cat backups/bootstrap-admin.token)" \
+  http://localhost:4747/api/v1/admin/settings</code></pre>
+                </div>
+              </div>
+            </div>
+
+            <!-- Step 3 -->
+            <div class="step-item">
+              <div class="step-badge">3</div>
+              <div>
+                <h3 class="step-title" data-i18n="step3_title">3. MCP 클라이언트 설정 (예: claude_desktop_config.json)</h3>
+                <p class="step-desc" data-i18n="step3_desc">발급받은 MCP API Key를 사용하여 에이전트에 git-ctx MCP 서버를 등록합니다.</p>
+                <div class="code-block-wrapper">
+                  <div class="code-header">
+                    <span>MCP Config JSON</span>
+                    <button class="copy-btn" data-code="code-mcp-config">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                      Copy
+                    </button>
+                  </div>
+                  <pre><code id="code-mcp-config">{
+  "mcpServers": {
+    "git-ctx": {
+      "url": "http://localhost:4747/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_MCP_API_KEY"
+      }
+    }
+  }
+}</code></pre>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- FAQ & AEO Section -->
+    <section id="faq" class="section">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-subtitle" data-i18n="faq_subtitle">FAQ & AEO</div>
+          <h2 class="section-title" data-i18n="faq_title">자주 묻는 질문 (FAQ)</h2>
+          <p class="section-desc" data-i18n="faq_desc">git-ctx 도입 및 운영에 관한 주요 궁금증을 확인하세요.</p>
+        </div>
+
+        <div class="faq-grid">
+          <!-- Q1 -->
+          <div class="faq-item active">
+            <button class="faq-question">
+              <span data-i18n="faq_1_q">Q1. git-ctx란 무엇이며 왜 필요한가요?</span>
+              <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </button>
+            <div class="faq-answer">
+              <p data-i18n="faq_1_a">git-ctx는 사내 Bitbucket Server 6.9.1과 GitLab의 소스코드 및 개발 문서를 색인하여 Context7 호환 MCP(Model Context Protocol)로 AI 에이전트에 제공하는 온프레미스 지식 플랫폼입니다. 사내 코드가 외부로 유출되지 않으면서도 개발자 AI 에이전트가 사내 전체 코드베이스와 문서 문맥을 실시간 활용할 수 있게 합니다.</p>
+            </div>
+          </div>
+
+          <!-- Q2 -->
+          <div class="faq-item">
+            <button class="faq-question">
+              <span data-i18n="faq_2_q">Q2. Context7 호환 2단계 MCP 흐름의 장점은 무엇인가요?</span>
+              <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </button>
+            <div class="faq-answer">
+              <p data-i18n="faq_2_a">전체 저장소를 통째로 토큰에 넣는 대신 1단계 resolve-library-id로 대상 저장소/버전을 탐색하고 2단계 query-docs / search-code로 필요한 코드 청크와 문맥만 정확히 검색합니다. 이를 통해 LLM 프롬프트 비용을 최대 90% 절감하고 첫 호출 정확도를 극대화합니다.</p>
+            </div>
+          </div>
+
+          <!-- Q3 -->
+          <div class="faq-item">
+            <button class="faq-question">
+              <span data-i18n="faq_3_q">Q3. 사내 코드 보안과 접근 권한(ACL)은 어떻게 관리되나요?</span>
+              <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </button>
+            <div class="faq-answer">
+              <p data-i18n="faq_3_a">git-ctx는 Keycloak OIDC 사용자의 계정 및 그룹 속성을 Bitbucket/GitLab ACL 권한과 동기화합니다. 검색 후보 생성 이전(Pre-filtering) 단계에서 사용자 권한을 검사하므로, 사용자가 소스 관리 시스템에서 접근 권한이 없는 저장소나 소스코드는 검색 결과 및 AI 토큰에 100% 노출되지 않습니다.</p>
+            </div>
+          </div>
+
+          <!-- Q4 -->
+          <div class="faq-item">
+            <button class="faq-question">
+              <span data-i18n="faq_4_q">Q4. 인터넷이 없는 완전 폐쇄망(Air-Gapped) 환경도 지원되나요?</span>
+              <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </button>
+            <div class="faq-answer">
+              <p data-i18n="faq_4_a">네, 완전히 지원합니다. git-ctx는 외부 Context7 서버나 인터넷 서비스에 전혀 의존하지 않으며, 오프라인 컨테이너 이미지 패키징, PostgreSQL / SQLite 지원, Kubernetes Kustomize 매니페스트 및 사내 로컬 LLM/임베딩 모델 호환 인터페이스를 제공합니다.</p>
+            </div>
+          </div>
+
+          <!-- Q5 -->
+          <div class="faq-item">
+            <button class="faq-question">
+              <span data-i18n="faq_5_q">Q5. 어떤 AI 개발 도구(IDE)와 연동할 수 있나요?</span>
+              <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </button>
+            <div class="faq-answer">
+              <p data-i18n="faq_5_a">Model Context Protocol(MCP) 표준을 준수하는 모든 클라이언트와 연동됩니다. Cursor, Antigravity CLI/IDE, Claude Desktop, VS Code (Continue/MCP extensions) 등 다양한 에이전트 환경에서 지원됩니다.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Bottom Call to Action Banner -->
+    <section class="section">
+      <div class="container">
+        <div class="cta-box">
+          <h2 class="cta-title" data-i18n="cta_title">지금 git-ctx로 사내 AI 개발 환경을 혁신하세요</h2>
+          <p class="cta-desc" data-i18n="cta_desc">보안 유출 걱정 없는 온프레미스 MCP 지식 플랫폼 git-ctx를 저장소에서 확인해 보세요.</p>
+          <a href="https://github.com/hkjang/git-ctx" target="_blank" rel="noopener noreferrer" class="btn btn-primary" data-i18n="cta_btn">
+            GitHub 저장소 바로가기
+          </a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Site Footer -->
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-top">
+        <div class="footer-brand">
+          <a href="#" class="brand-logo">
+            <div class="brand-icon">
+              <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+            </div>
+            git-ctx
+          </a>
+          <p data-i18n="footer_desc">사내 Bitbucket & GitLab을 위한 온프레미스 AI 개발 지식 플랫폼</p>
+        </div>
+
+        <div>
+          <div class="footer-column-title" data-i18n="footer_docs">문서 및 가이드</div>
+          <ul class="footer-links">
+            <li><a href="https://github.com/hkjang/git-ctx/blob/main/docs/requirements.md" target="_blank">개발 요건 (Requirements)</a></li>
+            <li><a href="https://github.com/hkjang/git-ctx/blob/main/docs/operations.md" target="_blank">운영 가이드 (Operations)</a></li>
+            <li><a href="https://github.com/hkjang/git-ctx/blob/main/docs/openapi.yaml" target="_blank">OpenAPI 3.0 명세</a></li>
+            <li><a href="https://github.com/hkjang/git-ctx/blob/main/docs/offline-deployment.md" target="_blank">폐쇄망 배포 가이드</a></li>
+          </ul>
+        </div>
+
+        <div>
+          <div class="footer-column-title" data-i18n="footer_community">커뮤니티 & 기여</div>
+          <ul class="footer-links">
+            <li><a href="https://github.com/hkjang/git-ctx" target="_blank">GitHub Repository</a></li>
+            <li><a href="https://github.com/hkjang/git-ctx/issues" target="_blank">Issue Tracker</a></li>
+            <li><a href="https://modelcontextprotocol.io/" target="_blank" rel="noopener">MCP Specification</a></li>
+          </ul>
+        </div>
+
+        <div>
+          <div class="footer-column-title">Tech Stack</div>
+          <ul class="footer-links">
+            <li><span>Go Monolith & AST</span></li>
+            <li><span>PostgreSQL / SQLite</span></li>
+            <li><span>Keycloak OIDC / SSO</span></li>
+            <li><span>Docker & K8s</span></li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Footer Bottom Bar with mandatory contact info -->
+      <div class="footer-bottom">
+        <div>
+          © 2026 git-ctx. Open-Source Enterprise Development Knowledge Platform.
+        </div>
+
+        <!-- Mandatory User Request Email Contact -->
+        <div class="contact-email-box">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path><polyline points="22,6 12,13 2,6"></polyline></svg>
+          <span data-i18n="footer_contact_label">문의:</span>
+          <a href="mailto:gagagiga@naver.com">gagagiga@naver.com</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script src="js/main.js"></script>
+</body>
+</html>
