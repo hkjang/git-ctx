@@ -94,12 +94,12 @@
             "name": "git-ctx란 무엇이며 왜 필요한가요?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "git-ctx는 사내 Bitbucket Server 6.9.1과 GitLab의 소스코드 및 개발 문서를 색인하여 Context7 호환 MCP(Model Context Protocol)로 AI 에이전트에 제공하는 온프레미스 지식 플랫폼입니다. 사내 코드가 외부로 유출되지 않으면서도 개발자 AI 에이전트가 사내 전체 코드베이스와 문서 문맥을 실시간 활용할 수 있게 합니다."
+              "text": "git-ctx는 사내 Bitbucket Server 6.9.1과 GitLab의 소스코드 및 Developer Docs를 색인하여 Context7 호환 MCP(Model Context Protocol)로 AI 에이전트에 제공하는 온프레미스 지식 플랫폼입니다. 사내 코드가 외부로 유출되지 않으면서도 개발자 AI 에이전트가 사내 전체 코드베이스와 문서 문맥을 실시간 활용할 수 있게 합니다."
             }
           },
           {
             "@type": "Question",
-            "name": "Context7 호환 2단계 MCP 흐름의 장점은 무엇인가요?",
+            "name": "Context7 호환 2-Stage MCP 흐름의 장점은 무엇인가요?",
             "acceptedAnswer": {
               "@type": "Answer",
               "text": "전체 저장소를 통째로 토큰에 넣는 대신 1단계 resolve-library-id로 대상 저장소/버전을 탐색하고 2단계 query-docs / search-code로 필요한 코드 청크와 문맥만 정확히 검색합니다. 이를 통해 LLM 프롬프트 비용을 최대 90% 절감하고 첫 호출 정확도를 극대화합니다."
@@ -193,10 +193,10 @@
 
       <nav aria-label="Main Navigation">
         <ul class="nav-menu">
-          <li><a href="#features" class="nav-link">주요 기능</a></li>
-          <li><a href="#tools" class="nav-link">MCP 도구</a></li>
-          <li><a href="#architecture" class="nav-link">아키텍처</a></li>
-          <li><a href="#quickstart" class="nav-link">시작하기</a></li>
+          <li><a href="#features" class="nav-link">Core Features</a></li>
+          <li><a href="#tools" class="nav-link">MCP Tools</a></li>
+          <li><a href="#architecture" class="nav-link">Architecture</a></li>
+          <li><a href="#quickstart" class="nav-link">Get Started</a></li>
           <li><a href="#faq" class="nav-link">FAQ</a></li>
         </ul>
       </nav>
@@ -234,7 +234,7 @@
       <div class="container">
         <div class="hero-pill">
           <span class="pill-dot"></span>
-          <span data-i18n="hero_pill">온프레미스 AI 개발 지식 플랫폼 v1.0</span>
+          <span data-i18n="hero_pill">On-Premises AI Development Knowledge Platform v1.0</span>
         </div>
 
         <h1 class="hero-title" data-i18n="hero_title">
@@ -246,7 +246,7 @@
         </p>
 
         <div class="hero-cta">
-          <a href="#quickstart" class="btn btn-primary" data-i18n="btn_quickstart">빠른 시작 가이드</a>
+          <a href="#quickstart" class="btn btn-primary" data-i18n="btn_quickstart">Quickstart Guide</a>
           <a href="https://github.com/hkjang/git-ctx" target="_blank" rel="noopener noreferrer" class="btn btn-secondary" data-i18n="btn_github">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
             GitHub 저장소
@@ -274,15 +274,15 @@
         <!-- Key Metrics Banner -->
         <div class="stats-banner">
           <div class="stat-item">
-            <div class="stat-number" data-i18n="stat_mcp">2단계 MCP</div>
-            <div class="stat-label" data-i18n="stat_mcp_desc">Context7 연동 표준 계약</div>
+            <div class="stat-number" data-i18n="stat_mcp">2-Stage MCP</div>
+            <div class="stat-label" data-i18n="stat_mcp_desc">Context7 Integration Standard Contract</div>
           </div>
           <div class="stat-item">
             <div class="stat-number" data-i18n="stat_security">Zero Data Leak</div>
-            <div class="stat-label" data-i18n="stat_security_desc">Keycloak OIDC & ACL 선필터</div>
+            <div class="stat-label" data-i18n="stat_security_desc">Keycloak OIDC & ACL Pre-Filter</div>
           </div>
           <div class="stat-item">
-            <div class="stat-number" data-i18n="stat_ast">AST 심볼 그래프</div>
+            <div class="stat-number" data-i18n="stat_ast">AST Symbol Graph</div>
             <div class="stat-label" data-i18n="stat_ast_desc">Go, Java, TS, Py, SQL 분석</div>
           </div>
           <div class="stat-item">
@@ -298,7 +298,7 @@
       <div class="container">
         <div class="section-header">
           <div class="section-subtitle" data-i18n="features_subtitle">KEY FEATURES</div>
-          <h2 class="section-title" data-i18n="features_title">엔터프라이즈 AI 코딩을 위한 핵심 기능</h2>
+          <h2 class="section-title" data-i18n="features_title">엔터프라이즈 AI 코딩을 위한 Key Features</h2>
           <p class="section-desc" data-i18n="features_desc">
             git-ctx는 외부 유출 없는 온프레미스 환경에서 AI 모델에 가장 정확하고 안전한 지식을 제공합니다.
           </p>
@@ -319,7 +319,7 @@
             <div class="feature-icon-box">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
             </div>
-            <h3 class="feature-title" data-i18n="feat_2_title">Context7 호환 2단계 MCP 흐름</h3>
+            <h3 class="feature-title" data-i18n="feat_2_title">Context7 호환 2-Stage MCP 흐름</h3>
             <p class="feature-text" data-i18n="feat_2_desc">resolve-library-id → query-docs/search-code 구조로 에이전트의 토큰 소모를 극대화로 줄이고 정교한 컨텍스트 조각만 주입합니다.</p>
           </article>
 
@@ -367,7 +367,7 @@
       <div class="container">
         <div class="section-header">
           <div class="section-subtitle" data-i18n="tools_subtitle">MCP TOOL ECOSYSTEM</div>
-          <h2 class="section-title" data-i18n="tools_title">AI 에이전트와 소통하는 MCP 도구 모음</h2>
+          <h2 class="section-title" data-i18n="tools_title">AI 에이전트와 소통하는 MCP Tools 모음</h2>
           <p class="section-desc" data-i18n="tools_desc">
             Cursor, Claude Desktop, Antigravity 등 최신 AI 개발 도구에서 바로 사용할 수 있는 풍부한 도구를 제공합니다.
           </p>
@@ -628,7 +628,7 @@
           <div class="arch-card">
             <div class="arch-step-num">4</div>
             <h3 class="arch-card-title" data-i18n="arch_step4_title">Hybrid Retrieval</h3>
-            <p class="arch-card-text" data-i18n="arch_step4_desc">BM25 + Vector + Rerank 및 AST 심볼 그래프 컨텍스트 추출</p>
+            <p class="arch-card-text" data-i18n="arch_step4_desc">BM25 + Vector + Rerank 및 AST Symbol Graph 컨텍스트 추출</p>
           </div>
         </div>
       </div>
@@ -727,7 +727,7 @@ go run ./cmd/git-ctx</code></pre>
       <div class="container">
         <div class="section-header">
           <div class="section-subtitle" data-i18n="faq_subtitle">FAQ & AEO</div>
-          <h2 class="section-title" data-i18n="faq_title">자주 묻는 질문 (FAQ)</h2>
+          <h2 class="section-title" data-i18n="faq_title">Frequently Asked Questions (FAQ)</h2>
           <p class="section-desc" data-i18n="faq_desc">git-ctx 도입 및 운영에 관한 주요 궁금증을 확인하세요.</p>
         </div>
 
@@ -739,14 +739,14 @@ go run ./cmd/git-ctx</code></pre>
               <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
             </button>
             <div class="faq-answer">
-              <p data-i18n="faq_1_a">git-ctx는 사내 Bitbucket Server 6.9.1과 GitLab의 소스코드 및 개발 문서를 색인하여 Context7 호환 MCP(Model Context Protocol)로 AI 에이전트에 제공하는 온프레미스 지식 플랫폼입니다. 사내 코드가 외부로 유출되지 않으면서도 개발자 AI 에이전트가 사내 전체 코드베이스와 문서 문맥을 실시간 활용할 수 있게 합니다.</p>
+              <p data-i18n="faq_1_a">git-ctx는 사내 Bitbucket Server 6.9.1과 GitLab의 소스코드 및 Developer Docs를 색인하여 Context7 호환 MCP(Model Context Protocol)로 AI 에이전트에 제공하는 온프레미스 지식 플랫폼입니다. 사내 코드가 외부로 유출되지 않으면서도 개발자 AI 에이전트가 사내 전체 코드베이스와 문서 문맥을 실시간 활용할 수 있게 합니다.</p>
             </div>
           </div>
 
           <!-- Q2 -->
           <div class="faq-item">
             <button class="faq-question">
-              <span data-i18n="faq_2_q">Q2. Context7 호환 2단계 MCP 흐름의 장점은 무엇인가요?</span>
+              <span data-i18n="faq_2_q">Q2. Context7 호환 2-Stage MCP 흐름의 장점은 무엇인가요?</span>
               <svg class="faq-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
             </button>
             <div class="faq-answer">
