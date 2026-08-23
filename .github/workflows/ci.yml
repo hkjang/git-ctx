@@ -1,0 +1,135 @@
+# The checks this runs are the ones that actually caught things in this
+# repository, not a generic template: a rate-limit header read as a delay, an
+# empty IN list that only PostgreSQL rejects, a data race in a test, and a
+# dependency carrying a SQL injection. Each earned its place.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build, vet and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # gofmt exits 0 whatever it finds, so the output has to be the assertion.
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l ./cmd ./internal)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Unit tests
+        run: go test ./...
+
+      # The race detector found a real one during this repository's own test
+      # work, so it runs on every change rather than on request.
+      - name: Unit tests with the race detector
+        run: go test -race ./...
+
+  vulnerabilities:
+    name: Known vulnerabilities
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Reports only paths this code actually reaches. It found 29 of them here,
+      # including a SQL injection in the PostgreSQL driver.
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  integration:
+    name: Integration (PostgreSQL, pgvector, Vault)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # Carries the vector extension, so the pgvector test runs against a real
+        # one rather than being skipped.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: gitctx
+          POSTGRES_PASSWORD: gitctx
+          POSTGRES_DB: gitctx
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U gitctx"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      vault:
+        image: hashicorp/vault:latest
+        env:
+          VAULT_DEV_ROOT_TOKEN_ID: ci-root
+          VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+        ports: ["8200:8200"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # These seven tests skip unless pointed at real servers, which is why they
+      # had never run. Each one now takes a database of its own, so running them
+      # in parallel is safe.
+      - name: Integration tests
+        env:
+          GIT_CTX_TEST_POSTGRES_DSN: postgres://gitctx:gitctx@127.0.0.1:5432/gitctx?sslmode=disable
+          GIT_CTX_TEST_PGVECTOR_DSN: postgres://gitctx:gitctx@127.0.0.1:5432/gitctx?sslmode=disable
+          GIT_CTX_TEST_VAULT_URL: http://127.0.0.1:8200
+          GIT_CTX_TEST_VAULT_TOKEN: ci-root
+        run: go test -count=1 ./... -run Integration
+
+  console:
+    name: Admin console
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Parse the console scripts
+        run: |
+          for file in web/app.js web/guides.js web/roles.js; do
+            node --check "$file"
+          done
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The Dockerfile runs the test suite itself and refuses to build when the
+      # image tag disagrees with internal/version, so a broken release build is
+      # caught here rather than at publish time.
+      - name: Build the image
+        run: docker build .
