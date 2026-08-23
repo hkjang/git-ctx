@@ -603,7 +603,13 @@
               <label>Slug<input id="context-pack-slug" required placeholder="gpu-platform" /></label>
               <label>이름<input id="context-pack-name" required placeholder="GPU Platform" /></label>
               <label class="wide">설명<input id="context-pack-description" placeholder="GPU 서비스, 에이전트와 운영 문서" /></label>
+              <label>용도<input id="context-pack-purpose" placeholder="onboarding / feature-development" /></label>
+              <label>토큰 예산(바이트, 0=기본)<input id="context-pack-budget" type="number" min="0" max="1048576" value="0" /></label>
               <label class="wide">Library 항목<textarea id="context-pack-items" required placeholder="/kcb/api|main|API&#10;/kcb/agent|release/v1|agent"></textarea></label>
+              <!-- Entrypoints are the way in a maintainer would point at first;
+                   the pack resolves them and says which ones no longer exist. -->
+              <label class="wide">진입점 (한 줄에 하나, 심볼|libraryId)<textarea id="context-pack-entrypoints" placeholder="CreditService|/kcb/api&#10;CreditController"></textarea></label>
+              <label class="toggle-control"><span>규약 파일 포함 (README·CLAUDE.md·ADR)</span><span class="toggle-row"><input id="context-pack-conventions" type="checkbox" checked /></span></label>
               <label class="toggle-control"><span>활성화</span><span class="toggle-row"><input id="context-pack-enabled" type="checkbox" checked /></span></label>
               <div class="button-row"><button type="submit">저장</button><button id="reset-context-pack" type="button" class="secondary">새 항목</button></div>
             </form>

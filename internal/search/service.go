@@ -333,6 +333,13 @@ type ChangeImpact struct {
 type ContextPackResult struct {
 	Slug, Name, Description, Content string
 	Libraries                        []string
+	// Purpose is what the pack is for, which tells an agent how to read the
+	// rest of it: onboarding wants orientation, a feature change wants the code.
+	Purpose string
+	// Sections carries the same accounting build-context reports, so a pack that
+	// did not fit says so instead of looking complete.
+	Sections    []ContextSection
+	BudgetBytes int
 }
 
 type RunbookResult struct {
@@ -671,54 +678,105 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 	return repositoryID, baseID, ref, nil
 }
 
+// ContextPack assembles a curated bundle: the conventions that say how the
+// project expects to be worked in, the entrypoints worth anchoring on, and the
+// repositories the pack names, all fitted to one budget.
+//
+// Before, every repository in the pack ran the query and the results were
+// concatenated. A ten-repository pack therefore spent the agent's context on
+// whichever repositories happened to be first, and an agent joining a codebase
+// got search results without ever seeing the README that explains them.
 func (s *Service) ContextPack(ctx context.Context, principals []string, slug, query string) (ContextPackResult, error) {
 	slug, query = strings.TrimSpace(slug), strings.TrimSpace(query)
 	if slug == "" || query == "" {
 		return ContextPackResult{}, errors.New("pack and query are required")
 	}
+	if len(principals) == 0 {
+		return ContextPackResult{}, errors.New("context pack is unavailable or access is denied")
+	}
 	var packID string
+	var budget int
+	var includeConventions int
 	result := ContextPackResult{Slug: slug}
-	err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT id,name,description FROM context_packs WHERE slug=? AND enabled=1`), slug).Scan(&packID, &result.Name, &result.Description)
+	err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(
+		`SELECT id,name,description,purpose,token_budget,include_conventions FROM context_packs WHERE slug=? AND enabled=1`), slug).
+		Scan(&packID, &result.Name, &result.Description, &result.Purpose, &budget, &includeConventions)
 	if err != nil {
 		return ContextPackResult{}, errors.New("context pack is unavailable or access is denied")
 	}
-	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT library_id,ref_name,query_hint FROM context_pack_items WHERE pack_id=? ORDER BY position,library_id`), packID)
+	if budget < 4000 {
+		budget = 24 << 10
+	}
+	result.BudgetBytes = budget
+
+	items, err := s.packItems(ctx, packID)
 	if err != nil {
 		return ContextPackResult{}, err
 	}
-	type item struct{ libraryID, ref, hint string }
-	var items []item
+	entrypoints, err := s.packEntrypoints(ctx, packID)
+	if err != nil {
+		return ContextPackResult{}, err
+	}
+
+	gathered := map[string]sectionData{
+		"conventions": {},
+		"entrypoints": {},
+		"libraries":   {},
+	}
+	if includeConventions == 1 {
+		gathered["conventions"] = s.gatherConventions(ctx, principals, items)
+	} else {
+		gathered["conventions"] = sectionData{note: "이 팩은 규약 파일 수집을 끄도록 설정돼 있습니다."}
+	}
+	gathered["entrypoints"] = s.gatherEntrypoints(ctx, principals, entrypoints)
+	gathered["libraries"], result.Libraries = s.gatherPackLibraries(ctx, principals, items, query)
+
+	if len(result.Libraries) == 0 && gathered["entrypoints"].count() == 0 && gathered["conventions"].count() == 0 {
+		return ContextPackResult{}, errors.New("context pack is unavailable or access is denied")
+	}
+	result.Sections = allocateShares(budget, packShare, gathered)
+	result.Content = renderSections(result.Sections)
+	return result, nil
+}
+
+type packItem struct{ libraryID, ref, hint string }
+
+func (s *Service) packItems(ctx context.Context, packID string) ([]packItem, error) {
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(
+		`SELECT library_id,ref_name,query_hint FROM context_pack_items WHERE pack_id=? ORDER BY position,library_id`), packID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []packItem
 	for rows.Next() {
-		var current item
+		var current packItem
 		if err = rows.Scan(&current.libraryID, &current.ref, &current.hint); err != nil {
-			rows.Close()
-			return ContextPackResult{}, err
+			return nil, err
 		}
 		items = append(items, current)
 	}
-	rows.Close()
-	var sections []string
-	for _, current := range items {
-		libraryID := current.libraryID
-		if current.ref != "" {
-			libraryID += "/" + current.ref
-		}
-		focused := query
-		if current.hint != "" {
-			focused += " " + current.hint
-		}
-		content, queryErr := s.Query(ctx, principals, libraryID, focused)
-		if queryErr != nil {
-			continue
-		}
-		result.Libraries = append(result.Libraries, libraryID)
-		sections = append(sections, "## "+libraryID+"\n\n"+content)
+	return items, rows.Err()
+}
+
+type packEntrypoint struct{ symbol, libraryID string }
+
+func (s *Service) packEntrypoints(ctx context.Context, packID string) ([]packEntrypoint, error) {
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(
+		`SELECT symbol,library_id FROM context_pack_entrypoints WHERE pack_id=? ORDER BY position,symbol`), packID)
+	if err != nil {
+		return nil, err
 	}
-	if len(sections) == 0 {
-		return ContextPackResult{}, errors.New("context pack is unavailable or access is denied")
+	defer rows.Close()
+	var out []packEntrypoint
+	for rows.Next() {
+		var current packEntrypoint
+		if err = rows.Scan(&current.symbol, &current.libraryID); err != nil {
+			return nil, err
+		}
+		out = append(out, current)
 	}
-	result.Content = strings.Join(sections, "\n\n---\n\n")
-	return result, nil
+	return out, rows.Err()
 }
 
 func (s *Service) FindRunbooks(ctx context.Context, principals []string, libraryID, query string, limit int) ([]RunbookResult, error) {
