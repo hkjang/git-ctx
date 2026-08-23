@@ -285,6 +285,17 @@ var registry = []tool{
 		handler:       handleFindCodeOwner,
 	},
 	{
+		name:        "find-tests",
+		description: "Finds the tests that exercise a symbol. Tests the dependency graph shows calling or importing it are reported separately from tests merely named after it or sitting beside it, because the first will fail if the change is wrong and the second might not touch the code at all. Use it to decide what to run before or after a change.",
+		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"symbol"}, "properties": map[string]any{
+			"symbol":    map[string]string{"type": "string", "description": "The type, function or method being changed, for example OrderService"},
+			"libraryId": map[string]string{"type": "string", "description": "Optional library scope; use it when the same symbol name exists in more than one repository"},
+			"ref":       map[string]string{"type": "string", "description": "Optional branch or tag"},
+			"limit":     map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}},
+		usesLibraryID: true,
+		handler:       handleFindTests,
+	},
+	{
 		name:        "get-platform-status",
 		description: "Returns administrative MCP, source, index, database, and effective embedding retrieval status. Requires an administrator MCP API key.",
 		schema:      map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}},
