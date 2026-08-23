@@ -14,6 +14,70 @@ function markEmptyTables(root = document) {
   });
 }
 
+// None of the twenty-one forms guarded against being submitted twice. The search
+// tools can take as long as the MCP timeout allows and showed nothing while they
+// ran, so pressing the button again was the natural thing to do -- and the forms
+// that create something took it literally. Submitting the key form twice mints
+// two MCP keys, and the secret of the second is shown once and then gone.
+//
+// The handlers are assigned as `form.onsubmit = ...` from inside functions that
+// only run after login, so wrapping them all once at startup would miss most.
+// Wrapping the assignment itself covers every form, including any added later.
+// Nothing in this file ever reads onsubmit back, so returning the wrapper is safe.
+function guardedSubmitHandler(handler) {
+  if (handler.__guarded) return handler;
+  const wrapped = async function (event) {
+    const form = event.currentTarget || this;
+    const button =
+      form.querySelector('button[type="submit"]') ||
+      form.querySelector("button:not([type='button'])");
+    if (form.dataset.submitting === "true") {
+      event.preventDefault();
+      return undefined;
+    }
+    form.dataset.submitting = "true";
+    form.setAttribute("aria-busy", "true");
+    let label = "";
+    if (button) {
+      label = button.textContent;
+      button.disabled = true;
+      button.textContent = "처리 중…";
+    }
+    try {
+      return await handler.call(this, event);
+    } finally {
+      delete form.dataset.submitting;
+      form.removeAttribute("aria-busy");
+      if (button) {
+        button.disabled = false;
+        button.textContent = label;
+      }
+    }
+  };
+  wrapped.__guarded = true;
+  return wrapped;
+}
+
+const nativeOnSubmit = Object.getOwnPropertyDescriptor(
+  HTMLFormElement.prototype,
+  "onsubmit",
+);
+if (nativeOnSubmit) {
+  Object.defineProperty(HTMLFormElement.prototype, "onsubmit", {
+    configurable: true,
+    enumerable: nativeOnSubmit.enumerable,
+    get() {
+      return nativeOnSubmit.get.call(this);
+    },
+    set(handler) {
+      nativeOnSubmit.set.call(
+        this,
+        typeof handler === "function" ? guardedSubmitHandler(handler) : handler,
+      );
+    },
+  });
+}
+
 /* ---------------------------------------------------------------------------
  * 공용 UI 유틸리티
  * 화면 로직 어디서나 같은 방식으로 알림·모달·테마를 다루기 위한 최소 도구입니다.
