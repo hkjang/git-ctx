@@ -65,11 +65,11 @@ func TestAllocateSpendsTheBudgetAndReportsWhatWasDropped(t *testing.T) {
 		many[i] = "- `/core/order` src/main/java/Caller.java:12 — call"
 	}
 	gathered := map[string]sectionData{
-		"dependents":   {candidates: 200, body: strings.Join(many, "\n")},
-		"tests":        {candidates: 0, note: "규약에 맞는 테스트 파일 없음"},
-		"symbol":       {candidates: 1, body: "`OrderService` class"},
-		"dependencies": {candidates: 2, body: "- a\n- b"},
-		"history":      {candidates: 1, body: "- abc123"},
+		"dependents":   {entries: many},
+		"tests":        {note: "규약에 맞는 테스트 파일 없음"},
+		"symbol":       {entries: []string{"`OrderService` class"}},
+		"dependencies": {entries: []string{"- a", "- b"}},
+		"history":      {entries: []string{"- abc123"}},
 	}
 	sections := allocate(4000, gathered)
 
@@ -104,21 +104,31 @@ func TestAllocateSpendsTheBudgetAndReportsWhatWasDropped(t *testing.T) {
 
 // Unused room moves down the priority order instead of being wasted.
 func TestAllocateRedistributesUnusedRoom(t *testing.T) {
-	long := strings.Repeat("- caller line\n", 300)
+	long := make([]string, 300)
+	for i := range long {
+		long[i] = "- caller line"
+	}
 	// The later sections need more content than their own share so that any
 	// extra room actually shows up as extra lines.
-	dependencies := sectionData{candidates: 300, body: strings.Repeat("- dependency line\n", 300)}
-	symbol := sectionData{candidates: 300, body: strings.Repeat("- symbol line\n", 300)}
+	repeatEntries := func(text string, count int) []string {
+		out := make([]string, count)
+		for i := range out {
+			out[i] = text
+		}
+		return out
+	}
+	dependencies := sectionData{entries: repeatEntries("- dependency line", 300)}
+	symbol := sectionData{entries: repeatEntries("- symbol line", 300)}
 
 	withTests := allocate(6000, map[string]sectionData{
-		"dependents":   {candidates: 300, body: long},
-		"tests":        {candidates: 50, body: strings.Repeat("- test\n", 50)},
+		"dependents":   {entries: long},
+		"tests":        {entries: repeatEntries("- test", 50)},
 		"symbol":       symbol,
 		"dependencies": dependencies,
 	})
 	withoutTests := allocate(6000, map[string]sectionData{
-		"dependents":   {candidates: 300, body: long},
-		"tests":        {candidates: 0, note: "테스트 규약 미탐지"},
+		"dependents":   {entries: long},
+		"tests":        {note: "테스트 규약 미탐지"},
 		"symbol":       symbol,
 		"dependencies": dependencies,
 	})
@@ -174,5 +184,89 @@ func TestRenderCarriesThePlanAndTheAccounting(t *testing.T) {
 		if !strings.Contains(rendered, want) {
 			t.Errorf("rendered output is missing %q:\n%s", want, rendered)
 		}
+	}
+}
+
+// A pack now leads with orientation. Someone reading one is usually meeting the
+// project for the first time, so the conventions and entrypoints come before the
+// search results, and the whole thing is fitted to one budget.
+func TestPackSharesFavourOrientationAndSumToTheBudget(t *testing.T) {
+	total := 0.0
+	order := make([]string, 0, len(packShare))
+	for _, share := range packShare {
+		total += share.share
+		order = append(order, share.name)
+	}
+	if total < 0.999 || total > 1.001 {
+		t.Fatalf("pack shares sum to %.3f, want 1.0", total)
+	}
+	if order[0] != "conventions" || order[1] != "entrypoints" {
+		t.Errorf("order = %v, want orientation before results", order)
+	}
+
+	// The libraries section is the one that grows without bound, so it must be
+	// the one that absorbs a cut rather than crowding the others out.
+	blocks := make([]string, 200)
+	for i := range blocks {
+		blocks[i] = "### /a/b\n\n" + strings.Repeat("content line\n", 20)
+	}
+	sections := allocateShares(6000, packShare, map[string]sectionData{
+		"conventions": {entries: []string{"- a", "- b", "- c"}},
+		"entrypoints": {entries: []string{"- OrderService", "- OrderController"}},
+		"libraries":   {entries: blocks, separator: "\n\n"},
+	})
+	byName := map[string]ContextSection{}
+	for _, section := range sections {
+		byName[section.Name] = section
+	}
+	if byName["conventions"].Included != 3 || byName["entrypoints"].Included != 2 {
+		t.Errorf("orientation was cut before results: %#v", byName)
+	}
+	if !strings.Contains(byName["libraries"].Note, "생략") {
+		t.Errorf("the truncated section did not say what it dropped: %q", byName["libraries"].Note)
+	}
+}
+
+// The two bundles share one budgeting rule, so a change to how a cut is
+// reported cannot apply to one and not the other.
+func TestBothBundlesUseTheSameAllocation(t *testing.T) {
+	// Large enough that both allocations must cut, including the pack's
+	// libraries section after it collects the unused share of the others.
+	body := make([]string, 2000)
+	for i := range body {
+		body[i] = "- line"
+	}
+	impact := allocate(5000, map[string]sectionData{"dependents": {entries: body}})
+	pack := allocateShares(5000, packShare, map[string]sectionData{"libraries": {entries: body}})
+
+	find := func(sections []ContextSection, name string) ContextSection {
+		for _, section := range sections {
+			if section.Name == name {
+				return section
+			}
+		}
+		return ContextSection{}
+	}
+	for _, section := range []ContextSection{find(impact, "dependents"), find(pack, "libraries")} {
+		if section.Included == 0 || section.Included >= len(body) {
+			t.Errorf("%s included %d of %d, want a partial list", section.Name, section.Included, len(body))
+		}
+		if !strings.Contains(section.Note, "생략") {
+			t.Errorf("%s did not report the cut: %q", section.Name, section.Note)
+		}
+	}
+}
+
+func TestRenderSectionsSkipsSectionsWithNothingToSay(t *testing.T) {
+	rendered := renderSections([]ContextSection{
+		{Name: "conventions", Title: "프로젝트 규약", Body: "- README.md"},
+		{Name: "entrypoints", Title: "진입점"},
+		{Name: "libraries", Title: "질의 결과", Note: "권한이 없어 제외됐습니다."},
+	})
+	if !strings.Contains(rendered, "프로젝트 규약") || !strings.Contains(rendered, "권한이 없어") {
+		t.Errorf("rendered output lost content:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "## 진입점") {
+		t.Errorf("an empty section with no explanation was rendered:\n%s", rendered)
 	}
 }

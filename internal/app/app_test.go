@@ -914,8 +914,21 @@ func TestPublicAndAdminDatabaseStatus(t *testing.T) {
 	adminRequest.Header.Set("Authorization", "Bearer bootstrap")
 	admin := httptest.NewRecorder()
 	a.Handler().ServeHTTP(admin, adminRequest)
-	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"latest":"039_embedding_coverage.sql"`) || !strings.Contains(admin.Body.String(), `"pool"`) {
-		t.Fatalf("admin status=%d body=%s", admin.Code, admin.Body.String())
+	// Derive the expectation from the migration directory rather than naming a
+	// file: the contract is that the status reports the newest migration that
+	// ran, not that any particular one is newest.
+	entries, readErr := os.ReadDir(filepath.Join("..", "store", "migrations"))
+	if readErr != nil {
+		t.Fatalf("read migrations: %v", readErr)
+	}
+	newest := ""
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".sql") && entry.Name() > newest {
+			newest = entry.Name()
+		}
+	}
+	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"latest":"`+newest+`"`) || !strings.Contains(admin.Body.String(), `"pool"`) {
+		t.Fatalf("admin status=%d newest=%s body=%s", admin.Code, newest, admin.Body.String())
 	}
 }
 
@@ -2386,5 +2399,93 @@ func TestVectorStatusProbeSeparatesModelFailureFromVectorFailure(t *testing.T) {
 	plain := call(http.MethodGet, "/api/v1/admin/vector/status", "")
 	if strings.Contains(plain.Body.String(), "embeddingProbe") {
 		t.Errorf("the probe ran without being asked for: %s", plain.Body.String())
+	}
+}
+
+// A pack is now more than a list of repositories: it carries what it is for, a
+// budget, the symbols worth anchoring on, and whether to pull in the files that
+// say how the project is worked in. All of it has to survive a round trip, or
+// the console silently drops half of what an operator entered.
+func TestContextPackCarriesPurposeBudgetAndEntrypoints(t *testing.T) {
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "packs.db") + "?_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32),
+		BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+		BackupDirectory: filepath.Join(t.TempDir(), "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer bootstrap")
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	created := call(http.MethodPost, "/api/v1/admin/context-packs", `{
+		"slug":"credit-api","name":"Credit API","description":"여신 도메인",
+		"purpose":"onboarding","tokenBudget":30000,"includeConventions":false,
+		"items":[{"libraryId":"/kcb/api","ref":"main","queryHint":"API"}],
+		"entrypoints":[{"symbol":"CreditService","libraryId":"/kcb/api"},{"symbol":"CreditController"}]}`)
+	if created.Code != http.StatusCreated && created.Code != http.StatusOK {
+		t.Fatalf("create=%d body=%s", created.Code, created.Body.String())
+	}
+
+	listed := call(http.MethodGet, "/api/v1/admin/context-packs", "")
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list=%d body=%s", listed.Code, listed.Body.String())
+	}
+	var packs []struct {
+		ID                 string `json:"id"`
+		Purpose            string `json:"purpose"`
+		TokenBudget        int    `json:"tokenBudget"`
+		IncludeConventions bool   `json:"includeConventions"`
+		Entrypoints        []struct {
+			Symbol    string `json:"symbol"`
+			LibraryID string `json:"libraryId"`
+		} `json:"entrypoints"`
+	}
+	if err := json.Unmarshal(listed.Body.Bytes(), &packs); err != nil || len(packs) != 1 {
+		t.Fatalf("decode list: %v body=%s", err, listed.Body.String())
+	}
+	pack := packs[0]
+	if pack.Purpose != "onboarding" || pack.TokenBudget != 30000 || pack.IncludeConventions {
+		t.Errorf("pack lost its new fields: %#v", pack)
+	}
+	if len(pack.Entrypoints) != 2 || pack.Entrypoints[0].Symbol != "CreditService" || pack.Entrypoints[0].LibraryID != "/kcb/api" {
+		t.Errorf("entrypoints = %#v", pack.Entrypoints)
+	}
+
+	// An out-of-range budget is refused rather than silently clamped: an
+	// operator who typed 40 meant something, and it was not 40 bytes.
+	rejected := call(http.MethodPut, "/api/v1/admin/context-packs/"+pack.ID, `{
+		"slug":"credit-api","name":"Credit API","tokenBudget":40,
+		"items":[{"libraryId":"/kcb/api"}]}`)
+	if rejected.Code != http.StatusBadRequest {
+		t.Errorf("a 40 byte budget was accepted: %d %s", rejected.Code, rejected.Body.String())
+	}
+
+	// Updating replaces the entrypoints rather than accumulating them.
+	updated := call(http.MethodPut, "/api/v1/admin/context-packs/"+pack.ID, `{
+		"slug":"credit-api","name":"Credit API","purpose":"feature-development",
+		"items":[{"libraryId":"/kcb/api"}],"entrypoints":[{"symbol":"CreditRepository"}]}`)
+	if updated.Code != http.StatusNoContent && updated.Code != http.StatusOK {
+		t.Fatalf("update=%d body=%s", updated.Code, updated.Body.String())
+	}
+	listed = call(http.MethodGet, "/api/v1/admin/context-packs", "")
+	if err := json.Unmarshal(listed.Body.Bytes(), &packs); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(packs[0].Entrypoints) != 1 || packs[0].Entrypoints[0].Symbol != "CreditRepository" {
+		t.Errorf("entrypoints were not replaced: %#v", packs[0].Entrypoints)
+	}
+	if packs[0].Purpose != "feature-development" || !packs[0].IncludeConventions {
+		t.Errorf("update lost fields: %#v", packs[0])
 	}
 }

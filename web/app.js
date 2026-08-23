@@ -2809,7 +2809,22 @@ function resetContextPack() {
   $("#context-pack-admin-form").reset();
   $("#context-pack-id").value = "";
   $("#context-pack-enabled").checked = true;
+  $("#context-pack-conventions").checked = true;
+  $("#context-pack-budget").value = 0;
 }
+// One entrypoint per line, optionally scoped to a library with "symbol|library".
+function contextPackEntrypoints() {
+  return String($("#context-pack-entrypoints").value || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [symbol, libraryId = ""] = line.split("|").map((part) => part.trim());
+      return { symbol, libraryId };
+    })
+    .filter((entry) => entry.symbol);
+}
+
 async function saveContextPack(event, capabilities) {
   event.preventDefault();
   if (!capabilities.qualityWrite) return;
@@ -2819,7 +2834,11 @@ async function saveContextPack(event, capabilities) {
     name: $("#context-pack-name").value,
     description: $("#context-pack-description").value,
     enabled: $("#context-pack-enabled").checked,
+    purpose: $("#context-pack-purpose").value,
+    tokenBudget: Number($("#context-pack-budget").value) || 0,
+    includeConventions: $("#context-pack-conventions").checked,
     items: contextPackItems(),
+    entrypoints: contextPackEntrypoints(),
   };
   try {
     await api(id ? `/api/v1/admin/context-packs/${encodeURIComponent(id)}` : "/api/v1/admin/context-packs", {
@@ -2847,7 +2866,15 @@ async function refreshContextPacks(capabilities) {
         $("#context-pack-name").value = pack.name;
         $("#context-pack-description").value = pack.description || "";
         $("#context-pack-enabled").checked = pack.enabled;
+        $("#context-pack-purpose").value = pack.purpose || "";
+        $("#context-pack-budget").value = pack.tokenBudget || 0;
+        // Older packs predate this field and come back without it; they had the
+        // behaviour the default describes.
+        $("#context-pack-conventions").checked = pack.includeConventions !== false;
         $("#context-pack-items").value = (pack.items || []).map((item) => [item.libraryId, item.ref || "", item.queryHint || ""].join("|")).join("\n");
+        $("#context-pack-entrypoints").value = (pack.entrypoints || [])
+          .map((entry) => (entry.libraryId ? `${entry.symbol}|${entry.libraryId}` : entry.symbol))
+          .join("\n");
       };
     });
     document.querySelectorAll("[data-delete-pack]").forEach((button) => {
