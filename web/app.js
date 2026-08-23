@@ -1545,6 +1545,55 @@ const connectionTestCategories = [
   "vault",
   "notifications",
 ];
+// Settings validation names the field it rejected: the server answers
+// "notifications.smtpFrom must be a valid email address". The panel showed that
+// sentence and nothing more, leaving the operator to find smtpFrom among the
+// dozens of inputs a category can hold. Matching the key against the rendered
+// fields puts the message where the mistake actually is.
+//
+// A message can name more than one ("vault.baseUrl and vault.token are
+// required"), and some name none at all, in which case the panel remains the
+// only report.
+function clearSettingFieldErrors() {
+  document.querySelectorAll("#setting-fields [data-field-key]").forEach((label) => {
+    label.classList.remove("field-invalid");
+    const note = label.querySelector(".field-error");
+    if (note) note.remove();
+    label
+      .querySelectorAll("[data-setting-key]")
+      .forEach((control) => control.removeAttribute("aria-invalid"));
+  });
+}
+
+function markSettingFieldErrors(message) {
+  clearSettingFieldErrors();
+  const text = String(message || "");
+  const keys = [];
+  for (const match of text.matchAll(/\b[a-z][A-Za-z0-9]*\.([A-Za-z][A-Za-z0-9]*)\b/g)) {
+    if (!keys.includes(match[1])) keys.push(match[1]);
+  }
+  let first = null;
+  for (const key of keys) {
+    const label = document.querySelector(`#setting-fields [data-field-key="${key}"]`);
+    if (!label) continue;
+    label.classList.add("field-invalid");
+    label
+      .querySelectorAll("[data-setting-key]")
+      .forEach((control) => control.setAttribute("aria-invalid", "true"));
+    const note = document.createElement("small");
+    note.className = "field-error";
+    note.textContent = text;
+    label.appendChild(note);
+    if (!first) first = label;
+  }
+  if (first) {
+    first.scrollIntoView({ block: "center", behavior: "smooth" });
+    const control = first.querySelector("[data-setting-key]");
+    if (control) control.focus({ preventScroll: true });
+  }
+  return Boolean(first);
+}
+
 function renderSettingFields(category, value) {
   const fields = integrationSettingFields[category] || [];
   const fieldHelp = {
@@ -2300,6 +2349,7 @@ function setupAdmin(roles, capabilities) {
       if (!$("#setting-fields").querySelectorAll("input,select,textarea").length) {
         JSON.parse($("#setting-json").value);
       }
+      clearSettingFieldErrors();
       const invalid = $("#setting-fields").querySelector(":invalid");
       if (invalid) {
         invalid.reportValidity();
@@ -2330,7 +2380,14 @@ function setupAdmin(roles, capabilities) {
       }
       await loadCurrentSetting($("#category").value);
     } catch (e) {
-      renderSettingResult(false, "설정을 저장하지 못했습니다", [e.message]);
+      const located = markSettingFieldErrors(e.message);
+      renderSettingResult(
+        false,
+        "설정을 저장하지 못했습니다",
+        located
+          ? [e.message, "문제가 된 항목을 아래에서 표시했습니다."]
+          : [e.message],
+      );
       reportError(e, "저장 실패");
     } finally {
       button.disabled = false;

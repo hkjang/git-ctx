@@ -265,6 +265,25 @@ legend {
   line-height: 1.4;
 }
 
+/* A field the server rejected. The message is repeated next to the input rather
+   than only in the panel above, so the operator does not have to work out which
+   of the fields "notifications.smtpFrom" refers to. */
+.field-invalid > input,
+.field-invalid > select,
+.field-invalid > textarea,
+.field-invalid .toggle-row {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+.field-error {
+  display: block;
+  margin-top: var(--space-1, 4px);
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
 /* ---------- 상단바 ---------- */
 .topbar {
   position: sticky;
