@@ -346,6 +346,31 @@ let bootstrapInfo = { required: false, tokenFile: "", ssoConfigured: false };
 const isAdminEntry = location.pathname === "/admin" || location.pathname.startsWith("/admin/");
 const isRecoveryEntry =
   isAdminEntry && new URLSearchParams(location.search).get("recovery") === "1";
+// api() throws on any non-2xx, carrying the server's problem detail. A handler
+// that forgets to catch that turns a failed action into silence: the list does
+// not change, no message appears, and the operator is left assuming it worked.
+// This net catches whatever slips through so a failure is always visible.
+window.addEventListener("unhandledrejection", (event) => {
+  const reason = event.reason;
+  const message = reason && reason.message ? reason.message : String(reason);
+  event.preventDefault();
+  showAdmin(message, false);
+});
+
+// runAction performs one API-backed action and reports the outcome. Pass
+// `confirm` for anything an operator cannot undo.
+async function runAction(run, options = {}) {
+  if (options.confirm && !window.confirm(options.confirm)) return false;
+  try {
+    await run();
+    if (options.success) showAdmin(options.success, true);
+    return true;
+  } catch (error) {
+    showAdmin(error.message, false);
+    return false;
+  }
+}
+
 const api = async (url, options = {}) => {
   const bootstrapToken = sessionStorage.getItem("git_ctx_bootstrap_token");
   const response = await fetch(url, {
@@ -3412,11 +3437,18 @@ async function refreshSecurity(capabilities = activeCapabilities) {
     document.querySelectorAll("[data-admin-revoke]").forEach(
       (b) =>
         (b.onclick = async () => {
-          await api(
-            `/api/v1/admin/api-keys/${encodeURIComponent(b.dataset.adminRevoke)}/revoke`,
-            { method: "POST" },
+          const id = b.dataset.adminRevoke;
+          const done = await runAction(
+            () =>
+              api(`/api/v1/admin/api-keys/${encodeURIComponent(id)}/revoke`, {
+                method: "POST",
+              }),
+            {
+              confirm: `이 MCP 키를 폐기하면 해당 사용자의 연동이 즉시 끊깁니다. 계속할까요?\n\n키: ${id}`,
+              success: "MCP 키를 폐기했습니다.",
+            },
           );
-          refreshSecurity(capabilities);
+          if (done) refreshSecurity(capabilities);
         }),
     );
     $("#managed-secrets").innerHTML =
@@ -3424,11 +3456,18 @@ async function refreshSecurity(capabilities = activeCapabilities) {
     document.querySelectorAll("[data-secret-disable]").forEach(
       (button) =>
         (button.onclick = async () => {
-          await api(
-            `/api/v1/admin/secrets/${encodeURIComponent(button.dataset.secretDisable)}/disable`,
-            { method: "POST" },
+          const name = button.dataset.secretDisable;
+          const done = await runAction(
+            () =>
+              api(`/api/v1/admin/secrets/${encodeURIComponent(name)}/disable`, {
+                method: "POST",
+              }),
+            {
+              confirm: `이 Secret 을 중지하면 secret://${name} 을 참조하는 설정이 즉시 동작하지 않습니다. 계속할까요?`,
+              success: "Secret 을 중지했습니다.",
+            },
           );
-          refreshSecurity(capabilities);
+          if (done) refreshSecurity(capabilities);
         }),
     );
     $("#security-events").innerHTML =

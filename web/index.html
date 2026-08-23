@@ -735,10 +735,13 @@
       </main>
     </div>
     <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
-    <dialog id="quick-nav-dialog" class="app-dialog quick-nav-dialog">
-      <div class="dialog-head"><strong>빠른 이동</strong><button id="quick-nav-close" type="button" aria-label="닫기">×</button></div>
-      <input id="quick-nav-query" type="search" placeholder="메뉴 검색…" autocomplete="off" />
-      <div id="quick-nav-results" class="quick-nav-results"></div>
+    <dialog id="quick-nav-dialog" class="app-dialog quick-nav-dialog" aria-labelledby="quick-nav-title">
+      <div class="dialog-head"><strong id="quick-nav-title">빠른 이동</strong><button id="quick-nav-close" type="button" aria-label="닫기">×</button></div>
+      <!-- A placeholder is not an accessible name: it disappears on the first
+           keystroke and is announced inconsistently. -->
+      <input id="quick-nav-query" type="search" placeholder="메뉴 검색…" autocomplete="off" aria-label="메뉴 검색" aria-controls="quick-nav-results" />
+      <!-- Results are replaced as the query changes, so they have to be announced. -->
+      <div id="quick-nav-results" class="quick-nav-results" role="listbox" aria-label="검색 결과" aria-live="polite"></div>
       <small>↑↓ 이동 · Enter 선택 · Esc 닫기</small>
     </dialog>
     <dialog id="guide-dialog" class="app-dialog guide-dialog">
