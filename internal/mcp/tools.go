@@ -418,3 +418,26 @@ func handleFindCodeOwner(s *Server, r *http.Request, p auth.Principal, args map[
 	}
 	return search.FormatOwners(result), len(result.Owners) == 0, nil
 }
+
+func handleFindTests(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
+	libraryID := stringArg(args, "libraryId")
+	if p.KeyID != "" && libraryID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+		return "", false, errors.New("library is unavailable or access is denied")
+	}
+	var result search.TestSearch
+	result, err = s.search.FindTests(r.Context(), principalACLs(p), stringArg(args, "symbol"), libraryID,
+		stringArg(args, "ref"), intArg(args, "limit", 20))
+	if err != nil {
+		return "", false, err
+	}
+	if len(p.AllowedRepositories) > 0 {
+		allowed := result.Tests[:0]
+		for _, test := range result.Tests {
+			if libraryAllowed(test.LibraryID, p.AllowedRepositories) {
+				allowed = append(allowed, test)
+			}
+		}
+		result.Tests = allowed
+	}
+	return search.FormatTests(result), len(result.Tests) == 0, nil
+}
