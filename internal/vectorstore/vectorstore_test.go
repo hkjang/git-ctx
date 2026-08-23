@@ -120,3 +120,92 @@ func TestMilvusClientCreatesSearchesAndSurfacesAPIErrors(t *testing.T) {
 		t.Fatal("no request was made")
 	}
 }
+
+// SearchGlobal is the path search-semantic takes when the caller named no
+// library, and Status is what the administration screen shows after an operator
+// points the platform at Milvus. Neither was covered.
+func TestMilvusSearchGlobalAndStatus(t *testing.T) {
+	var searchPayload map[string]any
+	collectionExists := true
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/entities/search"):
+			searchPayload = payload
+			_, _ = w.Write([]byte(`{"code":0,"data":[{"id":"a","distance":0.88},{"id":"b","distance":0.42}]}`))
+		case strings.HasSuffix(r.URL.Path, "/collections/list"):
+			if collectionExists {
+				_, _ = w.Write([]byte(`{"code":0,"data":["git_ctx_chunk_vectors","other"]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"code":0,"data":["other"]}`))
+		case strings.HasSuffix(r.URL.Path, "/collections/get_stats"):
+			// Milvus reports rowCount as a string on some builds.
+			_, _ = w.Write([]byte(`{"code":0,"data":{"rowCount":"1234"}}`))
+		default:
+			_, _ = w.Write([]byte(`{"code":0,"data":{}}`))
+		}
+	}))
+	defer server.Close()
+
+	store, err := Open(FromMap(map[string]any{
+		"provider": "milvus", "baseUrl": server.URL, "dimensions": float64(4),
+	}), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	matches, err := store.SearchGlobal(context.Background(), "model-v2", []float32{1, 0, 0, 0}, 7)
+	if err != nil {
+		t.Fatalf("SearchGlobal: %v", err)
+	}
+	if len(matches) != 2 || matches[0].ID != "a" || matches[0].Score < 0.87 {
+		t.Fatalf("matches=%#v", matches)
+	}
+	// A global search must not scope itself to one repository, but it must still
+	// honour the embedding revision or it mixes vectors from two models.
+	if got, ok := searchPayload["filter"].(string); !ok || !strings.Contains(got, `embedding_revision == "model-v2"`) {
+		t.Errorf("filter = %v, want the revision constraint", searchPayload["filter"])
+	}
+	if got := searchPayload["filter"].(string); strings.Contains(got, "repository_id") {
+		t.Errorf("filter = %q, want no repository scope on a global search", got)
+	}
+	if searchPayload["limit"] != float64(7) {
+		t.Errorf("limit = %v, want 7", searchPayload["limit"])
+	}
+
+	// Without a revision the filter is omitted entirely rather than sent empty.
+	if _, err = store.SearchGlobal(context.Background(), "", []float32{1, 0, 0, 0}, 3); err != nil {
+		t.Fatalf("SearchGlobal without revision: %v", err)
+	}
+	if _, present := searchPayload["filter"]; present {
+		t.Errorf("filter = %v, want none when no revision is configured", searchPayload["filter"])
+	}
+
+	status, err := store.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if !status.Ready || status.Provider != "milvus" || status.Collection != "git_ctx_chunk_vectors" {
+		t.Fatalf("status=%#v", status)
+	}
+	if status.Vectors != 1234 {
+		t.Errorf("Vectors = %d, want the string rowCount parsed as 1234", status.Vectors)
+	}
+	if status.Dimensions != 4 {
+		t.Errorf("Dimensions = %d, want 4", status.Dimensions)
+	}
+
+	// Before the first projection the collection does not exist yet. That is a
+	// normal state, not a connection failure.
+	collectionExists = false
+	status, err = store.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status without collection: %v", err)
+	}
+	if !status.Ready || status.Vectors != 0 || !strings.Contains(status.Detail, "not created yet") {
+		t.Fatalf("status=%#v", status)
+	}
+}

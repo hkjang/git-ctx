@@ -2205,3 +2205,87 @@ func TestSettingsExportImportRoundTrip(t *testing.T) {
 		t.Fatalf("second import=%s", second.Body.String())
 	}
 }
+
+// The administrator picks the vector database in settings, and the platform has
+// to actually use the one they picked. The existing coverage only proved an
+// unreachable target is refused; this walks the path an operator takes when the
+// target is real.
+func TestAdminSelectsMilvusAsTheVectorDatabase(t *testing.T) {
+	var listed, statted bool
+	milvus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/collections/list"):
+			listed = true
+			_, _ = w.Write([]byte(`{"code":0,"data":["git_ctx_chunk_vectors"]}`))
+		case strings.HasSuffix(r.URL.Path, "/collections/get_stats"):
+			statted = true
+			_, _ = w.Write([]byte(`{"code":0,"data":{"rowCount":"42"}}`))
+		default:
+			_, _ = w.Write([]byte(`{"code":0,"data":{}}`))
+		}
+	}))
+	defer milvus.Close()
+
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "vector.db") + "?_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32),
+		BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+		BackupDirectory: filepath.Join(t.TempDir(), "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer bootstrap")
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	// Saving is what runs the connection test, so a 200 here means the platform
+	// reached the Milvus the administrator named.
+	setting := `{"provider":"milvus","baseUrl":"` + milvus.URL + `","collection":"git_ctx_chunk_vectors","dimensions":256,"timeoutSeconds":5}`
+	saved := call(http.MethodPut, "/api/v1/admin/settings/vector", setting)
+	if saved.Code != http.StatusOK {
+		t.Fatalf("save=%d body=%s", saved.Code, saved.Body.String())
+	}
+	if !listed {
+		t.Fatal("saving the setting did not test the connection")
+	}
+
+	// The status screen must now report Milvus rather than the built-in store.
+	status := call(http.MethodGet, "/api/v1/admin/vector/status", "")
+	if status.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", status.Code, status.Body.String())
+	}
+	var view struct {
+		Provider   string `json:"provider"`
+		Collection string `json:"collection"`
+		Ready      bool   `json:"ready"`
+		Vectors    int64  `json:"vectors"`
+	}
+	if err := json.Unmarshal(status.Body.Bytes(), &view); err != nil {
+		t.Fatalf("decode status: %v body=%s", err, status.Body.String())
+	}
+	if view.Provider != "milvus" || !view.Ready {
+		t.Fatalf("status did not report the selected provider: %#v body=%s", view, status.Body.String())
+	}
+	if view.Vectors != 42 || !statted {
+		t.Errorf("status did not read the collection size: %#v", view)
+	}
+
+	// Switching back must be equally available, or an operator cannot undo it.
+	off := call(http.MethodPut, "/api/v1/admin/settings/vector", `{"provider":"none"}`)
+	if off.Code != http.StatusOK {
+		t.Fatalf("switching back=%d body=%s", off.Code, off.Body.String())
+	}
+	after := call(http.MethodGet, "/api/v1/admin/vector/status", "")
+	if strings.Contains(after.Body.String(), `"provider":"milvus"`) {
+		t.Errorf("still reporting milvus after switching off: %s", after.Body.String())
+	}
+}
