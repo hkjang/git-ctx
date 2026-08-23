@@ -11,13 +11,19 @@ import (
 	"time"
 
 	"git-ctx/internal/store"
+	"git-ctx/internal/testsupport"
 )
 
 func TestPostgresOutboxIntegration(t *testing.T) {
-	dsn := os.Getenv("GIT_CTX_TEST_POSTGRES_DSN")
-	if dsn == "" {
-		t.Skip("GIT_CTX_TEST_POSTGRES_DSN is not set")
+	base := os.Getenv("GIT_CTX_TEST_POSTGRES_DSN")
+	if reason := testsupport.SkipReason("GIT_CTX_TEST_POSTGRES_DSN", base); reason != "" {
+		t.Skip(reason)
 	}
+	dsn, dropDatabase, err := testsupport.NewPostgresDatabase(context.Background(), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(dropDatabase)
 	db, err := store.Open(context.Background(), "postgres", dsn)
 	if err != nil {
 		t.Fatal(err)
