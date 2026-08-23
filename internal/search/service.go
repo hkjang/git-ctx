@@ -254,6 +254,14 @@ func repositoryACL(principals []string) (join, predicate string, args []any) {
 	if Unrestricted(principals) {
 		return "LEFT JOIN repository_permissions p ON 1=0", "1=1", nil
 	}
+	// Callers are expected to answer an empty principal set before reaching a
+	// query, but an empty set must never build "IN ()": SQLite accepts it and
+	// evaluates false, while PostgreSQL rejects it as a syntax error. Since the
+	// tests run on SQLite, a caller that forgot the check would pass CI and fail
+	// only in production. Deny outright instead.
+	if len(principals) == 0 {
+		return "JOIN repository_permissions p ON p.repository_id=r.id", "1=0", nil
+	}
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(principals)), ",")
 	args = make([]any, 0, len(principals))
 	for _, principal := range principals {

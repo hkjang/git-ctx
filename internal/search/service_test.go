@@ -1846,3 +1846,32 @@ func TestFailingSourceIsPausedAndReported(t *testing.T) {
 		t.Fatalf("the diagnostics must state that the source is paused: %v", code.Diagnostics)
 	}
 }
+
+// An empty principal set must not build "IN ()": SQLite accepts it and yields
+// false, but PostgreSQL rejects it outright, so the tests would stay green while
+// production broke. The clause denies instead.
+func TestRepositoryACLDeniesEmptyPrincipalSet(t *testing.T) {
+	join, predicate, args := RepositoryACLClause(nil)
+	if strings.Contains(predicate, "IN ()") {
+		t.Fatalf("predicate builds an empty IN list: %q", predicate)
+	}
+	if predicate != "1=0" {
+		t.Errorf("predicate = %q, want a clause that matches nothing", predicate)
+	}
+	if len(args) != 0 {
+		t.Errorf("args = %v, want none", args)
+	}
+	if !strings.Contains(join, "JOIN repository_permissions") {
+		t.Errorf("join = %q, want the permissions join kept so the p alias resolves", join)
+	}
+}
+
+func TestRepositoryACLStillScopesToPrincipals(t *testing.T) {
+	_, predicate, args := RepositoryACLClause([]string{"alice", "group:devs"})
+	if !strings.Contains(predicate, "IN (?,?)") {
+		t.Errorf("predicate = %q, want one placeholder per principal", predicate)
+	}
+	if len(args) != 2 {
+		t.Errorf("args = %v, want both principals bound", args)
+	}
+}
