@@ -384,3 +384,20 @@ func handleReindexRepository(s *Server, r *http.Request, p auth.Principal, args 
 	text, err = s.reindexRepository(r.Context(), p, libraryID, stringArg(args, "ref"))
 	return text, empty, err
 }
+
+func handleBuildContext(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
+	libraryID := stringArg(args, "libraryId")
+	if p.KeyID != "" && libraryID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+		return "", false, errors.New("library is unavailable or access is denied")
+	}
+	var bundle search.ContextBundle
+	bundle, err = s.search.BuildChangeContext(r.Context(), principalACLs(p), stringArg(args, "query"), libraryID,
+		stringArg(args, "ref"), s.responseBudget(r.Context(), "build-context"))
+	if err != nil {
+		return "", false, err
+	}
+	// An unresolved target is a real answer -- the caller has to narrow it -- so
+	// it is not reported as an empty result.
+	empty = len(bundle.Sections) == 0 && len(bundle.Ambiguous) == 0
+	return bundle.Render(), empty, nil
+}

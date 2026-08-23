@@ -263,6 +263,16 @@ var registry = []tool{
 		handler:       handleExplainSearchResult,
 	},
 	{
+		name:        "build-context",
+		description: "Assembles everything needed before changing a symbol: who calls it across accessible repositories, what it depends on, the tests that cover it, and its recent history. Ask this instead of running find-symbol, find-dependents, trace-dependencies and find-file yourself; it applies the repository ACL once and fits the result to a token budget, saying what did not fit.",
+		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
+			"query":     map[string]string{"type": "string", "description": "What you are about to change, naming the type, function, table or service, for example \"OrderService 수정하려는데 영향 범위\""},
+			"libraryId": map[string]string{"type": "string", "description": "Optional library scope; use it when the same symbol name exists in more than one repository"},
+			"ref":       map[string]string{"type": "string", "description": "Optional branch or tag"}}},
+		usesLibraryID: true,
+		handler:       handleBuildContext,
+	},
+	{
 		name:        "get-platform-status",
 		description: "Returns administrative MCP, source, index, database, and effective embedding retrieval status. Requires an administrator MCP API key.",
 		schema:      map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}},
