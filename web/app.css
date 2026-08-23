@@ -1253,6 +1253,9 @@ td small {
   * {
     animation: none !important;
     transition: none !important;
+    /* A smooth scroll asked for in CSS has to be cancelled here too; the ones
+       the script starts are handled by scrollBehavior() in app.js. */
+    scroll-behavior: auto !important;
   }
 }
 

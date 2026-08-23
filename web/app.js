@@ -429,6 +429,17 @@ window.addEventListener("unhandledrejection", (event) => {
 // category, a Keycloak preview waits on another server. Reporting stays with the
 // caller, because several of these write into their own result panel rather than
 // the banner.
+// Reduced motion is honoured in CSS, but that only covers animations and
+// transitions. A scroll the script starts with behavior:"smooth" ignores the
+// setting completely -- and smooth scrolling is one of the things it exists to
+// stop, being a common trigger for people with vestibular disorders.
+function scrollBehavior() {
+  const query =
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)");
+  return query && query.matches ? "auto" : "smooth";
+}
+
 async function withBusy(button, busyLabel, run) {
   if (!button) return run();
   if (button.dataset.running === "true") return undefined;
@@ -1171,7 +1182,7 @@ function revealPanel(panel) {
   if (!panel || panel.hidden) return;
   if (!panel.hasAttribute("tabindex")) panel.setAttribute("tabindex", "-1");
   panel.focus({ preventScroll: true });
-  panel.scrollIntoView({ block: "start", behavior: "smooth" });
+  panel.scrollIntoView({ block: "start", behavior: scrollBehavior() });
 }
 
 let openWorkspaceView = () => {};
@@ -1303,7 +1314,7 @@ function setupPersonalNavigation() {
 function navigatePersonal(target) {
   openWorkspaceView("personal");
   openPersonalView(target);
-  window.scrollTo({ top: 0, behavior: "smooth" });
+  window.scrollTo({ top: 0, behavior: scrollBehavior() });
 }
 function setupProfileMenu() {
   const toggle = $("#profile-toggle");
@@ -1351,7 +1362,7 @@ function setupQuickNavigation(capabilities, roles) {
   ].filter((entry) => entry[3]).map(([label, group, target]) => [label, group, () => {
     openWorkspaceView("admin");
     document.querySelector(`[data-admin-target="${target}"]`)?.click();
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    window.scrollTo({ top: 0, behavior: scrollBehavior() });
   }]);
   // 관리자 설정의 하위 탭도 빠른 이동에 자동 등록합니다. 새 설정 카테고리를
   // categories에 추가하면 역할 필터를 거쳐 이 목록에도 함께 나타납니다.
@@ -1368,7 +1379,7 @@ function setupQuickNavigation(capabilities, roles) {
               .querySelector('[data-admin-target="settings-admin"]')
               ?.click();
             openSettingCategory(category);
-            window.scrollTo({ top: 0, behavior: "smooth" });
+            window.scrollTo({ top: 0, behavior: scrollBehavior() });
           },
         ];
       })
@@ -1613,7 +1624,7 @@ function markSettingFieldErrors(message) {
     if (!first) first = label;
   }
   if (first) {
-    first.scrollIntoView({ block: "center", behavior: "smooth" });
+    first.scrollIntoView({ block: "center", behavior: scrollBehavior() });
     const control = first.querySelector("[data-setting-key]");
     if (control) control.focus({ preventScroll: true });
   }
@@ -2489,7 +2500,7 @@ async function refreshSetupStatus() {
         if (button.dataset.setupCategory) {
           document.querySelector(`[data-setting-tab="${button.dataset.setupCategory}"]`)?.click();
         }
-        window.scrollTo({ top: 0, behavior: "smooth" });
+        window.scrollTo({ top: 0, behavior: scrollBehavior() });
       };
     });
   } catch {
