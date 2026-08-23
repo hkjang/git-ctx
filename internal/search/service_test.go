@@ -1875,3 +1875,123 @@ func TestRepositoryACLStillScopesToPrincipals(t *testing.T) {
 		t.Errorf("args = %v, want both principals bound", args)
 	}
 }
+
+// failingEmbedder stands in for a model endpoint that is reachable at
+// configuration time and broken afterwards.
+type failingEmbedder struct{ calls int }
+
+func (f *failingEmbedder) Embed(context.Context, string) ([]float32, error) {
+	f.calls++
+	return nil, errors.New("connection refused")
+}
+
+type fixedEmbedder struct{ calls int }
+
+func (f *fixedEmbedder) Embed(context.Context, string) ([]float32, error) {
+	f.calls++
+	return embedding.Embed("Dify source search"), nil
+}
+
+// An operator whose semantic search stops working needs to know which half
+// broke. The two halves fail differently on purpose: a dead model endpoint
+// leaves nothing to score with and drops to keyword retrieval, while a dead
+// vector database still has usable embeddings in the metadata database and must
+// keep scoring them rather than giving up on meaning.
+func TestSemanticSearchDegradesDifferentlyForModelAndVectorFailures(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:degrade-split?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	_, _ = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r','core','dify','Dify','gitlab','1','/core/dify','main')`)
+	_, _ = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r','alice','read')`)
+	_, _ = db.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding,embedding_revision) VALUES('c','r','main','abc','api/search.go',10,20,'Search service','code','Dify source search query implementation','h',?,'')`, embedding.Encode(embedding.Embed("Dify source search query implementation")))
+	_, _ = db.DB.Exec(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,total_chunks,embedded_chunks,embedding_status) VALUES('r','main','abc',1,1,'ready')`)
+
+	newService := func() (*Service, map[string]int) {
+		service := New(db)
+		service.SetConfigLoader(func(context.Context) Config {
+			return Config{KeywordWeight: 1, VectorWeight: .35, FinalK: 5, CandidateLimit: 100,
+				RetrievalMode: RetrievalHybridFallback, MinimumEmbeddingCoverage: 50}
+		})
+		fallbacks := map[string]int{}
+		service.SetFallbackReporter(func(reason string) { fallbacks[reason]++ })
+		return service, fallbacks
+	}
+
+	t.Run("모델 엔드포인트 다운", func(t *testing.T) {
+		service, fallbacks := newService()
+		embedder := &failingEmbedder{}
+		service.SetEmbeddingLoader(func(context.Context) (embedding.Provider, error) { return embedder, nil })
+		vectorCalls := 0
+		service.SetGlobalVectorLoader(func(context.Context, string, int) ([]VectorCandidate, error) {
+			vectorCalls++
+			return []VectorCandidate{{ID: "c", Score: 1}}, nil
+		})
+
+		result, err := service.SemanticSearch(ctx, []string{"alice"}, "Dify source search", "", "", 5)
+		if err != nil {
+			t.Fatalf("a dead model endpoint must degrade, not fail: %v", err)
+		}
+		if len(result.Hits) == 0 {
+			t.Error("degraded search returned nothing")
+		}
+		if !strings.Contains(result.Mode, "keyword") {
+			t.Errorf("Mode = %q, want keyword retrieval", result.Mode)
+		}
+		if fallbacks["query-embedding-failed"] != 1 {
+			t.Errorf("fallbacks = %v, want the model failure named", fallbacks)
+		}
+		if embedder.calls == 0 {
+			t.Error("the model was never tried")
+		}
+		// Without a query vector there is nothing to search the ANN index with.
+		if vectorCalls != 0 {
+			t.Errorf("the vector database was queried %d times with no query vector", vectorCalls)
+		}
+		if !hasDiagnostic(result.Diagnostics, "embedding") {
+			t.Errorf("diagnostics do not point at the model: %v", result.Diagnostics)
+		}
+	})
+
+	t.Run("벡터 DB 다운", func(t *testing.T) {
+		service, fallbacks := newService()
+		embedder := &fixedEmbedder{}
+		service.SetEmbeddingLoader(func(context.Context) (embedding.Provider, error) { return embedder, nil })
+		service.SetGlobalVectorLoader(func(context.Context, string, int) ([]VectorCandidate, error) {
+			return nil, errors.New("dial tcp: connection refused")
+		})
+
+		result, err := service.SemanticSearch(ctx, []string{"alice"}, "Dify source search", "", "", 5)
+		if err != nil {
+			t.Fatalf("a dead vector database must degrade, not fail: %v", err)
+		}
+		if len(result.Hits) == 0 {
+			t.Error("degraded search returned nothing")
+		}
+		// The embeddings are still in the metadata database, so meaning-based
+		// scoring must continue rather than dropping to keywords.
+		if strings.Contains(result.Mode, "keyword") {
+			t.Errorf("Mode = %q, want the in-database embedding scan, not keywords", result.Mode)
+		}
+		if fallbacks["query-embedding-failed"] != 0 {
+			t.Errorf("fallbacks = %v, want no model failure recorded", fallbacks)
+		}
+		if embedder.calls == 0 {
+			t.Error("the model should still be used to embed the query")
+		}
+		if !hasDiagnostic(result.Diagnostics, "vector database") {
+			t.Errorf("diagnostics do not point at the vector database: %v", result.Diagnostics)
+		}
+	})
+}
+
+func hasDiagnostic(diagnostics []string, want string) bool {
+	for _, item := range diagnostics {
+		if strings.Contains(strings.ToLower(item), strings.ToLower(want)) {
+			return true
+		}
+	}
+	return false
+}

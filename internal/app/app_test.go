@@ -2289,3 +2289,102 @@ func TestAdminSelectsMilvusAsTheVectorDatabase(t *testing.T) {
 		t.Errorf("still reporting milvus after switching off: %s", after.Body.String())
 	}
 }
+
+// When semantic search stops working an operator has to know which half broke.
+// The vector database was already probed live on every status read; the model
+// endpoint was only ever reached when the setting was saved, so a model that
+// died afterwards looked identical to a healthy one.
+func TestVectorStatusProbeSeparatesModelFailureFromVectorFailure(t *testing.T) {
+	modelUp := true
+	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !modelUp {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"model is loading"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[0.1,0.2,0.3,0.4]}]}`))
+	}))
+	defer model.Close()
+
+	milvus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/collections/list"):
+			_, _ = w.Write([]byte(`{"code":0,"data":["git_ctx_chunk_vectors"]}`))
+		case strings.HasSuffix(r.URL.Path, "/collections/get_stats"):
+			_, _ = w.Write([]byte(`{"code":0,"data":{"rowCount":"7"}}`))
+		default:
+			_, _ = w.Write([]byte(`{"code":0,"data":{}}`))
+		}
+	}))
+	defer milvus.Close()
+
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "probe.db") + "?_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32),
+		BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+		BackupDirectory: filepath.Join(t.TempDir(), "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer bootstrap")
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	if saved := call(http.MethodPut, "/api/v1/admin/settings/model",
+		`{"provider":"openai-compatible","baseUrl":"`+model.URL+`","model":"m","dimensions":4,"timeoutSeconds":5}`); saved.Code != http.StatusOK {
+		t.Fatalf("model save=%d body=%s", saved.Code, saved.Body.String())
+	}
+	if saved := call(http.MethodPut, "/api/v1/admin/settings/vector",
+		`{"provider":"milvus","baseUrl":"`+milvus.URL+`","collection":"git_ctx_chunk_vectors","dimensions":4,"timeoutSeconds":5}`); saved.Code != http.StatusOK {
+		t.Fatalf("vector save=%d body=%s", saved.Code, saved.Body.String())
+	}
+
+	probe := func() (probeOK, vectorReady bool, body string) {
+		t.Helper()
+		recorder := call(http.MethodGet, "/api/v1/admin/vector/status?probe=true", "")
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+		var view struct {
+			Ready          bool `json:"ready"`
+			EmbeddingProbe struct {
+				OK    bool   `json:"ok"`
+				Stage string `json:"stage"`
+			} `json:"embeddingProbe"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &view); err != nil {
+			t.Fatalf("decode: %v body=%s", err, recorder.Body.String())
+		}
+		return view.EmbeddingProbe.OK, view.Ready, recorder.Body.String()
+	}
+
+	if modelOK, vectorOK, body := probe(); !modelOK || !vectorOK {
+		t.Fatalf("both healthy but reported model=%v vector=%v: %s", modelOK, vectorOK, body)
+	}
+
+	// The model dies. The vector database is untouched, and the two must now
+	// read differently.
+	modelUp = false
+	modelOK, vectorOK, body := probe()
+	if modelOK {
+		t.Errorf("a dead model endpoint still probed healthy: %s", body)
+	}
+	if !vectorOK {
+		t.Errorf("the vector database was reported broken when only the model died: %s", body)
+	}
+
+	// Without the flag the probe is skipped, so routine polling stays cheap.
+	plain := call(http.MethodGet, "/api/v1/admin/vector/status", "")
+	if strings.Contains(plain.Body.String(), "embeddingProbe") {
+		t.Errorf("the probe ran without being asked for: %s", plain.Body.String())
+	}
+}

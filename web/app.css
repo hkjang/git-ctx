@@ -1236,3 +1236,10 @@ td small {
     transition: none !important;
   }
 }
+
+/* A failed embedding probe sits inside an otherwise healthy panel, so it needs
+   its own marker: the vector database and the model fail independently. */
+.result-list .probe-failed {
+  color: var(--danger, #dc2626);
+  font-weight: 600;
+}

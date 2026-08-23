@@ -554,6 +554,44 @@ FROM users u LEFT JOIN user_identities i ON i.user_id=u.id WHERE u.username=? OR
 	jsonOut(w, http.StatusOK, response)
 }
 
+// probeEmbedding embeds one short string so the screen can say whether the model
+// endpoint answers right now. The stored counts and the circuit breaker only
+// describe traffic that already happened, and the model is otherwise reached
+// live only when an administrator saves the setting -- which left an operator
+// unable to tell a dead model from a dead vector database, the two halves that
+// degrade a semantic search in different ways.
+func (a *App) probeEmbedding(ctx context.Context) map[string]any {
+	settings, err := a.loadSettingMap(ctx, "model")
+	if err != nil {
+		return map[string]any{"ok": false, "stage": "configuration", "error": "embedding model is not configured"}
+	}
+	if configured, _ := settings["provider"].(string); configured != "openai-compatible" {
+		return map[string]any{"ok": true, "provider": "local",
+			"detail": "vectors are computed in-process, so there is no endpoint to reach"}
+	}
+	// Built straight from the setting rather than through the shared runtime.
+	// That runtime caches vectors and short-circuits on an open breaker, so a
+	// probe sent through it can be answered without the endpoint being touched
+	// at all -- which is the one thing a liveness check must not do.
+	provider, err := embeddingProviderFromMap(settings)
+	if err != nil {
+		return map[string]any{"ok": false, "stage": "configuration", "error": err.Error()}
+	}
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	vector, err := provider.Embed(ctx, "git-ctx embedding probe")
+	if err != nil {
+		return map[string]any{"ok": false, "stage": "request", "error": err.Error(),
+			"latencyMs": time.Since(started).Milliseconds()}
+	}
+	if len(vector) == 0 {
+		return map[string]any{"ok": false, "stage": "response", "error": "the model returned an empty vector",
+			"latencyMs": time.Since(started).Milliseconds()}
+	}
+	return map[string]any{"ok": true, "dimensions": len(vector), "latencyMs": time.Since(started).Milliseconds()}
+}
+
 // vectorStatus reports whether the configured vector database is reachable and
 // how many vectors it holds compared with the metadata database.
 func (a *App) vectorStatus(w http.ResponseWriter, r *http.Request) {
@@ -574,6 +612,10 @@ func (a *App) vectorStatus(w http.ResponseWriter, r *http.Request) {
 		"incompatibleRefs":                embeddingHealth.IncompatibleRefs,
 		"readyRefs":                       embeddingHealth.ReadyRefs, "partialRefs": embeddingHealth.PartialRefs,
 		"degradedRefs": embeddingHealth.DegradedRefs, "unavailableRefs": embeddingHealth.UnavailableRefs,
+	}
+	// Probing costs an external call, so routine polling does not pay for it.
+	if r.URL.Query().Get("probe") == "true" {
+		policy["embeddingProbe"] = a.probeEmbedding(r.Context())
 	}
 	store, err := a.vectorStore(r.Context())
 	if errors.Is(err, vectorstore.ErrNotConfigured) {

@@ -1723,7 +1723,10 @@ async function refreshVectorStatus() {
   panel.className = "result-panel";
   panel.textContent = "벡터 DB 상태를 확인하는 중…";
   try {
-    const status = await api("/api/v1/admin/vector/status");
+    // probe=true reaches the embedding endpoint live. Without it the panel can
+    // only show past traffic, which cannot tell a dead model from a dead vector
+    // database -- the two failures degrade a semantic search differently.
+    const status = await api("/api/v1/admin/vector/status?probe=true");
     const circuit = status.circuit || {};
     const retryAt =
       circuit.retryAt && !String(circuit.retryAt).startsWith("0001-")
@@ -1734,7 +1737,14 @@ async function refreshVectorStatus() {
       .filter(([, count]) => count > 0)
       .map(([reason, count]) => `${reason} ${count}회`)
       .join(" · ");
+    const probe = status.embeddingProbe || {};
+    const probeLine = probe.ok
+      ? `임베딩 모델: 응답함${probe.dimensions ? ` · ${probe.dimensions}차원` : ""}${
+          probe.latencyMs != null ? ` · ${probe.latencyMs}ms` : ""
+        }${probe.detail ? ` · ${probe.detail}` : ""}`
+      : `임베딩 모델: 응답 없음 (${probe.stage || "unknown"}) · ${probe.error || "원인 미상"}`;
     const runtimeDetails =
+      `<li class="${probe.ok ? "" : "probe-failed"}">${esc(probeLine)}</li>` +
       `<li>${esc(circuitLine)}</li>` +
       (fallbackSummary ? `<li>프로세스 자동 폴백: ${esc(fallbackSummary)}</li>` : "") +
       (circuit.lastError ? `<li>마지막 모델 오류: ${esc(circuit.lastError)}</li>` : "");
@@ -1744,9 +1754,13 @@ async function refreshVectorStatus() {
       return;
     }
     const ready = status.ready && !status.error;
-    panel.className = `result-panel ${ready ? "ok" : "error"}`;
+    const modelReady = probe.ok !== false;
+    panel.className = `result-panel ${ready && modelReady ? "ok" : "error"}`;
+    const headline = `${esc(status.provider)} · 벡터 DB ${ready ? "연결됨" : "연결 실패"} · 임베딩 모델 ${
+      modelReady ? "응답함" : "응답 없음"
+    }`;
     panel.innerHTML =
-      `<h4>${esc(status.provider)} · ${ready ? "연결됨" : "연결 실패"}</h4><ul class="result-list">` +
+      `<h4>${headline}</h4><ul class="result-list">` +
       `<li>대상: ${esc(status.target || "-")} · 컬렉션 ${esc(status.collection || "-")}</li>` +
       (status.database
         ? `<li>데이터베이스: <code>${esc(status.database)}</code> · 사용자: <code>${esc(status.user || "-")}</code></li>`
