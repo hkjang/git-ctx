@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
+
+	"git-ctx/internal/netclient"
 )
 
 // The retry policy has to distinguish the three cases that look alike in an
@@ -132,5 +135,62 @@ func TestAbandonedProbeDoesNotPauseSourceForever(t *testing.T) {
 	allowed, reason := breaker.Allow()
 	if !allowed {
 		t.Fatalf("an abandoned probe must expire: %q", reason)
+	}
+}
+
+// GitLab documents RateLimit-Reset as a Unix time and RateLimit-ResetTime as an
+// HTTP date. Reading the epoch as a delay produced a flat 30 second wait -- the
+// default tool timeout -- and the date header was not read at all, so the
+// client retried after 250ms and was rate limited again.
+func TestRetryDelayReadsRateLimitResetHeaders(t *testing.T) {
+	const window = 12 * time.Second
+	deadline := time.Now().Add(window)
+
+	cases := []struct {
+		name   string
+		header http.Header
+	}{
+		{"RateLimit-Reset as Unix time", http.Header{
+			"Ratelimit-Reset": []string{strconv.FormatInt(deadline.Unix(), 10)}}},
+		{"RateLimit-ResetTime as HTTP date", http.Header{
+			"Ratelimit-Resettime": []string{deadline.UTC().Format(http.TimeFormat)}}},
+		{"Retry-After as HTTP date", http.Header{
+			"Retry-After": []string{deadline.UTC().Format(http.TimeFormat)}}},
+	}
+	for _, c := range cases {
+		delay := RetryDelay(&http.Response{Header: c.header}, 0)
+		if delay < window-2*time.Second || delay > window {
+			t.Errorf("%s: delay = %s, want about %s", c.name, delay, window)
+		}
+	}
+
+	// A delta-form RateLimit-Reset, as the IETF draft defines it, still reads as
+	// a delay rather than a timestamp.
+	delta := RetryDelay(&http.Response{Header: http.Header{"Ratelimit-Reset": []string{"12"}}}, 0)
+	if delta != window {
+		t.Errorf("delta-form RateLimit-Reset: delay = %s, want %s", delta, window)
+	}
+
+	// Retry-After is the standard header and wins when the server sends both.
+	both := RetryDelay(&http.Response{Header: http.Header{
+		"Retry-After":     []string{"3"},
+		"Ratelimit-Reset": []string{strconv.FormatInt(deadline.Unix(), 10)},
+	}}, 0)
+	if both != 3*time.Second {
+		t.Errorf("Retry-After did not win: %s", both)
+	}
+
+	// A window that already elapsed falls back to the local backoff.
+	past := RetryDelay(&http.Response{Header: http.Header{
+		"Ratelimit-Reset": []string{strconv.FormatInt(time.Now().Add(-time.Minute).Unix(), 10)}}}, 0)
+	if past != 250*time.Millisecond {
+		t.Errorf("elapsed window: delay = %s, want the backoff", past)
+	}
+
+	// A window longer than one call should hold open is still capped.
+	capped := RetryDelay(&http.Response{Header: http.Header{
+		"Ratelimit-Reset": []string{strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)}}}, 0)
+	if capped != netclient.MaxRetryHint {
+		t.Errorf("long window not capped: %s", capped)
 	}
 }

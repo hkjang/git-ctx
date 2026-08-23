@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"git-ctx/internal/testsupport"
+
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -15,10 +17,15 @@ import (
 // the settings-save regression where Status rejected the configuration before
 // the connection test had a chance to activate the extension.
 func TestPgvectorConnectionActivatesAvailableExtensionIntegration(t *testing.T) {
-	dsn := os.Getenv("GIT_CTX_TEST_PGVECTOR_DSN")
-	if dsn == "" {
-		t.Skip("GIT_CTX_TEST_PGVECTOR_DSN is not set")
+	base := os.Getenv("GIT_CTX_TEST_PGVECTOR_DSN")
+	if reason := testsupport.SkipReason("GIT_CTX_TEST_PGVECTOR_DSN", base); reason != "" {
+		t.Skip(reason)
 	}
+	dsn, dropDatabase, err := testsupport.NewPostgresDatabase(context.Background(), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(dropDatabase)
 	const table = "git_ctx_vector_connection_test"
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {

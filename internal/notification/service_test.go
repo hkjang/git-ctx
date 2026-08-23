@@ -401,3 +401,62 @@ func TestSMTPConnectionTestSendsMessage(t *testing.T) {
 		t.Fatal("SMTP test message was not received")
 	}
 }
+
+// ValidateConfig only admits an HTTPS webhook URL outside localhost, but that
+// check happens before delivery. A redirect used to carry the payload -- and
+// the Authorization secret, since Go keeps it when the hop stays on the same
+// hostname -- to an address nobody configured, over plaintext, with no error.
+func TestWebhookDeliveryRefusesRedirects(t *testing.T) {
+	var reached bool
+	var forwardedAuth string
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		forwardedAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer elsewhere.Close()
+
+	configured := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+"/elsewhere", http.StatusTemporaryRedirect)
+	}))
+	defer configured.Close()
+
+	client, err := webhookClient(Config{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("webhookClient: %v", err)
+	}
+	err = postWebhook(context.Background(), client, configured.URL, "Bearer notification-secret",
+		delivery{NotificationID: "n", Title: "t", Message: "m"})
+
+	if err == nil {
+		t.Fatal("a redirected delivery reported success")
+	}
+	if reached {
+		t.Errorf("the payload reached the redirect target; Authorization forwarded = %q", forwardedAuth)
+	}
+	if !strings.Contains(err.Error(), "redirected") {
+		t.Errorf("error does not name the cause: %v", err)
+	}
+}
+
+// A webhook that answers directly must still be delivered.
+func TestWebhookDeliverySucceedsWithoutRedirect(t *testing.T) {
+	var got string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := webhookClient(Config{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("webhookClient: %v", err)
+	}
+	if err := postWebhook(context.Background(), client, server.URL, "Bearer notification-secret",
+		delivery{NotificationID: "n", Title: "t", Message: "m"}); err != nil {
+		t.Fatalf("postWebhook: %v", err)
+	}
+	if got != "Bearer notification-secret" {
+		t.Errorf("Authorization = %q, want it sent to the configured endpoint", got)
+	}
+}

@@ -265,6 +265,25 @@ legend {
   line-height: 1.4;
 }
 
+/* A field the server rejected. The message is repeated next to the input rather
+   than only in the panel above, so the operator does not have to work out which
+   of the fields "notifications.smtpFrom" refers to. */
+.field-invalid > input,
+.field-invalid > select,
+.field-invalid > textarea,
+.field-invalid .toggle-row {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+.field-error {
+  display: block;
+  margin-top: var(--space-1, 4px);
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
 /* ---------- 상단바 ---------- */
 .topbar {
   position: sticky;
@@ -1234,5 +1253,23 @@ td small {
   * {
     animation: none !important;
     transition: none !important;
+    /* A smooth scroll asked for in CSS has to be cancelled here too; the ones
+       the script starts are handled by scrollBehavior() in app.js. */
+    scroll-behavior: auto !important;
   }
+}
+
+/* A failed embedding probe sits inside an otherwise healthy panel, so it needs
+   its own marker: the vector database and the model fail independently. */
+.result-list .probe-failed {
+  color: var(--danger, #dc2626);
+  font-weight: 600;
+}
+
+/* A panel receives focus programmatically when its menu item is activated, so
+   the keyboard user lands on the content instead of back at the top of the
+   menu. That is not a focus the user moved there themselves, so it gets no
+   ring -- the menu item they just pressed still carries the visible state. */
+[tabindex="-1"]:focus:not(:focus-visible) {
+  outline: none;
 }

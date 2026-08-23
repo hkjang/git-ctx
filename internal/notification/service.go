@@ -130,7 +130,7 @@ WHERE d.status IN ('pending','failed') AND `+duePredicate+` ORDER BY d.created_a
 	if err = rows.Close(); err != nil {
 		return err
 	}
-	client, err := netclient.New(netclient.Config{Timeout: cfg.Timeout, TLSVerify: cfg.TLSVerify, CACertificate: cfg.CACertificate, ProxyURL: cfg.ProxyURL})
+	client, err := webhookClient(cfg)
 	if err != nil {
 		return err
 	}
@@ -343,6 +343,24 @@ func (s *Service) send(ctx context.Context, client *http.Client, cfg Config, ite
 	}
 }
 
+// webhookClient delivers to notification endpoints and refuses to follow a
+// redirect. The endpoint is a fixed address an administrator configured and
+// ValidateConfig only admits an HTTPS one, but a redirect is taken after that
+// check: the endpoint could send the payload, and the Authorization secret
+// whenever the hop keeps the hostname, to an address nobody configured and over
+// plaintext if it asks. Failing the delivery instead surfaces that through the
+// retry trail rather than silently posting elsewhere.
+func webhookClient(cfg Config) (*http.Client, error) {
+	client, err := netclient.New(netclient.Config{Timeout: cfg.Timeout, TLSVerify: cfg.TLSVerify, CACertificate: cfg.CACertificate, ProxyURL: cfg.ProxyURL})
+	if err != nil {
+		return nil, err
+	}
+	client.CheckRedirect = func(request *http.Request, _ []*http.Request) error {
+		return fmt.Errorf("notification endpoint redirected to %s; configure that address directly", request.URL.Redacted())
+	}
+	return client, nil
+}
+
 func postWebhook(ctx context.Context, client *http.Client, endpoint, authorization string, item delivery) error {
 	body, _ := json.Marshal(payload{Event: "git_ctx.notification", NotificationID: item.NotificationID, UserID: item.UserID, Type: item.Type, ResourceID: item.ResourceID, Title: item.Title, Message: item.Message, CreatedAt: time.Now().UTC()})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
@@ -368,7 +386,7 @@ func Validate(ctx context.Context, cfg Config) error {
 	if err := ValidateConfig(cfg); err != nil {
 		return err
 	}
-	client, err := netclient.New(netclient.Config{Timeout: cfg.Timeout, TLSVerify: cfg.TLSVerify, CACertificate: cfg.CACertificate, ProxyURL: cfg.ProxyURL})
+	client, err := webhookClient(cfg)
 	if err != nil {
 		return err
 	}

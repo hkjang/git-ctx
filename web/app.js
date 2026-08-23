@@ -14,6 +14,70 @@ function markEmptyTables(root = document) {
   });
 }
 
+// None of the twenty-one forms guarded against being submitted twice. The search
+// tools can take as long as the MCP timeout allows and showed nothing while they
+// ran, so pressing the button again was the natural thing to do -- and the forms
+// that create something took it literally. Submitting the key form twice mints
+// two MCP keys, and the secret of the second is shown once and then gone.
+//
+// The handlers are assigned as `form.onsubmit = ...` from inside functions that
+// only run after login, so wrapping them all once at startup would miss most.
+// Wrapping the assignment itself covers every form, including any added later.
+// Nothing in this file ever reads onsubmit back, so returning the wrapper is safe.
+function guardedSubmitHandler(handler) {
+  if (handler.__guarded) return handler;
+  const wrapped = async function (event) {
+    const form = event.currentTarget || this;
+    const button =
+      form.querySelector('button[type="submit"]') ||
+      form.querySelector("button:not([type='button'])");
+    if (form.dataset.submitting === "true") {
+      event.preventDefault();
+      return undefined;
+    }
+    form.dataset.submitting = "true";
+    form.setAttribute("aria-busy", "true");
+    let label = "";
+    if (button) {
+      label = button.textContent;
+      button.disabled = true;
+      button.textContent = "처리 중…";
+    }
+    try {
+      return await handler.call(this, event);
+    } finally {
+      delete form.dataset.submitting;
+      form.removeAttribute("aria-busy");
+      if (button) {
+        button.disabled = false;
+        button.textContent = label;
+      }
+    }
+  };
+  wrapped.__guarded = true;
+  return wrapped;
+}
+
+const nativeOnSubmit = Object.getOwnPropertyDescriptor(
+  HTMLFormElement.prototype,
+  "onsubmit",
+);
+if (nativeOnSubmit) {
+  Object.defineProperty(HTMLFormElement.prototype, "onsubmit", {
+    configurable: true,
+    enumerable: nativeOnSubmit.enumerable,
+    get() {
+      return nativeOnSubmit.get.call(this);
+    },
+    set(handler) {
+      nativeOnSubmit.set.call(
+        this,
+        typeof handler === "function" ? guardedSubmitHandler(handler) : handler,
+      );
+    },
+  });
+}
+
 /* ---------------------------------------------------------------------------
  * 공용 UI 유틸리티
  * 화면 로직 어디서나 같은 방식으로 알림·모달·테마를 다루기 위한 최소 도구입니다.
@@ -346,6 +410,68 @@ let bootstrapInfo = { required: false, tokenFile: "", ssoConfigured: false };
 const isAdminEntry = location.pathname === "/admin" || location.pathname.startsWith("/admin/");
 const isRecoveryEntry =
   isAdminEntry && new URLSearchParams(location.search).get("recovery") === "1";
+// api() throws on any non-2xx, carrying the server's problem detail. A handler
+// that forgets to catch that turns a failed action into silence: the list does
+// not change, no message appears, and the operator is left assuming it worked.
+// This net catches whatever slips through so a failure is always visible.
+window.addEventListener("unhandledrejection", (event) => {
+  const reason = event.reason;
+  const message = reason && reason.message ? reason.message : String(reason);
+  event.preventDefault();
+  showAdmin(message, false);
+});
+
+// runAction performs one API-backed action and reports the outcome. Pass
+// `confirm` for anything an operator cannot undo.
+// withBusy marks a button as working while its action runs and refuses a second
+// press until it finishes. Use it for anything slow enough that a second click
+// is a real possibility: a backup dumps every table, an import rewrites every
+// category, a Keycloak preview waits on another server. Reporting stays with the
+// caller, because several of these write into their own result panel rather than
+// the banner.
+// Reduced motion is honoured in CSS, but that only covers animations and
+// transitions. A scroll the script starts with behavior:"smooth" ignores the
+// setting completely -- and smooth scrolling is one of the things it exists to
+// stop, being a common trigger for people with vestibular disorders.
+function scrollBehavior() {
+  const query =
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)");
+  return query && query.matches ? "auto" : "smooth";
+}
+
+async function withBusy(button, busyLabel, run) {
+  if (!button) return run();
+  if (button.dataset.running === "true") return undefined;
+  const label = button.textContent;
+  button.dataset.running = "true";
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  if (busyLabel) button.textContent = busyLabel;
+  try {
+    return await run();
+  } finally {
+    delete button.dataset.running;
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+    button.textContent = label;
+  }
+}
+
+async function runAction(run, options = {}) {
+  if (options.confirm && !window.confirm(options.confirm)) return false;
+  return withBusy(options.button || null, options.busyLabel, async () => {
+    try {
+      await run();
+      if (options.success) showAdmin(options.success, true);
+      return true;
+    } catch (error) {
+      showAdmin(error.message, false);
+      return false;
+    }
+  });
+}
+
 const api = async (url, options = {}) => {
   const bootstrapToken = sessionStorage.getItem("git_ctx_bootstrap_token");
   const response = await fetch(url, {
@@ -1046,6 +1172,19 @@ function configureMCPKeyScopes(roles) {
     if (input.disabled) input.checked = false;
   });
 }
+// Showing a view by toggling `hidden` leaves focus on the menu button that was
+// just clicked. A keyboard user then has to tab back through the whole menu to
+// reach what they opened, and a screen reader announces nothing: as far as it
+// is concerned, nothing happened. Moving focus into the panel puts them at its
+// heading instead. Only user activation calls this -- doing it on load or while
+// restoring a view from the address bar would yank focus for no reason.
+function revealPanel(panel) {
+  if (!panel || panel.hidden) return;
+  if (!panel.hasAttribute("tabindex")) panel.setAttribute("tabindex", "-1");
+  panel.focus({ preventScroll: true });
+  panel.scrollIntoView({ block: "start", behavior: scrollBehavior() });
+}
+
 let openWorkspaceView = () => {};
 let openPersonalView = () => {};
 let openAdminPanel = () => {};
@@ -1110,7 +1249,15 @@ function setupWorkspaceNavigation(hasAdmin) {
     rememberView({ workspace: admin ? "admin" : "personal" });
   };
   document.querySelectorAll("[data-workspace]").forEach(
-    (button) => (button.onclick = () => openWorkspaceView(button.dataset.workspace)),
+    (button) =>
+      (button.onclick = () => {
+        openWorkspaceView(button.dataset.workspace);
+        revealPanel(
+          document.getElementById(
+            button.dataset.workspace === "admin" ? "admin" : "personal-workspace",
+          ),
+        );
+      }),
   );
   openWorkspaceView("personal");
 }
@@ -1155,14 +1302,19 @@ function setupPersonalNavigation() {
     rememberView({ personal: target });
   };
   document.querySelectorAll("[data-personal-target]").forEach(
-    (button) => (button.onclick = () => openPersonalView(button.dataset.personalTarget)),
+    (button) =>
+      (button.onclick = () => {
+        const target = button.dataset.personalTarget;
+        openPersonalView(target);
+        revealPanel(document.getElementById(target));
+      }),
   );
   openPersonalView("account");
 }
 function navigatePersonal(target) {
   openWorkspaceView("personal");
   openPersonalView(target);
-  window.scrollTo({ top: 0, behavior: "smooth" });
+  window.scrollTo({ top: 0, behavior: scrollBehavior() });
 }
 function setupProfileMenu() {
   const toggle = $("#profile-toggle");
@@ -1210,7 +1362,7 @@ function setupQuickNavigation(capabilities, roles) {
   ].filter((entry) => entry[3]).map(([label, group, target]) => [label, group, () => {
     openWorkspaceView("admin");
     document.querySelector(`[data-admin-target="${target}"]`)?.click();
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    window.scrollTo({ top: 0, behavior: scrollBehavior() });
   }]);
   // 관리자 설정의 하위 탭도 빠른 이동에 자동 등록합니다. 새 설정 카테고리를
   // categories에 추가하면 역할 필터를 거쳐 이 목록에도 함께 나타납니다.
@@ -1227,7 +1379,7 @@ function setupQuickNavigation(capabilities, roles) {
               .querySelector('[data-admin-target="settings-admin"]')
               ?.click();
             openSettingCategory(category);
-            window.scrollTo({ top: 0, behavior: "smooth" });
+            window.scrollTo({ top: 0, behavior: scrollBehavior() });
           },
         ];
       })
@@ -1320,6 +1472,9 @@ async function loadKeys() {
   const keys = rows(await api("/api/v1/me/api-keys"));
   $("#key-list").innerHTML =
     `<table><thead><tr><th>이름</th><th>Prefix / 제한</th><th>상태</th><th>만료</th><th>마지막 사용</th><th></th></tr></thead><tbody>${keys.map((k) => `<tr><td>${esc(k.name)}</td><td>${esc(k.prefix)}<br><small>${esc((k.scopes || []).join(", "))}<br>${esc((k.restrictions?.allowedCidrs || []).join(", "))} ${esc((k.restrictions?.allowedRepositories || []).join(", "))}<br>분/시/일 ${k.restrictions?.ratePerMinute || 0}/${k.restrictions?.ratePerHour || 0}/${k.restrictions?.ratePerDay || 0}</small></td><td>${esc(k.status)}</td><td>${date(k.expiresAt)}</td><td>${date(k.lastUsedAt)}</td><td>${k.status === "active" || k.status === "disabled" ? `<button class="secondary" data-scopes="${k.id}">Scope 편집</button> ` : ""}${k.status === "active" ? `<button class="secondary" data-disable="${k.id}">중지</button> <button data-rotate="${k.id}">회전</button> <button class="danger" data-revoke="${k.id}">폐기</button>` : k.status === "disabled" ? `<button data-enable="${k.id}">재활성화</button> <button class="danger" data-revoke="${k.id}">폐기</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+  // Without this the table keeps its header and shows nothing underneath,
+  // which reads as broken rather than as "nothing here yet".
+  markEmptyTables();
   document.querySelectorAll("[data-scopes]").forEach(
     (button) =>
       (button.onclick = () => {
@@ -1427,6 +1582,55 @@ const connectionTestCategories = [
   "vault",
   "notifications",
 ];
+// Settings validation names the field it rejected: the server answers
+// "notifications.smtpFrom must be a valid email address". The panel showed that
+// sentence and nothing more, leaving the operator to find smtpFrom among the
+// dozens of inputs a category can hold. Matching the key against the rendered
+// fields puts the message where the mistake actually is.
+//
+// A message can name more than one ("vault.baseUrl and vault.token are
+// required"), and some name none at all, in which case the panel remains the
+// only report.
+function clearSettingFieldErrors() {
+  document.querySelectorAll("#setting-fields [data-field-key]").forEach((label) => {
+    label.classList.remove("field-invalid");
+    const note = label.querySelector(".field-error");
+    if (note) note.remove();
+    label
+      .querySelectorAll("[data-setting-key]")
+      .forEach((control) => control.removeAttribute("aria-invalid"));
+  });
+}
+
+function markSettingFieldErrors(message) {
+  clearSettingFieldErrors();
+  const text = String(message || "");
+  const keys = [];
+  for (const match of text.matchAll(/\b[a-z][A-Za-z0-9]*\.([A-Za-z][A-Za-z0-9]*)\b/g)) {
+    if (!keys.includes(match[1])) keys.push(match[1]);
+  }
+  let first = null;
+  for (const key of keys) {
+    const label = document.querySelector(`#setting-fields [data-field-key="${key}"]`);
+    if (!label) continue;
+    label.classList.add("field-invalid");
+    label
+      .querySelectorAll("[data-setting-key]")
+      .forEach((control) => control.setAttribute("aria-invalid", "true"));
+    const note = document.createElement("small");
+    note.className = "field-error";
+    note.textContent = text;
+    label.appendChild(note);
+    if (!first) first = label;
+  }
+  if (first) {
+    first.scrollIntoView({ block: "center", behavior: scrollBehavior() });
+    const control = first.querySelector("[data-setting-key]");
+    if (control) control.focus({ preventScroll: true });
+  }
+  return Boolean(first);
+}
+
 function renderSettingFields(category, value) {
   const fields = integrationSettingFields[category] || [];
   const fieldHelp = {
@@ -1636,9 +1840,10 @@ ${item.missingSecrets ? `<br><small>입력 필요: ${esc(item.missingSecrets.joi
       )
       .join("")}</tbody></table>`;
   };
-  $("#preview-import-settings").onclick = async () => {
+  $("#preview-import-settings").onclick = async (event) => {
     const text = await readFile();
     if (!text) return;
+    await withBusy(event.currentTarget, "확인 중…", async () => {
     try {
       importDocument = text;
       render(await api("/api/v1/admin/settings-import", { method: "POST", body: text }));
@@ -1646,9 +1851,11 @@ ${item.missingSecrets ? `<br><small>입력 필요: ${esc(item.missingSecrets.joi
     } catch (error) {
       output.innerHTML = `<div class="notice error">${esc(error.message)}</div>`;
     }
+    });
   };
-  $("#apply-import-settings").onclick = async () => {
+  $("#apply-import-settings").onclick = async (event) => {
     if (!importDocument || !confirm("미리본 변경 내용을 지금 적용합니다. 각 영역은 새 버전으로 기록되어 되돌릴 수 있습니다.")) return;
+    await withBusy(event.currentTarget, "적용 중…", async () => {
     try {
       render(await api("/api/v1/admin/settings-import?apply=true", { method: "POST", body: importDocument }));
       $("#apply-import-settings").hidden = true;
@@ -1656,6 +1863,7 @@ ${item.missingSecrets ? `<br><small>입력 필요: ${esc(item.missingSecrets.joi
     } catch (error) {
       output.innerHTML = `<div class="notice error">${esc(error.message)}</div>`;
     }
+    });
   };
 }
 
@@ -1698,16 +1906,18 @@ async function openSettingVersion(category, version) {
           .join("")}</tbody></table>`
       : '<p class="field-help">현재 값과 동일합니다. 되돌려도 바뀌는 항목이 없습니다.</p>';
     $("#setting-version-json").textContent = JSON.stringify(detail.value, null, 2);
-    $("#setting-version-restore").onclick = async () => {
+    $("#setting-version-restore").onclick = async (event) => {
       if (!confirm(`${category} 설정을 v${version} 내용으로 되돌립니다. 이력은 지워지지 않고 새 버전으로 기록됩니다.`)) return;
-      try {
-        const result = await api(`/api/v1/admin/settings/${category}/versions/${version}/restore`, { method: "POST" });
-        dialog.close();
-        showAdmin(`v${version} 내용을 v${result.version} 으로 되돌렸습니다.`, true);
-        await loadCurrentSetting(category);
-      } catch (error) {
-        showAdmin(`되돌리지 못했습니다: ${error.message}`, false);
-      }
+      await withBusy(event.currentTarget, "되돌리는 중…", async () => {
+        try {
+          const result = await api(`/api/v1/admin/settings/${category}/versions/${version}/restore`, { method: "POST" });
+          dialog.close();
+          showAdmin(`v${version} 내용을 v${result.version} 으로 되돌렸습니다.`, true);
+          await loadCurrentSetting(category);
+        } catch (error) {
+          showAdmin(`되돌리지 못했습니다: ${error.message}`, false);
+        }
+      });
     };
     dialog.showModal();
   } catch (error) {
@@ -1723,7 +1933,10 @@ async function refreshVectorStatus() {
   panel.className = "result-panel";
   panel.textContent = "벡터 DB 상태를 확인하는 중…";
   try {
-    const status = await api("/api/v1/admin/vector/status");
+    // probe=true reaches the embedding endpoint live. Without it the panel can
+    // only show past traffic, which cannot tell a dead model from a dead vector
+    // database -- the two failures degrade a semantic search differently.
+    const status = await api("/api/v1/admin/vector/status?probe=true");
     const circuit = status.circuit || {};
     const retryAt =
       circuit.retryAt && !String(circuit.retryAt).startsWith("0001-")
@@ -1734,7 +1947,14 @@ async function refreshVectorStatus() {
       .filter(([, count]) => count > 0)
       .map(([reason, count]) => `${reason} ${count}회`)
       .join(" · ");
+    const probe = status.embeddingProbe || {};
+    const probeLine = probe.ok
+      ? `임베딩 모델: 응답함${probe.dimensions ? ` · ${probe.dimensions}차원` : ""}${
+          probe.latencyMs != null ? ` · ${probe.latencyMs}ms` : ""
+        }${probe.detail ? ` · ${probe.detail}` : ""}`
+      : `임베딩 모델: 응답 없음 (${probe.stage || "unknown"}) · ${probe.error || "원인 미상"}`;
     const runtimeDetails =
+      `<li class="${probe.ok ? "" : "probe-failed"}">${esc(probeLine)}</li>` +
       `<li>${esc(circuitLine)}</li>` +
       (fallbackSummary ? `<li>프로세스 자동 폴백: ${esc(fallbackSummary)}</li>` : "") +
       (circuit.lastError ? `<li>마지막 모델 오류: ${esc(circuit.lastError)}</li>` : "");
@@ -1744,9 +1964,13 @@ async function refreshVectorStatus() {
       return;
     }
     const ready = status.ready && !status.error;
-    panel.className = `result-panel ${ready ? "ok" : "error"}`;
+    const modelReady = probe.ok !== false;
+    panel.className = `result-panel ${ready && modelReady ? "ok" : "error"}`;
+    const headline = `${esc(status.provider)} · 벡터 DB ${ready ? "연결됨" : "연결 실패"} · 임베딩 모델 ${
+      modelReady ? "응답함" : "응답 없음"
+    }`;
     panel.innerHTML =
-      `<h4>${esc(status.provider)} · ${ready ? "연결됨" : "연결 실패"}</h4><ul class="result-list">` +
+      `<h4>${headline}</h4><ul class="result-list">` +
       `<li>대상: ${esc(status.target || "-")} · 컬렉션 ${esc(status.collection || "-")}</li>` +
       (status.database
         ? `<li>데이터베이스: <code>${esc(status.database)}</code> · 사용자: <code>${esc(status.user || "-")}</code></li>`
@@ -2135,13 +2359,14 @@ function setupAdmin(roles, capabilities) {
     } catch {}
   };
   if (allowedCategories.length) selectCategory(allowedCategories[0]);
-  $("#preview-keycloak").onclick = async () => {
+  $("#preview-keycloak").onclick = async (event) => {
     if ($("#category").value !== "keycloak")
       return showAdmin("keycloak 영역에서만 미리볼 수 있습니다.", false);
     const token = prompt(
       "테스트 사용자의 짧은 만료 Access/ID Token을 입력하세요. 저장·기록되지 않습니다.",
     );
     if (!token) return;
+    await withBusy(event.currentTarget, "확인 중…", async () => {
     try {
       const x = await api("/api/v1/admin/settings/keycloak/preview", {
         method: "POST",
@@ -2157,6 +2382,7 @@ function setupAdmin(roles, capabilities) {
     } catch (e) {
       showAdmin(e.message, false);
     }
+    });
   };
   $("#login-keycloak").onclick = () => {
     if ($("#category").value !== "keycloak") return;
@@ -2168,6 +2394,7 @@ function setupAdmin(roles, capabilities) {
       if (!$("#setting-fields").querySelectorAll("input,select,textarea").length) {
         JSON.parse($("#setting-json").value);
       }
+      clearSettingFieldErrors();
       const invalid = $("#setting-fields").querySelector(":invalid");
       if (invalid) {
         invalid.reportValidity();
@@ -2198,7 +2425,14 @@ function setupAdmin(roles, capabilities) {
       }
       await loadCurrentSetting($("#category").value);
     } catch (e) {
-      renderSettingResult(false, "설정을 저장하지 못했습니다", [e.message]);
+      const located = markSettingFieldErrors(e.message);
+      renderSettingResult(
+        false,
+        "설정을 저장하지 못했습니다",
+        located
+          ? [e.message, "문제가 된 항목을 아래에서 표시했습니다."]
+          : [e.message],
+      );
       reportError(e, "저장 실패");
     } finally {
       button.disabled = false;
@@ -2208,16 +2442,18 @@ function setupAdmin(roles, capabilities) {
   setupSettingTransfer(capabilities);
   $("#setting-version-close").onclick = () => $("#setting-version-dialog").close();
   $("#setting-version-cancel").onclick = () => $("#setting-version-dialog").close();
-  $("#delete-setting").onclick = async () => {
+  $("#delete-setting").onclick = async (event) => {
     const category = $("#category").value;
-    if (!confirm(`${settingCategoryMeta[category]?.[0] || category} 설정을 삭제하시겠습니까?`)) return;
-    try {
-      await api(`/api/v1/admin/settings/${category}`, { method: "DELETE" });
-      showAdmin("설정을 삭제했습니다.", true);
-      await loadCurrentSetting(category);
-    } catch (error) {
-      showAdmin(`삭제하지 못했습니다: ${error.message}`, false);
-    }
+    const done = await runAction(
+      () => api(`/api/v1/admin/settings/${category}`, { method: "DELETE" }),
+      {
+        button: event.currentTarget,
+        busyLabel: "삭제 중…",
+        confirm: `${settingCategoryMeta[category]?.[0] || category} 설정을 삭제하시겠습니까?`,
+        success: "설정을 삭제했습니다.",
+      },
+    );
+    if (done) await loadCurrentSetting(category);
   };
 }
 async function refreshKeycloakStatus() {
@@ -2264,7 +2500,7 @@ async function refreshSetupStatus() {
         if (button.dataset.setupCategory) {
           document.querySelector(`[data-setting-tab="${button.dataset.setupCategory}"]`)?.click();
         }
-        window.scrollTo({ top: 0, behavior: "smooth" });
+        window.scrollTo({ top: 0, behavior: scrollBehavior() });
       };
     });
   } catch {
@@ -2356,14 +2592,16 @@ function setupOps(capabilities) {
     };
   }
   if (capabilities.backupWrite) {
-    $("#create-backup").onclick = async () => {
-      try {
-        await api("/api/v1/admin/backups", { method: "POST" });
-        showAdmin("암호화 백업을 생성했습니다.", true);
-        refreshBackups(capabilities);
-      } catch (e) {
-        showAdmin(e.message, false);
-      }
+    $("#create-backup").onclick = async (event) => {
+      const done = await runAction(
+        () => api("/api/v1/admin/backups", { method: "POST" }),
+        {
+          button: event.currentTarget,
+          busyLabel: "백업 생성 중…",
+          success: "암호화 백업을 생성했습니다.",
+        },
+      );
+      if (done) refreshBackups(capabilities);
     };
   }
   if (capabilities.sourceWrite) $("#discover").onclick = discover;
@@ -2428,13 +2666,15 @@ function setupAdminNavigation(capabilities) {
       .join("");
   const open = (target, category = "") => {
     document.querySelectorAll(".admin-panel").forEach((panel) => (panel.hidden = panel.id !== target));
-    document.querySelectorAll("[data-admin-target]").forEach((button) =>
-      button.classList.toggle(
-        "active",
+    document.querySelectorAll("[data-admin-target]").forEach((button) => {
+      const active =
         button.dataset.adminTarget === target &&
-          (button.dataset.adminCategory || "") === category,
-      ),
-    );
+        (button.dataset.adminCategory || "") === category;
+      button.classList.toggle("active", active);
+      // The personal and workspace menus already do this; the admin menu, which
+      // has by far the most views, did not.
+      button.setAttribute("aria-current", active ? "page" : "false");
+    });
     if (target === "settings-admin" && category) openSettingCategory(category);
     if (target === "database-admin-section") refreshDatabase();
     if (target === "users-admin-section") refreshAdminUsers();
@@ -2445,8 +2685,11 @@ function setupAdminNavigation(capabilities) {
   };
   document.querySelectorAll("[data-admin-target]").forEach(
     (button) =>
-      (button.onclick = () =>
-        open(button.dataset.adminTarget, button.dataset.adminCategory || "")),
+      (button.onclick = () => {
+        const target = button.dataset.adminTarget;
+        open(target, button.dataset.adminCategory || "");
+        revealPanel(document.getElementById(target));
+      }),
   );
   if (entries.length) open(entries[0][0], entries[0][4]);
 }
@@ -2865,6 +3108,9 @@ function renderMCPTools(tools, capabilities) {
     })
     .join("");
   $("#mcp-tools").innerHTML = `<table><thead>${header}</thead><tbody>${body}</tbody></table>`;
+    // Without this the table keeps its header and shows nothing underneath,
+    // which reads as broken rather than as "nothing here yet".
+    markEmptyTables();
   $$("[data-tool]").forEach(
     (button) =>
       (button.hidden = !capabilities.mcpWrite) ||
@@ -3206,6 +3452,9 @@ async function refreshOps(capabilities = activeCapabilities) {
     renderMCPTools(tools, capabilities);
     $("#repositories").innerHTML =
       `<table><thead><tr><th>소스</th><th>Library ID</th><th>기본 브랜치</th><th>마지막 색인</th><th></th></tr></thead><tbody>${repos.map((r) => `<tr><td>${esc(r.sourceType)}</td><td>${esc(r.libraryId)}</td><td>${esc(r.defaultBranch)}</td><td>${date(r.indexedAt)}</td><td><button class="secondary" data-policy="${esc(r.id)}" data-policy-label="${esc(r.libraryId)}">색인 정책</button> <button data-index="${esc(r.id)}">재색인</button></td></tr>`).join("")}</tbody></table>`;
+    // Without this the table keeps its header and shows nothing underneath,
+    // which reads as broken rather than as "nothing here yet".
+    markEmptyTables();
     $$("[data-policy]").forEach(
       (button) =>
         (button.hidden = !capabilities.sourceWrite) ||
@@ -3388,6 +3637,9 @@ async function refreshSecurity(capabilities = activeCapabilities) {
     }
     $("#admin-keys").innerHTML =
       `<table><thead><tr><th>사용자/이름</th><th>Prefix / Scope</th><th>상태</th><th>마지막 사용</th><th></th></tr></thead><tbody>${keys.map((k) => `<tr><td>${esc(k.username)} / ${esc(k.name)}</td><td>${esc(k.prefix)}<br><small>${esc((k.scopes || []).join(", "))}</small></td><td>${esc(k.status)}</td><td>${date(k.lastUsedAt)}</td><td>${k.status === "active" || k.status === "disabled" ? `<button class="secondary" data-admin-scopes="${esc(k.id)}">Scope 편집</button> ` : ""}${k.status === "active" ? `<button class="danger" data-admin-revoke="${esc(k.id)}">강제 폐기</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+    // Without this the table keeps its header and shows nothing underneath,
+    // which reads as broken rather than as "nothing here yet".
+    markEmptyTables();
     document.querySelectorAll("[data-admin-scopes]").forEach(
       (button) =>
         (button.onclick = () => {
@@ -3398,23 +3650,40 @@ async function refreshSecurity(capabilities = activeCapabilities) {
     document.querySelectorAll("[data-admin-revoke]").forEach(
       (b) =>
         (b.onclick = async () => {
-          await api(
-            `/api/v1/admin/api-keys/${encodeURIComponent(b.dataset.adminRevoke)}/revoke`,
-            { method: "POST" },
+          const id = b.dataset.adminRevoke;
+          const done = await runAction(
+            () =>
+              api(`/api/v1/admin/api-keys/${encodeURIComponent(id)}/revoke`, {
+                method: "POST",
+              }),
+            {
+              confirm: `이 MCP 키를 폐기하면 해당 사용자의 연동이 즉시 끊깁니다. 계속할까요?\n\n키: ${id}`,
+              success: "MCP 키를 폐기했습니다.",
+            },
           );
-          refreshSecurity(capabilities);
+          if (done) refreshSecurity(capabilities);
         }),
     );
     $("#managed-secrets").innerHTML =
       `<table><thead><tr><th>이름</th><th>Backend</th><th>버전</th><th>상태</th><th>갱신</th><th></th></tr></thead><tbody>${secrets.map((s) => `<tr><td><code>secret://${esc(s.name)}</code></td><td>${esc(s.backend)}</td><td>${s.version}</td><td>${esc(s.status)}</td><td>${date(s.updatedAt)}</td><td>${s.status === "active" ? `<button class="danger" data-secret-disable="${esc(s.name)}">중지</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+    // Without this the table keeps its header and shows nothing underneath,
+    // which reads as broken rather than as "nothing here yet".
+    markEmptyTables();
     document.querySelectorAll("[data-secret-disable]").forEach(
       (button) =>
         (button.onclick = async () => {
-          await api(
-            `/api/v1/admin/secrets/${encodeURIComponent(button.dataset.secretDisable)}/disable`,
-            { method: "POST" },
+          const name = button.dataset.secretDisable;
+          const done = await runAction(
+            () =>
+              api(`/api/v1/admin/secrets/${encodeURIComponent(name)}/disable`, {
+                method: "POST",
+              }),
+            {
+              confirm: `이 Secret 을 중지하면 secret://${name} 을 참조하는 설정이 즉시 동작하지 않습니다. 계속할까요?`,
+              success: "Secret 을 중지했습니다.",
+            },
           );
-          refreshSecurity(capabilities);
+          if (done) refreshSecurity(capabilities);
         }),
     );
     $("#security-events").innerHTML =

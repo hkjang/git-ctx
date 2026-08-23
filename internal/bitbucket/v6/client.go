@@ -907,9 +907,14 @@ func (c *Client) request(ctx context.Context, method, endpoint string, q url.Val
 func (c *Client) json(ctx context.Context, method, endpoint string, q url.Values, input, output any) error {
 	var body io.Reader
 	if input != nil {
-		r, w := io.Pipe()
-		go func() { e := json.NewEncoder(w).Encode(input); _ = w.CloseWithError(e) }()
-		body = r
+		// Marshalling up front costs one small buffer and removes a goroutine
+		// per call, and it keeps the body replayable should this client ever
+		// retry a write. It is also how the GitLab client builds its bodies.
+		raw, e := json.Marshal(input)
+		if e != nil {
+			return e
+		}
+		body = bytes.NewReader(raw)
 	}
 	resp, e := c.request(ctx, method, endpoint, q, body)
 	if e != nil {

@@ -11,13 +11,19 @@ import (
 	"testing"
 
 	"git-ctx/internal/config"
+	"git-ctx/internal/testsupport"
 )
 
 func TestPostgresBootstrapIntegration(t *testing.T) {
-	dsn := os.Getenv("GIT_CTX_TEST_POSTGRES_DSN")
-	if dsn == "" {
-		t.Skip("GIT_CTX_TEST_POSTGRES_DSN is not set")
+	base := os.Getenv("GIT_CTX_TEST_POSTGRES_DSN")
+	if reason := testsupport.SkipReason("GIT_CTX_TEST_POSTGRES_DSN", base); reason != "" {
+		t.Skip(reason)
 	}
+	dsn, dropDatabase, err := testsupport.NewPostgresDatabase(context.Background(), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(dropDatabase)
 	t.Setenv("GIT_CTX_DB_DSN", dsn)
 	t.Setenv("GIT_CTX_RECOVERY_KEY", strings.Repeat("integration-recovery-key-", 2))
 	cfg, err := config.FromEnv()
@@ -68,10 +74,15 @@ func TestPostgresBootstrapIntegration(t *testing.T) {
 }
 
 func TestSQLiteRecoveryToPostgresMigrationIntegration(t *testing.T) {
-	targetDSN := os.Getenv("GIT_CTX_TEST_POSTGRES_DSN")
-	if targetDSN == "" {
-		t.Skip("GIT_CTX_TEST_POSTGRES_DSN is not set")
+	base := os.Getenv("GIT_CTX_TEST_POSTGRES_DSN")
+	if reason := testsupport.SkipReason("GIT_CTX_TEST_POSTGRES_DSN", base); reason != "" {
+		t.Skip(reason)
 	}
+	targetDSN, dropDatabase, err := testsupport.NewPostgresDatabase(context.Background(), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(dropDatabase)
 	directory := filepath.Join(t.TempDir(), "backups")
 	cfg := config.Config{
 		DatabaseDriver: "postgres", DatabaseDSN: "postgres://gitctx:invalid@127.0.0.1:1/gitctx?sslmode=disable&connect_timeout=1",

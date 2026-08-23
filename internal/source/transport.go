@@ -4,12 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
+
+	"git-ctx/internal/netclient"
 )
 
 // ErrNotConfigured reports that a source type has no saved configuration. It is
@@ -78,41 +77,10 @@ func RetryableStatus(status int) bool {
 	}
 }
 
-// RetryDelay is how long to wait before the next attempt. The server's
-// Retry-After wins when it sent one, because guessing shorter than the window
-// it named only gets the client rate limited again.
+// RetryDelay is how long to wait before the next attempt. It delegates to the
+// shared HTTP layer so every integration reads a server's window the same way.
 func RetryDelay(response *http.Response, attempt int) time.Duration {
-	backoff := time.Duration(math.Pow(2, float64(attempt))) * 250 * time.Millisecond
-	if backoff > 5*time.Second {
-		backoff = 5 * time.Second
-	}
-	if response == nil {
-		return backoff
-	}
-	header := strings.TrimSpace(response.Header.Get("Retry-After"))
-	if header == "" {
-		header = strings.TrimSpace(response.Header.Get("RateLimit-Reset"))
-	}
-	if header == "" {
-		return backoff
-	}
-	if seconds, err := strconv.Atoi(header); err == nil && seconds >= 0 {
-		wait := time.Duration(seconds) * time.Second
-		if wait > 30*time.Second {
-			// A long window is not worth holding a tool call open for.
-			return 30 * time.Second
-		}
-		if wait > backoff {
-			return wait
-		}
-		return backoff
-	}
-	if when, err := http.ParseTime(header); err == nil {
-		if wait := time.Until(when); wait > 0 && wait <= 30*time.Second {
-			return wait
-		}
-	}
-	return backoff
+	return netclient.RetryDelay(response, attempt)
 }
 
 // MaxAttempts bounds one request including the first try. Three attempts covers
