@@ -423,16 +423,42 @@ window.addEventListener("unhandledrejection", (event) => {
 
 // runAction performs one API-backed action and reports the outcome. Pass
 // `confirm` for anything an operator cannot undo.
+// withBusy marks a button as working while its action runs and refuses a second
+// press until it finishes. Use it for anything slow enough that a second click
+// is a real possibility: a backup dumps every table, an import rewrites every
+// category, a Keycloak preview waits on another server. Reporting stays with the
+// caller, because several of these write into their own result panel rather than
+// the banner.
+async function withBusy(button, busyLabel, run) {
+  if (!button) return run();
+  if (button.dataset.running === "true") return undefined;
+  const label = button.textContent;
+  button.dataset.running = "true";
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  if (busyLabel) button.textContent = busyLabel;
+  try {
+    return await run();
+  } finally {
+    delete button.dataset.running;
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+    button.textContent = label;
+  }
+}
+
 async function runAction(run, options = {}) {
   if (options.confirm && !window.confirm(options.confirm)) return false;
-  try {
-    await run();
-    if (options.success) showAdmin(options.success, true);
-    return true;
-  } catch (error) {
-    showAdmin(error.message, false);
-    return false;
-  }
+  return withBusy(options.button || null, options.busyLabel, async () => {
+    try {
+      await run();
+      if (options.success) showAdmin(options.success, true);
+      return true;
+    } catch (error) {
+      showAdmin(error.message, false);
+      return false;
+    }
+  });
 }
 
 const api = async (url, options = {}) => {
@@ -1803,9 +1829,10 @@ ${item.missingSecrets ? `<br><small>입력 필요: ${esc(item.missingSecrets.joi
       )
       .join("")}</tbody></table>`;
   };
-  $("#preview-import-settings").onclick = async () => {
+  $("#preview-import-settings").onclick = async (event) => {
     const text = await readFile();
     if (!text) return;
+    await withBusy(event.currentTarget, "확인 중…", async () => {
     try {
       importDocument = text;
       render(await api("/api/v1/admin/settings-import", { method: "POST", body: text }));
@@ -1813,9 +1840,11 @@ ${item.missingSecrets ? `<br><small>입력 필요: ${esc(item.missingSecrets.joi
     } catch (error) {
       output.innerHTML = `<div class="notice error">${esc(error.message)}</div>`;
     }
+    });
   };
-  $("#apply-import-settings").onclick = async () => {
+  $("#apply-import-settings").onclick = async (event) => {
     if (!importDocument || !confirm("미리본 변경 내용을 지금 적용합니다. 각 영역은 새 버전으로 기록되어 되돌릴 수 있습니다.")) return;
+    await withBusy(event.currentTarget, "적용 중…", async () => {
     try {
       render(await api("/api/v1/admin/settings-import?apply=true", { method: "POST", body: importDocument }));
       $("#apply-import-settings").hidden = true;
@@ -1823,6 +1852,7 @@ ${item.missingSecrets ? `<br><small>입력 필요: ${esc(item.missingSecrets.joi
     } catch (error) {
       output.innerHTML = `<div class="notice error">${esc(error.message)}</div>`;
     }
+    });
   };
 }
 
@@ -1865,16 +1895,18 @@ async function openSettingVersion(category, version) {
           .join("")}</tbody></table>`
       : '<p class="field-help">현재 값과 동일합니다. 되돌려도 바뀌는 항목이 없습니다.</p>';
     $("#setting-version-json").textContent = JSON.stringify(detail.value, null, 2);
-    $("#setting-version-restore").onclick = async () => {
+    $("#setting-version-restore").onclick = async (event) => {
       if (!confirm(`${category} 설정을 v${version} 내용으로 되돌립니다. 이력은 지워지지 않고 새 버전으로 기록됩니다.`)) return;
-      try {
-        const result = await api(`/api/v1/admin/settings/${category}/versions/${version}/restore`, { method: "POST" });
-        dialog.close();
-        showAdmin(`v${version} 내용을 v${result.version} 으로 되돌렸습니다.`, true);
-        await loadCurrentSetting(category);
-      } catch (error) {
-        showAdmin(`되돌리지 못했습니다: ${error.message}`, false);
-      }
+      await withBusy(event.currentTarget, "되돌리는 중…", async () => {
+        try {
+          const result = await api(`/api/v1/admin/settings/${category}/versions/${version}/restore`, { method: "POST" });
+          dialog.close();
+          showAdmin(`v${version} 내용을 v${result.version} 으로 되돌렸습니다.`, true);
+          await loadCurrentSetting(category);
+        } catch (error) {
+          showAdmin(`되돌리지 못했습니다: ${error.message}`, false);
+        }
+      });
     };
     dialog.showModal();
   } catch (error) {
@@ -2316,13 +2348,14 @@ function setupAdmin(roles, capabilities) {
     } catch {}
   };
   if (allowedCategories.length) selectCategory(allowedCategories[0]);
-  $("#preview-keycloak").onclick = async () => {
+  $("#preview-keycloak").onclick = async (event) => {
     if ($("#category").value !== "keycloak")
       return showAdmin("keycloak 영역에서만 미리볼 수 있습니다.", false);
     const token = prompt(
       "테스트 사용자의 짧은 만료 Access/ID Token을 입력하세요. 저장·기록되지 않습니다.",
     );
     if (!token) return;
+    await withBusy(event.currentTarget, "확인 중…", async () => {
     try {
       const x = await api("/api/v1/admin/settings/keycloak/preview", {
         method: "POST",
@@ -2338,6 +2371,7 @@ function setupAdmin(roles, capabilities) {
     } catch (e) {
       showAdmin(e.message, false);
     }
+    });
   };
   $("#login-keycloak").onclick = () => {
     if ($("#category").value !== "keycloak") return;
@@ -2397,16 +2431,18 @@ function setupAdmin(roles, capabilities) {
   setupSettingTransfer(capabilities);
   $("#setting-version-close").onclick = () => $("#setting-version-dialog").close();
   $("#setting-version-cancel").onclick = () => $("#setting-version-dialog").close();
-  $("#delete-setting").onclick = async () => {
+  $("#delete-setting").onclick = async (event) => {
     const category = $("#category").value;
-    if (!confirm(`${settingCategoryMeta[category]?.[0] || category} 설정을 삭제하시겠습니까?`)) return;
-    try {
-      await api(`/api/v1/admin/settings/${category}`, { method: "DELETE" });
-      showAdmin("설정을 삭제했습니다.", true);
-      await loadCurrentSetting(category);
-    } catch (error) {
-      showAdmin(`삭제하지 못했습니다: ${error.message}`, false);
-    }
+    const done = await runAction(
+      () => api(`/api/v1/admin/settings/${category}`, { method: "DELETE" }),
+      {
+        button: event.currentTarget,
+        busyLabel: "삭제 중…",
+        confirm: `${settingCategoryMeta[category]?.[0] || category} 설정을 삭제하시겠습니까?`,
+        success: "설정을 삭제했습니다.",
+      },
+    );
+    if (done) await loadCurrentSetting(category);
   };
 }
 async function refreshKeycloakStatus() {
@@ -2545,14 +2581,16 @@ function setupOps(capabilities) {
     };
   }
   if (capabilities.backupWrite) {
-    $("#create-backup").onclick = async () => {
-      try {
-        await api("/api/v1/admin/backups", { method: "POST" });
-        showAdmin("암호화 백업을 생성했습니다.", true);
-        refreshBackups(capabilities);
-      } catch (e) {
-        showAdmin(e.message, false);
-      }
+    $("#create-backup").onclick = async (event) => {
+      const done = await runAction(
+        () => api("/api/v1/admin/backups", { method: "POST" }),
+        {
+          button: event.currentTarget,
+          busyLabel: "백업 생성 중…",
+          success: "암호화 백업을 생성했습니다.",
+        },
+      );
+      if (done) refreshBackups(capabilities);
     };
   }
   if (capabilities.sourceWrite) $("#discover").onclick = discover;
