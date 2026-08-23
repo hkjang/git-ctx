@@ -64,7 +64,7 @@ func (o *OpenAI) EmbedBatch(ctx context.Context, texts []string) ([][]float32, e
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(time.Duration(1<<attempt) * embeddingRetryBase):
+			case <-time.After(embeddingRetryDelay(lastErr, attempt)):
 			}
 		}
 		vectors, err := o.embedOnce(ctx, texts)
@@ -84,6 +84,21 @@ const (
 	embeddingRetryBase = 500 * time.Millisecond
 )
 
+// embeddingRetryDelay waits out the window the endpoint named, falling back to
+// the local backoff when it named none. Retrying inside a window the server
+// already published only earns another 429 and burns one of three attempts.
+func embeddingRetryDelay(err error, attempt int) time.Duration {
+	backoff := time.Duration(1<<attempt) * embeddingRetryBase
+	var status *statusError
+	if !errors.As(err, &status) || status.header == nil {
+		return backoff
+	}
+	if hint := netclient.RetryDelay(&http.Response{Header: status.header}, attempt); hint > backoff {
+		return hint
+	}
+	return backoff
+}
+
 func retryableEmbeddingError(err error) bool {
 	var status *statusError
 	if errors.As(err, &status) {
@@ -96,6 +111,9 @@ func retryableEmbeddingError(err error) bool {
 type statusError struct {
 	code int
 	body string
+	// header is kept so the retry can honour a window the server named. A 429
+	// answered on the client's own schedule is just another 429.
+	header http.Header
 }
 
 func (e *statusError) Error() string { return fmt.Sprintf("embedding API %d: %s", e.code, e.body) }
@@ -117,7 +135,7 @@ func (o *OpenAI) embedOnce(ctx context.Context, texts []string) ([][]float32, er
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, &statusError{code: resp.StatusCode, body: string(body)}
+		return nil, &statusError{code: resp.StatusCode, body: string(body), header: resp.Header}
 	}
 	var out struct {
 		Data []struct {

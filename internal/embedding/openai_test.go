@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestOpenAICompatibleEmbedding(t *testing.T) {
@@ -84,5 +86,69 @@ func TestOpenAIEmbeddingDoesNotRetryClientErrors(t *testing.T) {
 	}
 	if attempts != 1 {
 		t.Fatalf("client errors must not be retried, attempts=%d", attempts)
+	}
+}
+
+// An embedding endpoint under load answers 429 and names the window. Retrying
+// on the local backoff instead burned all three attempts inside that window and
+// failed the batch, which fails an index job for a rate limit that had already
+// told the client how long to wait.
+func TestEmbedBatchWaitsOutTheWindowTheServerNamed(t *testing.T) {
+	const window = 2 * time.Second
+	var attempts atomic.Int64
+	start := time.Now()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		if time.Since(start) < window {
+			w.Header().Set("Retry-After", "2")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{"index": 0, "embedding": []float32{1, 0}}},
+		})
+	}))
+	defer server.Close()
+
+	provider, err := NewOpenAI(OpenAIConfig{BaseURL: server.URL, Model: "m", Timeout: 10 * time.Second})
+	if err != nil {
+		t.Fatalf("NewOpenAI: %v", err)
+	}
+	vectors, err := provider.(BatchEmbedder).EmbedBatch(context.Background(), []string{"hello"})
+	if err != nil {
+		t.Fatalf("EmbedBatch gave up inside the window the server named: %v", err)
+	}
+	if len(vectors) != 1 {
+		t.Fatalf("got %d vectors, want 1", len(vectors))
+	}
+	if got := attempts.Load(); got > 2 {
+		t.Errorf("%d attempts for one named window, want the retry to wait it out", got)
+	}
+}
+
+// Without a window the client keeps its own backoff.
+func TestEmbedBatchFallsBackToLocalBackoff(t *testing.T) {
+	var attempts atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{"index": 0, "embedding": []float32{1, 0}}},
+		})
+	}))
+	defer server.Close()
+
+	provider, err := NewOpenAI(OpenAIConfig{BaseURL: server.URL, Model: "m", Timeout: 10 * time.Second})
+	if err != nil {
+		t.Fatalf("NewOpenAI: %v", err)
+	}
+	start := time.Now()
+	if _, err := provider.(BatchEmbedder).EmbedBatch(context.Background(), []string{"hello"}); err != nil {
+		t.Fatalf("EmbedBatch: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("a 500 without a window waited %s, want the short local backoff", elapsed)
 	}
 }

@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"git-ctx/internal/netclient"
 )
 
 // The retry policy has to distinguish the three cases that look alike in an
@@ -188,7 +190,7 @@ func TestRetryDelayReadsRateLimitResetHeaders(t *testing.T) {
 	// A window longer than one call should hold open is still capped.
 	capped := RetryDelay(&http.Response{Header: http.Header{
 		"Ratelimit-Reset": []string{strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)}}}, 0)
-	if capped != maxRetryHint {
+	if capped != netclient.MaxRetryHint {
 		t.Errorf("long window not capped: %s", capped)
 	}
 }
