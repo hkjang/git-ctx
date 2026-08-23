@@ -1243,3 +1243,11 @@ td small {
   color: var(--danger, #dc2626);
   font-weight: 600;
 }
+
+/* A panel receives focus programmatically when its menu item is activated, so
+   the keyboard user lands on the content instead of back at the top of the
+   menu. That is not a focus the user moved there themselves, so it gets no
+   ring -- the menu item they just pressed still carries the visible state. */
+[tabindex="-1"]:focus:not(:focus-visible) {
+  outline: none;
+}

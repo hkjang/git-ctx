@@ -1071,6 +1071,19 @@ function configureMCPKeyScopes(roles) {
     if (input.disabled) input.checked = false;
   });
 }
+// Showing a view by toggling `hidden` leaves focus on the menu button that was
+// just clicked. A keyboard user then has to tab back through the whole menu to
+// reach what they opened, and a screen reader announces nothing: as far as it
+// is concerned, nothing happened. Moving focus into the panel puts them at its
+// heading instead. Only user activation calls this -- doing it on load or while
+// restoring a view from the address bar would yank focus for no reason.
+function revealPanel(panel) {
+  if (!panel || panel.hidden) return;
+  if (!panel.hasAttribute("tabindex")) panel.setAttribute("tabindex", "-1");
+  panel.focus({ preventScroll: true });
+  panel.scrollIntoView({ block: "start", behavior: "smooth" });
+}
+
 let openWorkspaceView = () => {};
 let openPersonalView = () => {};
 let openAdminPanel = () => {};
@@ -1135,7 +1148,15 @@ function setupWorkspaceNavigation(hasAdmin) {
     rememberView({ workspace: admin ? "admin" : "personal" });
   };
   document.querySelectorAll("[data-workspace]").forEach(
-    (button) => (button.onclick = () => openWorkspaceView(button.dataset.workspace)),
+    (button) =>
+      (button.onclick = () => {
+        openWorkspaceView(button.dataset.workspace);
+        revealPanel(
+          document.getElementById(
+            button.dataset.workspace === "admin" ? "admin" : "personal-workspace",
+          ),
+        );
+      }),
   );
   openWorkspaceView("personal");
 }
@@ -1180,7 +1201,12 @@ function setupPersonalNavigation() {
     rememberView({ personal: target });
   };
   document.querySelectorAll("[data-personal-target]").forEach(
-    (button) => (button.onclick = () => openPersonalView(button.dataset.personalTarget)),
+    (button) =>
+      (button.onclick = () => {
+        const target = button.dataset.personalTarget;
+        openPersonalView(target);
+        revealPanel(document.getElementById(target));
+      }),
   );
   openPersonalView("account");
 }
@@ -1345,6 +1371,9 @@ async function loadKeys() {
   const keys = rows(await api("/api/v1/me/api-keys"));
   $("#key-list").innerHTML =
     `<table><thead><tr><th>이름</th><th>Prefix / 제한</th><th>상태</th><th>만료</th><th>마지막 사용</th><th></th></tr></thead><tbody>${keys.map((k) => `<tr><td>${esc(k.name)}</td><td>${esc(k.prefix)}<br><small>${esc((k.scopes || []).join(", "))}<br>${esc((k.restrictions?.allowedCidrs || []).join(", "))} ${esc((k.restrictions?.allowedRepositories || []).join(", "))}<br>분/시/일 ${k.restrictions?.ratePerMinute || 0}/${k.restrictions?.ratePerHour || 0}/${k.restrictions?.ratePerDay || 0}</small></td><td>${esc(k.status)}</td><td>${date(k.expiresAt)}</td><td>${date(k.lastUsedAt)}</td><td>${k.status === "active" || k.status === "disabled" ? `<button class="secondary" data-scopes="${k.id}">Scope 편집</button> ` : ""}${k.status === "active" ? `<button class="secondary" data-disable="${k.id}">중지</button> <button data-rotate="${k.id}">회전</button> <button class="danger" data-revoke="${k.id}">폐기</button>` : k.status === "disabled" ? `<button data-enable="${k.id}">재활성화</button> <button class="danger" data-revoke="${k.id}">폐기</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+  // Without this the table keeps its header and shows nothing underneath,
+  // which reads as broken rather than as "nothing here yet".
+  markEmptyTables();
   document.querySelectorAll("[data-scopes]").forEach(
     (button) =>
       (button.onclick = () => {
@@ -2467,13 +2496,15 @@ function setupAdminNavigation(capabilities) {
       .join("");
   const open = (target, category = "") => {
     document.querySelectorAll(".admin-panel").forEach((panel) => (panel.hidden = panel.id !== target));
-    document.querySelectorAll("[data-admin-target]").forEach((button) =>
-      button.classList.toggle(
-        "active",
+    document.querySelectorAll("[data-admin-target]").forEach((button) => {
+      const active =
         button.dataset.adminTarget === target &&
-          (button.dataset.adminCategory || "") === category,
-      ),
-    );
+        (button.dataset.adminCategory || "") === category;
+      button.classList.toggle("active", active);
+      // The personal and workspace menus already do this; the admin menu, which
+      // has by far the most views, did not.
+      button.setAttribute("aria-current", active ? "page" : "false");
+    });
     if (target === "settings-admin" && category) openSettingCategory(category);
     if (target === "database-admin-section") refreshDatabase();
     if (target === "users-admin-section") refreshAdminUsers();
@@ -2484,8 +2515,11 @@ function setupAdminNavigation(capabilities) {
   };
   document.querySelectorAll("[data-admin-target]").forEach(
     (button) =>
-      (button.onclick = () =>
-        open(button.dataset.adminTarget, button.dataset.adminCategory || "")),
+      (button.onclick = () => {
+        const target = button.dataset.adminTarget;
+        open(target, button.dataset.adminCategory || "");
+        revealPanel(document.getElementById(target));
+      }),
   );
   if (entries.length) open(entries[0][0], entries[0][4]);
 }
@@ -2904,6 +2938,9 @@ function renderMCPTools(tools, capabilities) {
     })
     .join("");
   $("#mcp-tools").innerHTML = `<table><thead>${header}</thead><tbody>${body}</tbody></table>`;
+    // Without this the table keeps its header and shows nothing underneath,
+    // which reads as broken rather than as "nothing here yet".
+    markEmptyTables();
   $$("[data-tool]").forEach(
     (button) =>
       (button.hidden = !capabilities.mcpWrite) ||
@@ -3245,6 +3282,9 @@ async function refreshOps(capabilities = activeCapabilities) {
     renderMCPTools(tools, capabilities);
     $("#repositories").innerHTML =
       `<table><thead><tr><th>소스</th><th>Library ID</th><th>기본 브랜치</th><th>마지막 색인</th><th></th></tr></thead><tbody>${repos.map((r) => `<tr><td>${esc(r.sourceType)}</td><td>${esc(r.libraryId)}</td><td>${esc(r.defaultBranch)}</td><td>${date(r.indexedAt)}</td><td><button class="secondary" data-policy="${esc(r.id)}" data-policy-label="${esc(r.libraryId)}">색인 정책</button> <button data-index="${esc(r.id)}">재색인</button></td></tr>`).join("")}</tbody></table>`;
+    // Without this the table keeps its header and shows nothing underneath,
+    // which reads as broken rather than as "nothing here yet".
+    markEmptyTables();
     $$("[data-policy]").forEach(
       (button) =>
         (button.hidden = !capabilities.sourceWrite) ||
@@ -3427,6 +3467,9 @@ async function refreshSecurity(capabilities = activeCapabilities) {
     }
     $("#admin-keys").innerHTML =
       `<table><thead><tr><th>사용자/이름</th><th>Prefix / Scope</th><th>상태</th><th>마지막 사용</th><th></th></tr></thead><tbody>${keys.map((k) => `<tr><td>${esc(k.username)} / ${esc(k.name)}</td><td>${esc(k.prefix)}<br><small>${esc((k.scopes || []).join(", "))}</small></td><td>${esc(k.status)}</td><td>${date(k.lastUsedAt)}</td><td>${k.status === "active" || k.status === "disabled" ? `<button class="secondary" data-admin-scopes="${esc(k.id)}">Scope 편집</button> ` : ""}${k.status === "active" ? `<button class="danger" data-admin-revoke="${esc(k.id)}">강제 폐기</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+    // Without this the table keeps its header and shows nothing underneath,
+    // which reads as broken rather than as "nothing here yet".
+    markEmptyTables();
     document.querySelectorAll("[data-admin-scopes]").forEach(
       (button) =>
         (button.onclick = () => {
@@ -3453,6 +3496,9 @@ async function refreshSecurity(capabilities = activeCapabilities) {
     );
     $("#managed-secrets").innerHTML =
       `<table><thead><tr><th>이름</th><th>Backend</th><th>버전</th><th>상태</th><th>갱신</th><th></th></tr></thead><tbody>${secrets.map((s) => `<tr><td><code>secret://${esc(s.name)}</code></td><td>${esc(s.backend)}</td><td>${s.version}</td><td>${esc(s.status)}</td><td>${date(s.updatedAt)}</td><td>${s.status === "active" ? `<button class="danger" data-secret-disable="${esc(s.name)}">중지</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+    // Without this the table keeps its header and shows nothing underneath,
+    // which reads as broken rather than as "nothing here yet".
+    markEmptyTables();
     document.querySelectorAll("[data-secret-disable]").forEach(
       (button) =>
         (button.onclick = async () => {
