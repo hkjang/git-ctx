@@ -304,15 +304,6 @@ body {
   font-size: 0.85rem;
 }
 
-/* Mobile Menu Toggle */
-.mobile-toggle {
-  display: none;
-  background: none;
-  border: none;
-  color: var(--text-main);
-  cursor: pointer;
-}
-
 /* Hero Section */
 .hero-section {
   padding: 160px 0 100px;
@@ -1000,7 +991,6 @@ pre code {
 
 @media (max-width: 768px) {
   .nav-menu { display: none; }
-  .mobile-toggle { display: block; }
   .hero-title { font-size: 2.2rem; }
   .hero-desc { font-size: 1rem; }
   .features-grid { grid-template-columns: 1fr; }

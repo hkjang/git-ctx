@@ -7,11 +7,16 @@
   
   <!-- SEO Primary Meta Tags -->
   <meta name="title" content="git-ctx - 온프레미스 AI 개발 지식 플랫폼 | Enterprise MCP Server">
-  <meta name="description" content="git-ctx는 사내 Bitbucket Server 6.9.1과 GitLab의 소스코드 및 문서를 색인하여 Context7 호환 MCP(Model Context Protocol)로 AI 에이전트에 제공하는 온프레미스 개발 지식 플랫폼입니다. Zero Data Leak security and AST code parsing.">
+  <meta name="description" content="git-ctx는 사내 Bitbucket Server 6.9.1과 GitLab의 소스코드 및 문서를 색인하여 Context7 호환 MCP(Model Context Protocol)로 AI 에이전트에 제공하는 온프레미스 개발 지식 플랫폼입니다. Zero Data Leak 보안과 AST 코드 파싱을 지원합니다.">
   <meta name="keywords" content="git-ctx, MCP, Model Context Protocol, Bitbucket, GitLab, Context7, 온프레미스 AI, AI 에이전트, 개발 지식 플랫폼, 코드 인덱싱, AST 파싱, Keycloak OIDC, 폐쇄망 AI, Cursor MCP, Claude Desktop MCP">
   <meta name="author" content="hkjang">
   <meta name="robots" content="index, follow">
   <link rel="canonical" href="https://hkjang.github.io/git-ctx/">
+  <!-- Language alternates: each page is canonical for its own language -->
+  <link rel="alternate" hreflang="ko" href="https://hkjang.github.io/git-ctx/">
+  <link rel="alternate" hreflang="en" href="https://hkjang.github.io/git-ctx/index_en.html">
+  <link rel="alternate" hreflang="x-default" href="https://hkjang.github.io/git-ctx/">
+
 
   <!-- Open Graph / Facebook / Kakao -->
   <meta property="og:type" content="website">
@@ -88,6 +93,7 @@
       {
         "@type": "FAQPage",
         "@id": "https://hkjang.github.io/git-ctx/#faq",
+        "inLanguage": "ko",
         "mainEntity": [
           {
             "@type": "Question",
@@ -135,43 +141,42 @@
   }
   </script>
 <script id="auto-lang-detector">
-(function() {
-  var SAVED_KEY = 'user_lang_pref';
-  var userPref = localStorage.getItem(SAVED_KEY);
-  if (!userPref) {
-    var navLang = (navigator.language || (navigator.languages && navigator.languages[0]) || '').toLowerCase();
-    var isKoBrowser = navLang.indexOf('ko') === 0;
-    var isEnPage = window.location.pathname.indexOf('index_en.html') !== -1;
-    if (!isKoBrowser && !isEnPage) {
-      var target = window.location.href.replace(/index\.html$/, 'index_en.html');
-      if (target === window.location.href) target = 'index_en.html';
-      window.location.replace(target);
-    } else if (isKoBrowser && isEnPage) {
-      var target = window.location.href.replace(/index_en\.html$/, 'index.html');
-      if (target === window.location.href) target = 'index.html';
-      window.location.replace(target);
-    }
+/* First-visit language routing.
+ *
+ * Each language is a separate authored page, so this picks the right file and
+ * redirects before first paint. It shares the 'git_ctx_lang' key with the
+ * switcher in js/main.js; a stored preference always wins over the browser
+ * locale so an explicit choice is never overridden.
+ */
+(function () {
+  var LANG_KEY = 'git_ctx_lang';
+  var saved = null;
+  try {
+    saved = localStorage.getItem(LANG_KEY);
+  } catch (e) {
+    saved = null; // localStorage throws in some private-browsing modes
   }
+  if (saved !== 'ko' && saved !== 'en') saved = null;
 
-  document.addEventListener('DOMContentLoaded', function() {
-    var langBtns = document.querySelectorAll('.lang-btn, [data-lang], #btn-ko, #btn-en, #localeToggle, #btn-lang-toggle');
-    langBtns.forEach(function(btn) {
-      btn.addEventListener('click', function() {
-        var lang = btn.getAttribute('data-lang') || (btn.textContent || '').trim().toLowerCase();
-        if (lang.indexOf('en') !== -1) {
-          localStorage.setItem(SAVED_KEY, 'en');
-        } else if (lang.indexOf('ko') !== -1 || lang.indexOf('한') !== -1) {
-          localStorage.setItem(SAVED_KEY, 'ko');
-        }
-      });
-    });
-  });
+  var pageLang = document.documentElement.lang === 'en' ? 'en' : 'ko';
+  var wanted = saved;
+  if (!wanted) {
+    var navLang = (navigator.language ||
+      (navigator.languages && navigator.languages[0]) || '').toLowerCase();
+    wanted = navLang.indexOf('ko') === 0 ? 'ko' : 'en';
+  }
+  if (wanted === pageLang) return;
+
+  var file = wanted === 'en' ? 'index_en.html' : 'index.html';
+  var path = window.location.pathname.replace(/[^/]*$/, file);
+  if (path === window.location.pathname) return; // guard against a redirect loop
+  window.location.replace(path + window.location.search + window.location.hash);
 })();
 </script>
 </head>
 <body>
 
-  <!-- Ambient Glow Background Background -->
+  <!-- Ambient Glow Background -->
   <div class="bg-glow-container" aria-hidden="true">
     <div class="bg-glow-blob blob-1"></div>
     <div class="bg-glow-blob blob-2"></div>
@@ -192,7 +197,7 @@
       </a>
 
       <nav aria-label="Main Navigation">
-        <ul class="nav-menu">
+        <ul class="nav-menu" id="nav-menu">
           <li><a href="#features" class="nav-link">주요 기능</a></li>
           <li><a href="#tools" class="nav-link">MCP 도구</a></li>
           <li><a href="#architecture" class="nav-link">아키텍처</a></li>
@@ -201,9 +206,10 @@
         </ul>
       </nav>
 
-      <button id="mobile-menu-btn" class="mobile-menu-btn" aria-label="메뉴 열기/닫기">
-          <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path></svg>
-        </button>
+      <button id="mobile-menu-btn" class="mobile-menu-btn"
+              aria-label="메뉴 열기/닫기" aria-controls="nav-menu" aria-expanded="false">
+        <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path></svg>
+      </button>
       <div class="nav-actions">
         <div class="lang-switcher" aria-label="Language Switcher">
           <button id="lang-ko" class="lang-btn active">KO</button>
@@ -217,13 +223,6 @@
           GitHub
         </a>
 
-        <button id="mobile-nav-toggle" class="mobile-toggle" aria-label="Open navigation menu">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="3" y1="12" x2="21" y2="12"></line>
-            <line x1="3" y1="6" x2="21" y2="6"></line>
-            <line x1="3" y1="18" x2="21" y2="18"></line>
-          </svg>
-        </button>
       </div>
     </div>
   </header>
