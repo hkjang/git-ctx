@@ -55,7 +55,10 @@ func TestPostgresBootstrapIntegration(t *testing.T) {
 	adminRequest.Header.Set("Authorization", "Bearer "+a.bootstrapAdminToken())
 	admin := httptest.NewRecorder()
 	a.Handler().ServeHTTP(admin, adminRequest)
-	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"database"`) || !strings.Contains(admin.Body.String(), `"latest":"039_embedding_coverage.sql"`) {
+	// Derived from the migration directory, not named: the contract is that the
+	// status reports the newest migration that ran.
+	newest := newestMigration(t)
+	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"database"`) || !strings.Contains(admin.Body.String(), `"latest":"`+newest+`"`) {
 		t.Fatalf("admin DB status=%d body=%s", admin.Code, admin.Body.String())
 	}
 	if _, err = a.store.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,library_id,default_branch) VALUES('fts-repo','OPS','fts','FTS','/ops/fts','main')`); err != nil {

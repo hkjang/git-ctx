@@ -914,19 +914,7 @@ func TestPublicAndAdminDatabaseStatus(t *testing.T) {
 	adminRequest.Header.Set("Authorization", "Bearer bootstrap")
 	admin := httptest.NewRecorder()
 	a.Handler().ServeHTTP(admin, adminRequest)
-	// Derive the expectation from the migration directory rather than naming a
-	// file: the contract is that the status reports the newest migration that
-	// ran, not that any particular one is newest.
-	entries, readErr := os.ReadDir(filepath.Join("..", "store", "migrations"))
-	if readErr != nil {
-		t.Fatalf("read migrations: %v", readErr)
-	}
-	newest := ""
-	for _, entry := range entries {
-		if strings.HasSuffix(entry.Name(), ".sql") && entry.Name() > newest {
-			newest = entry.Name()
-		}
-	}
+	newest := newestMigration(t)
 	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), `"latest":"`+newest+`"`) || !strings.Contains(admin.Body.String(), `"pool"`) {
 		t.Fatalf("admin status=%d newest=%s body=%s", admin.Code, newest, admin.Body.String())
 	}
@@ -2488,4 +2476,25 @@ func TestContextPackCarriesPurposeBudgetAndEntrypoints(t *testing.T) {
 	if packs[0].Purpose != "feature-development" || !packs[0].IncludeConventions {
 		t.Errorf("update lost fields: %#v", packs[0])
 	}
+}
+
+// newestMigration is what the database status should report as latest. Deriving
+// it stops a new migration from breaking tests that were never about migration
+// names -- which it did twice before this existed.
+func newestMigration(t *testing.T) string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join("..", "store", "migrations"))
+	if err != nil {
+		t.Fatalf("read migrations: %v", err)
+	}
+	newest := ""
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".sql") && entry.Name() > newest {
+			newest = entry.Name()
+		}
+	}
+	if newest == "" {
+		t.Fatal("no migrations found")
+	}
+	return newest
 }
