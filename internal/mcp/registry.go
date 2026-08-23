@@ -273,6 +273,18 @@ var registry = []tool{
 		handler:       handleBuildContext,
 	},
 	{
+		name:        "find-code-owner",
+		description: "Ranks the people who have worked on a file or directory, weighted so recent work outranks old work. Use it to find who to ask before changing unfamiliar code. git blame names whoever touched a line last, which is often whoever ran a formatter; this counts sustained involvement and reports the commit count and dates behind each name.",
+		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"path"}, "properties": map[string]any{
+			"path":       map[string]string{"type": "string", "description": "Repository-relative file or directory, for example internal/search or internal/search/service.go"},
+			"libraryId":  map[string]string{"type": "string", "description": "Library ID; required when the path exists in more than one repository"},
+			"repository": map[string]string{"type": "string", "description": "Optional repository slug or library ID"},
+			"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"},
+			"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 20}}},
+		usesLibraryID: true,
+		handler:       handleFindCodeOwner,
+	},
+	{
 		name:        "get-platform-status",
 		description: "Returns administrative MCP, source, index, database, and effective embedding retrieval status. Requires an administrator MCP API key.",
 		schema:      map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}},
