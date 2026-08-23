@@ -320,10 +320,7 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	verifier := oauth2.GenerateVerifier()
-	returnTo := r.URL.Query().Get("return_to")
-	if !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") {
-		returnTo = "/"
-	}
+	returnTo := safeReturnTo(r.URL.Query().Get("return_to"))
 	_, err = a.store.DB.ExecContext(r.Context(), a.store.Rebind(`INSERT INTO auth_flows(state,code_verifier,return_to,expires_at) VALUES(?,?,?,?)`), state, verifier, returnTo, time.Now().UTC().Add(10*time.Minute))
 	if err != nil {
 		problem(w, 500, "internal_error", "Unable to persist login state")
@@ -409,8 +406,37 @@ func (a *App) callback(w http.ResponseWriter, r *http.Request) {
 	if stringContains(identity.Roles, "platform-admin") {
 		a.disableBootstrapAdmin()
 	}
-	http.Redirect(w, r, returnTo, http.StatusFound)
+	// Checked again on the way out: the value was stored before this redirect
+	// and a row written by an older build has not been through safeReturnTo.
+	http.Redirect(w, r, safeReturnTo(returnTo), http.StatusFound)
 }
+
+// safeReturnTo keeps the post-login redirect on this site.
+//
+// Requiring a leading "/" and rejecting "//" is not enough. Browsers fold a
+// backslash into a slash for http and https URLs, so "/\evil.example" resolves
+// to //evil.example and lands the user on another origin -- moments after they
+// authenticated, which is exactly when they trust the flow. Anything that is
+// not plainly a path on this host becomes "/".
+func safeReturnTo(raw string) string {
+	if raw == "" || !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") {
+		return "/"
+	}
+	if strings.ContainsAny(raw, "\\") {
+		return "/"
+	}
+	for _, char := range raw {
+		if char < 0x20 || char == 0x7f {
+			return "/"
+		}
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "" || parsed.Host != "" || parsed.Opaque != "" {
+		return "/"
+	}
+	return raw
+}
+
 func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie("git_ctx_session"); err == nil {
 		if !cookieMutationAllowed(r) {
