@@ -215,8 +215,20 @@ func TestToolsListExtendedAndStrictCompatibility(t *testing.T) {
 	s := fixture(t)
 	out := call(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
 	tools := out["result"].(map[string]any)["tools"].([]any)
-	if len(tools) != 22 {
-		t.Fatalf("got %d tools", len(tools))
+	// Assert the rule rather than a number: an anonymous caller sees every tool
+	// that is not administrative. A hardcoded count only says that someone
+	// added a tool, which is not what this is checking.
+	expected, core := 0, 0
+	for i := range registry {
+		if len(registry[i].adminRoles) == 0 {
+			expected++
+		}
+		if registry[i].core {
+			core++
+		}
+	}
+	if len(tools) != expected {
+		t.Fatalf("got %d tools, want the %d non-administrative ones", len(tools), expected)
 	}
 	if tools[0].(map[string]any)["name"] != "resolve-library-id" || tools[1].(map[string]any)["name"] != "query-docs" {
 		t.Fatalf("unexpected tools: %#v", tools)
@@ -224,8 +236,10 @@ func TestToolsListExtendedAndStrictCompatibility(t *testing.T) {
 	s.SetStrictCompatibilityLoader(func(context.Context) bool { return true })
 	out = call(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 	tools = out["result"].(map[string]any)["tools"].([]any)
-	if len(tools) != 2 {
-		t.Fatalf("strict mode got %d tools", len(tools))
+	// Strict Context7 compatibility exposes only the two core tools, so adding
+	// an extension must never change this.
+	if len(tools) != core || core != 2 {
+		t.Fatalf("strict mode got %d tools, want the %d core ones", len(tools), core)
 	}
 }
 
