@@ -401,3 +401,20 @@ func handleBuildContext(s *Server, r *http.Request, p auth.Principal, args map[s
 	empty = len(bundle.Sections) == 0 && len(bundle.Ambiguous) == 0
 	return bundle.Render(), empty, nil
 }
+
+func handleFindCodeOwner(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
+	libraryID := stringArg(args, "libraryId")
+	if p.KeyID != "" && libraryID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+		return "", false, errors.New("library is unavailable or access is denied")
+	}
+	var result search.OwnershipResult
+	result, err = s.search.FindOwners(r.Context(), principalACLs(p), libraryID, stringArg(args, "repository"),
+		stringArg(args, "path"), stringArg(args, "ref"), intArg(args, "limit", 5))
+	if err != nil {
+		return "", false, err
+	}
+	if p.KeyID != "" && !libraryAllowed(result.LibraryID, p.AllowedRepositories) {
+		return "", false, errors.New("path is unavailable or access is denied")
+	}
+	return search.FormatOwners(result), len(result.Owners) == 0, nil
+}
