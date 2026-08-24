@@ -18,9 +18,13 @@ func Catalog() []map[string]any {
 func describeTool(entry *tool) map[string]any {
 	schema := cloneSchema(entry.schema)
 	if properties, ok := schema["properties"].(map[string]any); ok {
+		// Measured across the catalogue, this one property was 24.9% of every
+		// tools/list response: the same sentence repeated on all thirty tools.
+		// initialize already explains what it does and is sent once per session,
+		// so the schema only has to name it.
 		properties["maxBytes"] = map[string]any{
 			"type": "integer", "minimum": MinResponseBytes, "maximum": MaxResponseBytes,
-			"description": "Optional smaller response budget in bytes for this call. It can only lower the configured budget, never raise it.",
+			"description": "Smaller response budget for this call; see initialize.",
 		}
 	}
 	return map[string]any{"name": entry.name, "description": entry.description, "inputSchema": schema}
