@@ -116,6 +116,9 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 
 func (s *Server) finishCall(w http.ResponseWriter, r *http.Request, req request, p auth.Principal, tool, libraryID string, start time.Time, text string, err error, empty bool, budget int, audit callAudit) {
 	outcome, truncated, results, mode := "success", false, 0, ""
+	// produced is the answer's full size before the budget is applied. Recording
+	// only the boolean threw away the one number that says how much a cut costs.
+	produced := 0
 	switch {
 	case err != nil:
 		outcome = "error"
@@ -126,7 +129,7 @@ func (s *Server) finishCall(w http.ResponseWriter, r *http.Request, req request,
 	default:
 		// The cache holds the whole answer, so a later call with a larger budget
 		// still gets everything; only what is sent now is bounded.
-		produced := len(text)
+		produced = len(text)
 		results, mode = sectionCount(text), retrievalMode(text)
 		text = clampResponse(text, budget)
 		truncated = len(text) != produced
@@ -139,9 +142,9 @@ func (s *Server) finishCall(w http.ResponseWriter, r *http.Request, req request,
 	if err != nil && summary == "" {
 		summary = errorCode(err) + ": " + clip(err.Error(), 160)
 	}
-	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`INSERT INTO mcp_calls(id,user_id,api_key_prefix,tool,library_id,outcome,duration_ms,client_ip,response_bytes,truncated,session_id,request_id,client_name,client_version,arguments_preview,arguments_hash,result_count,cache_hit,error_code,retrieval_mode,trace_summary) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
+	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`INSERT INTO mcp_calls(id,user_id,api_key_prefix,tool,library_id,outcome,duration_ms,client_ip,response_bytes,truncated,session_id,request_id,client_name,client_version,arguments_preview,arguments_hash,result_count,cache_hit,error_code,retrieval_mode,trace_summary,produced_bytes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`),
 		callID, p.UserID, p.KeyPrefix, tool, libraryID, outcome, time.Since(start).Milliseconds(), clientIP(r), len(text), boolInt(truncated),
-		audit.sessionID, audit.requestID, audit.clientName, audit.clientVersion, audit.preview, audit.hash, results, boolInt(audit.cacheHit), errorCode(err), mode, summary)
+		audit.sessionID, audit.requestID, audit.clientName, audit.clientVersion, audit.preview, audit.hash, results, boolInt(audit.cacheHit), errorCode(err), mode, summary, produced)
 	// One statement for the whole trace. A row per stage would put up to sixty
 	// round trips on the response path of every call.
 	if steps := audit.trace.Steps(); len(steps) > 0 {

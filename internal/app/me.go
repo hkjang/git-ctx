@@ -66,7 +66,12 @@ func repositoryAllowed(id string, allowed []string) bool {
 }
 func (a *App) meUsage(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	rows, err := a.store.DB.QueryContext(r.Context(), a.store.Rebind(`SELECT tool,outcome,COUNT(*),COALESCE(AVG(duration_ms),0),COALESCE(MAX(duration_ms),0),COALESCE(AVG(response_bytes),0),COALESCE(MAX(response_bytes),0),COALESCE(SUM(truncated),0) FROM mcp_calls WHERE user_id=? GROUP BY tool,outcome ORDER BY tool,outcome`), p.UserID)
+	rows, err := a.store.DB.QueryContext(r.Context(), a.store.Rebind(`SELECT tool,outcome,COUNT(*),COALESCE(AVG(duration_ms),0),COALESCE(MAX(duration_ms),0),COALESCE(AVG(response_bytes),0),COALESCE(MAX(response_bytes),0),COALESCE(SUM(truncated),0),
+-- What truncated calls produced and did not send. "Three calls were cut" does
+-- not say whether a tail was trimmed or most of the answer was thrown away.
+COALESCE(SUM(CASE WHEN truncated=1 THEN produced_bytes-response_bytes ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN truncated=1 THEN produced_bytes ELSE 0 END),0)
+FROM mcp_calls WHERE user_id=? GROUP BY tool,outcome ORDER BY tool,outcome`), p.UserID)
 	if err != nil {
 		problem(w, 500, "internal_error", err.Error())
 		return
@@ -75,13 +80,14 @@ func (a *App) meUsage(w http.ResponseWriter, r *http.Request) {
 	var out []map[string]any
 	for rows.Next() {
 		var tool, outcome string
-		var count, truncated, maxBytes int64
+		var count, truncated, maxBytes, discarded, produced int64
 		var avg, maxLatency, averageBytes float64
-		if err := rows.Scan(&tool, &outcome, &count, &avg, &maxLatency, &averageBytes, &maxBytes, &truncated); err != nil {
+		if err := rows.Scan(&tool, &outcome, &count, &avg, &maxLatency, &averageBytes, &maxBytes, &truncated, &discarded, &produced); err != nil {
 			return
 		}
 		out = append(out, map[string]any{"tool": tool, "outcome": outcome, "calls": count, "averageLatencyMs": avg, "maximumLatencyMs": maxLatency,
-			"averageResponseBytes": averageBytes, "maximumResponseBytes": maxBytes, "truncatedCalls": truncated})
+			"averageResponseBytes": averageBytes, "maximumResponseBytes": maxBytes, "truncatedCalls": truncated,
+			"discardedBytes": discarded, "producedBytes": produced})
 	}
 	jsonOut(w, 200, out)
 }
