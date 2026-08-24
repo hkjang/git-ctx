@@ -1453,7 +1453,7 @@ async function loadActivity() {
     $("#my-repositories").innerHTML =
       `<table><thead><tr><th>Library ID</th><th>이름</th><th>기본 브랜치</th><th>최근 색인</th></tr></thead><tbody>${repos.map((r) => `<tr><td>${esc(r.libraryId)}</td><td>${esc(r.name)}</td><td>${esc(r.defaultBranch)}</td><td>${date(r.indexedAt)}</td></tr>`).join("")}</tbody></table>`;
     $("#my-usage").innerHTML =
-      `<table><thead><tr><th>도구</th><th>결과</th><th>호출</th><th>평균/최대 지연</th><th>평균/최대 응답</th><th>예산 초과</th></tr></thead><tbody>${usage.map((x) => `<tr><td>${esc(x.tool)}</td><td>${esc(x.outcome)}</td><td>${x.calls}</td><td>${Math.round(x.averageLatencyMs)}/${Math.round(x.maximumLatencyMs)} ms</td><td>${Math.round((x.averageResponseBytes || 0) / 1024)}/${Math.round((x.maximumResponseBytes || 0) / 1024)} KB</td><td>${x.truncatedCalls ? `<strong>${x.truncatedCalls}회 잘림</strong>` : "-"}</td></tr>`).join("")}</tbody></table>`;
+      `<table><thead><tr><th>도구</th><th>결과</th><th>호출</th><th>평균/최대 지연</th><th>평균/최대 응답</th><th>예산 초과</th></tr></thead><tbody>${usage.map((x) => `<tr><td>${esc(x.tool)}</td><td>${esc(x.outcome)}</td><td>${x.calls}</td><td>${Math.round(x.averageLatencyMs)}/${Math.round(x.maximumLatencyMs)} ms</td><td>${Math.round((x.averageResponseBytes || 0) / 1024)}/${Math.round((x.maximumResponseBytes || 0) / 1024)} KB</td><td>${x.truncatedCalls ? `<strong>${x.truncatedCalls}회 잘림</strong>${x.producedBytes ? ` · 생성분의 ${Math.round((100 * x.discardedBytes) / x.producedBytes)}% 버려짐` : ""}` : "-"}</td></tr>`).join("")}</tbody></table>`;
     $("#my-calls").innerHTML =
       `<table><thead><tr><th>시간</th><th>키</th><th>도구</th><th>Library</th><th>결과/지연</th><th></th></tr></thead><tbody>${calls
         .slice(0, 100)

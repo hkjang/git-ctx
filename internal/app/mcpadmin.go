@@ -107,13 +107,18 @@ func (a *App) bucketExpression(column, unit string) string {
 
 // mcpToolStats is one row of the analytics table.
 type mcpToolStats struct {
-	Tool             string  `json:"tool"`
-	Calls            int64   `json:"calls"`
-	Success          int64   `json:"success"`
-	Empty            int64   `json:"empty"`
-	Errors           int64   `json:"errors"`
-	CacheHits        int64   `json:"cacheHits"`
-	Truncated        int64   `json:"truncated"`
+	Tool      string `json:"tool"`
+	Calls     int64  `json:"calls"`
+	Success   int64  `json:"success"`
+	Empty     int64  `json:"empty"`
+	Errors    int64  `json:"errors"`
+	CacheHits int64  `json:"cacheHits"`
+	Truncated int64  `json:"truncated"`
+	// DiscardedBytes is what truncated calls of this tool produced and did not
+	// send; ProducedBytes is what those calls produced in total. Their ratio is
+	// what says whether the budget trims a tail or throws most of the answer away.
+	DiscardedBytes   int64   `json:"discardedBytes"`
+	ProducedBytes    int64   `json:"producedBytes"`
 	Users            int64   `json:"users"`
 	AverageLatencyMS float64 `json:"averageLatencyMs"`
 	P50LatencyMS     int64   `json:"p50LatencyMs"`
@@ -166,7 +171,12 @@ COALESCE(SUM(CASE WHEN outcome='empty' THEN 1 ELSE 0 END),0),
 COALESCE(SUM(CASE WHEN outcome='error' THEN 1 ELSE 0 END),0),
 COALESCE(SUM(cache_hit),0), COALESCE(SUM(truncated),0), COUNT(DISTINCT user_id),
 COALESCE(AVG(duration_ms),0), COALESCE(MAX(duration_ms),0),
-COALESCE(AVG(response_bytes),0), COALESCE(MAX(response_bytes),0), COALESCE(AVG(result_count),0)
+COALESCE(AVG(response_bytes),0), COALESCE(MAX(response_bytes),0), COALESCE(AVG(result_count),0),
+-- How much of what a truncated answer produced never reached the caller. The
+-- truncation count alone cannot distinguish a budget that trims a tail from one
+-- that discards most of the answer.
+COALESCE(SUM(CASE WHEN truncated=1 THEN produced_bytes-response_bytes ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN truncated=1 THEN produced_bytes ELSE 0 END),0)
 FROM mcp_calls WHERE occurred_at>=? GROUP BY tool ORDER BY COUNT(*) DESC`), from)
 	if err != nil {
 		problem(w, 500, "internal_error", err.Error())
@@ -177,7 +187,8 @@ FROM mcp_calls WHERE occurred_at>=? GROUP BY tool ORDER BY COUNT(*) DESC`), from
 		var item mcpToolStats
 		var maxLatency float64
 		if err = rows.Scan(&item.Tool, &item.Calls, &item.Success, &item.Empty, &item.Errors, &item.CacheHits,
-			&item.Truncated, &item.Users, &item.AverageLatencyMS, &maxLatency, &item.AverageBytes, &item.MaxBytes, &item.AverageResults); err != nil {
+			&item.Truncated, &item.Users, &item.AverageLatencyMS, &maxLatency, &item.AverageBytes, &item.MaxBytes, &item.AverageResults,
+			&item.DiscardedBytes, &item.ProducedBytes); err != nil {
 			rows.Close()
 			problem(w, 500, "internal_error", err.Error())
 			return

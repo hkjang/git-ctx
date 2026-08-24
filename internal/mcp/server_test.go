@@ -679,3 +679,34 @@ func TestTruncationKeepsTextValid(t *testing.T) {
 		t.Fatalf("clamped=%d bytes", len(clamped))
 	}
 }
+
+// The dispatcher measured how large an answer was before the budget cut it and
+// then recorded only whether a cut happened. An operator could see that a tool
+// truncates often but not whether those calls lost five percent or eighty --
+// the difference between a budget that is fine and a tool that is unusable at
+// it, and the number that says whether compressing answers is worth building.
+func TestTruncatedCallsRecordWhatTheyDiscarded(t *testing.T) {
+	s := fixture(t)
+	// A budget small enough to force a cut on a tool that returns a list.
+	if _, err := s.store.DB.Exec(`INSERT INTO mcp_tools(name,enabled,max_response_bytes) VALUES('search-code',1,?)
+ON CONFLICT(name) DO UPDATE SET max_response_bytes=excluded.max_response_bytes`, MinResponseBytes); err != nil {
+		t.Fatalf("set the per-tool budget: %v", err)
+	}
+	call(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search-code","arguments":{"query":"clustara"}}}`)
+
+	var produced, sent, truncated int64
+	err := s.store.DB.QueryRow(`SELECT COALESCE(produced_bytes,0),COALESCE(response_bytes,0),COALESCE(truncated,0)
+FROM mcp_calls WHERE tool='search-code' ORDER BY occurred_at DESC LIMIT 1`).Scan(&produced, &sent, &truncated)
+	if err != nil {
+		t.Fatalf("read the call record: %v", err)
+	}
+	if produced <= 0 {
+		t.Fatalf("produced_bytes = %d; the size before the cut was not recorded", produced)
+	}
+	if truncated == 1 && produced <= sent {
+		t.Errorf("a truncated call recorded produced=%d sent=%d; the discarded amount is not derivable", produced, sent)
+	}
+	if truncated == 0 && produced != sent {
+		t.Errorf("an untruncated call recorded produced=%d sent=%d, which should be equal", produced, sent)
+	}
+}
