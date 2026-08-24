@@ -314,6 +314,15 @@ var registry = []tool{
 		handler:       handleAssessChangeRisk,
 	},
 	{
+		name:        "get-repository-health",
+		description: "Counts what the index can support for one repository: symbols a test references, symbols nothing references, files that explain how to contribute, and how old the index is. Reports the counts with what they were counted from, plus what it deliberately did not measure, so a short report is not mistaken for a clean bill of health.",
+		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId"}, "properties": map[string]any{
+			"libraryId": map[string]string{"type": "string", "description": "Context7-compatible library ID of the repository"},
+			"ref":       map[string]string{"type": "string", "description": "Optional branch or tag"}}},
+		usesLibraryID: true,
+		handler:       handleRepositoryHealth,
+	},
+	{
 		name:        "get-platform-status",
 		description: "Returns administrative MCP, source, index, database, and effective embedding retrieval status. Requires an administrator MCP API key.",
 		schema:      map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}},
