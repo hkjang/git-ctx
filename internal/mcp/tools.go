@@ -466,3 +466,17 @@ func handleArchitectureMap(s *Server, r *http.Request, p auth.Principal, args ma
 	}
 	return search.FormatArchitecture(result), len(result.Components) == 0, nil
 }
+
+func handleAssessChangeRisk(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
+	libraryID := stringArg(args, "libraryId")
+	if p.KeyID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+		return "", false, errors.New("library is unavailable or access is denied")
+	}
+	var result search.ChangeAssessment
+	result, err = s.search.AssessChange(r.Context(), principalACLs(p), libraryID,
+		stringArg(args, "baseRef"), stringArg(args, "headRef"))
+	if err != nil {
+		return "", false, err
+	}
+	return search.FormatAssessment(result), len(result.Comparison.Changes) == 0, nil
+}

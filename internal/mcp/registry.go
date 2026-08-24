@@ -304,6 +304,16 @@ var registry = []tool{
 		handler: handleArchitectureMap,
 	},
 	{
+		name:        "assess-change-risk",
+		description: "Assesses what a change between two refs puts at risk: symbols removed or resignatured, consumers in OTHER repositories, whether any test references what changed, schema files touched, and whether the index is fresh enough for the consumer list to be trusted. Reports named factors with their evidence rather than a single score, so a reader who disagrees with one can discount it and keep the rest.",
+		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId", "baseRef", "headRef"}, "properties": map[string]any{
+			"libraryId": map[string]string{"type": "string", "description": "Context7-compatible library ID of the repository being changed"},
+			"baseRef":   map[string]string{"type": "string", "description": "The ref being compared from, for example main"},
+			"headRef":   map[string]string{"type": "string", "description": "The ref carrying the change"}}},
+		usesLibraryID: true,
+		handler:       handleAssessChangeRisk,
+	},
+	{
 		name:        "get-platform-status",
 		description: "Returns administrative MCP, source, index, database, and effective embedding retrieval status. Requires an administrator MCP API key.",
 		schema:      map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}},
