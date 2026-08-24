@@ -105,6 +105,55 @@ func (a *App) bucketExpression(column, unit string) string {
 	return fmt.Sprintf(`strftime('%%Y-%%m-%%dT00:00:00Z', %s)`, column)
 }
 
+// retrievalStage is what one stage of the search funnel did across every call in
+// the window: how many candidates it saw and how many survived it.
+//
+// The per-stage numbers were already stored -- the call trace records them for
+// every call -- but were only ever read back one call at a time, for the X-ray
+// view. Aggregated they answer the question a single trace cannot: which stage
+// is losing the results, across the whole platform. An ACL that removes 95% of
+// candidates and an embedding scan that finds nothing look identical from the
+// outside, and they need opposite fixes.
+type retrievalStage struct {
+	Stage      string `json:"stage"`
+	Calls      int64  `json:"calls"`
+	Candidates int64  `json:"candidates"`
+	Results    int64  `json:"results"`
+	// SurvivalPercent is what fraction of candidates left this stage. A stage
+	// with no candidates reports -1 rather than a misleading zero.
+	SurvivalPercent float64 `json:"survivalPercent"`
+	AverageMS       float64 `json:"averageMs"`
+	Failures        int64   `json:"failures"`
+}
+
+// retrievalFunnel aggregates the stored call trace so an operator can see where
+// results are lost rather than inspecting calls one at a time.
+func (a *App) retrievalFunnel(ctx context.Context, from time.Time) ([]retrievalStage, error) {
+	rows, err := a.store.DB.QueryContext(ctx, a.store.Rebind(`SELECT s.stage, COUNT(*),
+COALESCE(SUM(s.candidates),0), COALESCE(SUM(s.results),0), COALESCE(AVG(s.duration_ms),0),
+COALESCE(SUM(CASE WHEN s.status NOT IN ('ok','') THEN 1 ELSE 0 END),0)
+FROM mcp_call_steps s JOIN mcp_calls c ON c.id=s.call_id
+WHERE c.occurred_at>=? GROUP BY s.stage ORDER BY COALESCE(SUM(s.candidates),0) DESC`), from)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []retrievalStage
+	for rows.Next() {
+		var stage retrievalStage
+		if err = rows.Scan(&stage.Stage, &stage.Calls, &stage.Candidates, &stage.Results,
+			&stage.AverageMS, &stage.Failures); err != nil {
+			return nil, err
+		}
+		stage.SurvivalPercent = -1
+		if stage.Candidates > 0 {
+			stage.SurvivalPercent = 100 * float64(stage.Results) / float64(stage.Candidates)
+		}
+		out = append(out, stage)
+	}
+	return out, rows.Err()
+}
+
 // mcpToolStats is one row of the analytics table.
 type mcpToolStats struct {
 	Tool      string `json:"tool"`
@@ -267,6 +316,11 @@ FROM mcp_calls WHERE occurred_at>=? GROUP BY bucket ORDER BY bucket`, bucket)), 
 		}
 		timelineRows.Close()
 		out["timeline"] = timeline
+	}
+	// The funnel is best effort: it explains the other numbers rather than
+	// carrying them, so a failure here must not cost the operator the report.
+	if funnel, funnelErr := a.retrievalFunnel(r.Context(), from); funnelErr == nil {
+		out["retrievalFunnel"] = funnel
 	}
 	jsonOut(w, 200, out)
 }

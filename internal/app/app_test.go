@@ -2498,3 +2498,76 @@ func newestMigration(t *testing.T) string {
 	}
 	return newest
 }
+
+// Per-stage candidate and result counts were already recorded for every call,
+// but only ever read back one call at a time for the X-ray view. Aggregated they
+// answer what a single trace cannot: which stage is losing the results. An ACL
+// that removes almost every candidate and a scan that finds nothing look
+// identical from the outside and need opposite fixes.
+func TestRetrievalFunnelAggregatesTheStoredCallTrace(t *testing.T) {
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "funnel.db") + "?_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32),
+		BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+		BackupDirectory: filepath.Join(t.TempDir(), "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := a.store.DB.Exec(a.store.Rebind(query), args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	now := time.Now().UTC()
+	exec(`INSERT INTO mcp_calls(id,occurred_at,user_id,tool,outcome,duration_ms,client_ip) VALUES('c1',?,'u','search-code','success',10,'1.2.3.4')`, now)
+	exec(`INSERT INTO mcp_calls(id,occurred_at,user_id,tool,outcome,duration_ms,client_ip) VALUES('c2',?,'u','search-code','success',10,'1.2.3.4')`, now)
+	// A call from before the window must not be counted.
+	exec(`INSERT INTO mcp_calls(id,occurred_at,user_id,tool,outcome,duration_ms,client_ip) VALUES('old',?,'u','search-code','success',10,'1.2.3.4')`, now.AddDate(0, 0, -90))
+	exec(`INSERT INTO mcp_call_steps(call_id,sequence,stage,status,candidates,results,duration_ms) VALUES('c1',1,'acl-filter','ok',100,4,5)`)
+	exec(`INSERT INTO mcp_call_steps(call_id,sequence,stage,status,candidates,results,duration_ms) VALUES('c2',1,'acl-filter','ok',100,6,5)`)
+	exec(`INSERT INTO mcp_call_steps(call_id,sequence,stage,status,candidates,results,duration_ms) VALUES('c1',2,'vector-ann','failed',0,0,7)`)
+	exec(`INSERT INTO mcp_call_steps(call_id,sequence,stage,status,candidates,results,duration_ms) VALUES('old',1,'acl-filter','ok',999,999,1)`)
+
+	stages, err := a.retrievalFunnel(context.Background(), now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("retrievalFunnel: %v", err)
+	}
+	byStage := map[string]retrievalStage{}
+	for _, stage := range stages {
+		byStage[stage.Stage] = stage
+	}
+
+	acl := byStage["acl-filter"]
+	if acl.Calls != 2 || acl.Candidates != 200 || acl.Results != 10 {
+		t.Fatalf("acl-filter = %#v; the out-of-window call may have been counted", acl)
+	}
+	if acl.SurvivalPercent < 4.9 || acl.SurvivalPercent > 5.1 {
+		t.Errorf("survival = %.2f%%, want 5%%", acl.SurvivalPercent)
+	}
+
+	// A stage that saw no candidates must not report 0% survival, which would
+	// read as "it discarded everything" when it discarded nothing.
+	vector := byStage["vector-ann"]
+	if vector.SurvivalPercent != -1 {
+		t.Errorf("a stage with no candidates reported %.2f%%, want no rate at all", vector.SurvivalPercent)
+	}
+	if vector.Failures != 1 {
+		t.Errorf("failures = %d, want the failed stage counted", vector.Failures)
+	}
+
+	// The analytics endpoint carries it.
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/admin/mcp/analytics?window=7d", nil)
+	request.Header.Set("Authorization", "Bearer bootstrap")
+	recorder := httptest.NewRecorder()
+	a.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "retrievalFunnel") {
+		t.Fatalf("analytics=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "acl-filter") {
+		t.Errorf("the funnel did not reach the response: %s", recorder.Body.String())
+	}
+}
