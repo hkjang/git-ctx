@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Building the context for a change is a question the platform can answer better
@@ -253,7 +254,41 @@ func (s *Service) BuildChangeContext(ctx context.Context, principals []string, q
 	}
 
 	bundle.Sections = allocate(budgetBytes, gathered)
+	// A change-impact answer is acted on directly, so it has to say when the
+	// index behind it is old enough that callers may have appeared since.
+	if ages, ageErr := s.IndexAges(ctx, principals, bundleLibraries(bundle), time.Now().UTC()); ageErr == nil {
+		if note := FreshnessNote(ages); note != "" {
+			bundle.Diagnostics = append(bundle.Diagnostics, note)
+		}
+	}
 	return bundle, nil
+}
+
+// bundleLibraries is every repository the bundle drew on, so freshness is
+// reported for the ones that actually contributed rather than for the whole
+// catalogue.
+func bundleLibraries(bundle ContextBundle) []string {
+	seen := map[string]bool{bundle.Target.LibraryID: true}
+	out := []string{bundle.Target.LibraryID}
+	for _, section := range bundle.Sections {
+		for _, line := range strings.Split(section.Body, "\n") {
+			start := strings.Index(line, "`/")
+			if start < 0 {
+				continue
+			}
+			end := strings.Index(line[start+1:], "`")
+			if end < 0 {
+				continue
+			}
+			libraryID := line[start+1 : start+1+end]
+			if seen[libraryID] {
+				continue
+			}
+			seen[libraryID] = true
+			out = append(out, libraryID)
+		}
+	}
+	return out
 }
 
 func firstLine(value string) string {

@@ -736,6 +736,13 @@ func (s *Service) ContextPack(ctx context.Context, principals []string, slug, qu
 	}
 	result.Sections = allocateShares(budget, packShare, gathered)
 	result.Content = renderSections(result.Sections)
+	// A pack is read as an orientation, which makes a stale one worse than no
+	// pack: it teaches a project that no longer looks like this.
+	if ages, ageErr := s.IndexAges(ctx, principals, result.Libraries, time.Now().UTC()); ageErr == nil {
+		if note := FreshnessNote(ages); note != "" {
+			result.Content += "\n\n_" + note + "_"
+		}
+	}
 	return result, nil
 }
 
