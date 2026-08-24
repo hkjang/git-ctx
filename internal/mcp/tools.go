@@ -441,3 +441,28 @@ func handleFindTests(s *Server, r *http.Request, p auth.Principal, args map[stri
 	}
 	return search.FormatTests(result), len(result.Tests) == 0, nil
 }
+
+func handleArchitectureMap(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
+	var result search.ArchitectureMap
+	result, err = s.search.ArchitectureOverview(r.Context(), principalACLs(p), stringArg(args, "sourceType"), intArg(args, "limit", 50))
+	if err != nil {
+		return "", false, err
+	}
+	if len(p.AllowedRepositories) > 0 {
+		components := result.Components[:0]
+		for _, component := range result.Components {
+			if libraryAllowed(component.LibraryID, p.AllowedRepositories) {
+				components = append(components, component)
+			}
+		}
+		result.Components = components
+		edges := result.Edges[:0]
+		for _, edge := range result.Edges {
+			if libraryAllowed(edge.From, p.AllowedRepositories) && libraryAllowed(edge.To, p.AllowedRepositories) {
+				edges = append(edges, edge)
+			}
+		}
+		result.Edges = edges
+	}
+	return search.FormatArchitecture(result), len(result.Components) == 0, nil
+}

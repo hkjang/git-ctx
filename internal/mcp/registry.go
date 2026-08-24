@@ -296,6 +296,14 @@ var registry = []tool{
 		handler:       handleFindTests,
 	},
 	{
+		name:        "get-architecture-map",
+		description: "Reports what each accessible repository appears to be -- HTTP service, database user, message consumer, scheduler -- inferred from what it imports, and which repositories reference one another. Every claim carries the imports behind it. Endpoint paths, topic names and SQL embedded in application code are not indexed and are not reported.",
+		schema: map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
+			"sourceType": map[string]any{"type": "string", "enum": []string{"bitbucket", "gitlab", "confluence", "jira"}, "description": "Optional source filter"},
+			"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 200}}},
+		handler: handleArchitectureMap,
+	},
+	{
 		name:        "get-platform-status",
 		description: "Returns administrative MCP, source, index, database, and effective embedding retrieval status. Requires an administrator MCP API key.",
 		schema:      map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}},
