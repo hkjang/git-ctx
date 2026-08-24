@@ -3167,6 +3167,21 @@ async function refreshMCPAnalytics(capabilities = activeCapabilities) {
     $("#mcp-summary").innerHTML = cards
       .map(([label, value, hint]) => `<article><span>${esc(label)}</span><strong>${esc(String(value))}</strong><span>${esc(hint)}</span></article>`)
       .join("");
+    // The funnel explains the summary above it: an ACL that removes almost every
+    // candidate and a scan that finds nothing look the same from the outside and
+    // need opposite fixes.
+    const funnel = result.retrievalFunnel || [];
+    $("#mcp-funnel").innerHTML = funnel.length
+      ? `<table><thead><tr><th>단계</th><th>호출</th><th>후보</th><th>통과</th><th>통과율</th><th>평균</th><th>실패</th></tr></thead><tbody>${funnel
+          .map(
+            (stage) =>
+              `<tr><td><code>${esc(stage.stage)}</code></td><td>${stage.calls}</td><td>${stage.candidates}</td><td>${stage.results}</td><td>${
+                stage.survivalPercent < 0 ? "-" : `${stage.survivalPercent.toFixed(1)}%`
+              }</td><td>${Math.round(stage.averageMs)} ms</td><td>${stage.failures || "-"}</td></tr>`,
+          )
+          .join("")}</tbody></table>`
+      : '<div class="empty">집계할 단계 기록이 없습니다. MCP 호출이 쌓이면 표시됩니다.</div>';
+    markEmptyTables();
     $("#mcp-recommendations").innerHTML = mcpRecommendations.length
       ? mcpRecommendations
           .map(
