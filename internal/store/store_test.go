@@ -4,7 +4,39 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+
+	"git-ctx/internal/toolcatalog"
 )
+
+func TestMCPToolPolicyCatalogCoversGrantableScopes(t *testing.T) {
+	s, err := Open(context.Background(), "sqlite", "file:mcp-policy-catalog?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+
+	rows, err := s.DB.Query(`SELECT name FROM mcp_tools`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	configured := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		configured[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range toolcatalog.Names() {
+		if !configured[name] {
+			t.Errorf("MCP tool %q can be granted to a key but has no administrator policy row", name)
+		}
+	}
+}
 
 func TestRepositoryIdentityIncludesSourceType(t *testing.T) {
 	s, err := Open(context.Background(), "sqlite", "file::memory:?cache=shared&_foreign_keys=on")

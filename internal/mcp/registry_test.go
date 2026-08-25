@@ -3,7 +3,9 @@ package mcp
 import (
 	"testing"
 
+	"git-ctx/internal/apikey"
 	"git-ctx/internal/auth"
+	"git-ctx/internal/toolcatalog"
 )
 
 // The registry exists so a tool's schema, authorisation and handler cannot drift
@@ -29,6 +31,31 @@ func TestRegistryEntriesAreComplete(t *testing.T) {
 	}
 	if len(registry) == 0 {
 		t.Fatal("registry is empty")
+	}
+}
+
+// Tool names are a credential contract as well as an MCP protocol contract.
+// A tool added only to the registry appears in tools/list but cannot be granted
+// to an API key, which makes it unusable by the CLI and IDE clients this server
+// exists for. Keep the ordered registry, strict-mode core entries and
+// administrator entries on the same authoritative scope catalogue.
+func TestRegistryAndAPIKeyScopesStayAligned(t *testing.T) {
+	names := toolcatalog.Names()
+	if len(names) != len(registry) {
+		t.Fatalf("scope catalogue has %d tools, MCP registry has %d", len(names), len(registry))
+	}
+	for index := range registry {
+		entry := &registry[index]
+		if names[index] != entry.name {
+			t.Errorf("tool %d: scope catalogue=%q MCP registry=%q", index, names[index], entry.name)
+		}
+		if err := apikey.ValidateScopes([]string{entry.name}); err != nil {
+			t.Errorf("%s cannot be granted to an API key (core=%t admin=%t): %v",
+				entry.name, entry.core, len(entry.adminRoles) > 0, err)
+		}
+	}
+	if err := apikey.ValidateScopes([]string{"not-a-registered-tool"}); err == nil {
+		t.Error("an unregistered tool was accepted as an API-key scope")
 	}
 }
 

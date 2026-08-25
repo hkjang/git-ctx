@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"git-ctx/internal/store"
+	"git-ctx/internal/toolcatalog"
 )
 
 type Service struct {
@@ -63,9 +64,9 @@ func (s *Service) CreateWithRestrictions(ctx context.Context, userID, name strin
 		return Key{}, "", errors.New("name is required and must not exceed 100 characters")
 	}
 	if len(scopes) == 0 {
-		scopes = []string{"resolve-library-id", "query-docs"}
+		scopes = []string{toolcatalog.ResolveLibraryID, toolcatalog.QueryDocs}
 	}
-	if err := validateScopes(scopes); err != nil {
+	if err := ValidateScopes(scopes); err != nil {
 		return Key{}, "", err
 	}
 	if err := validateRestrictions(restrictions); err != nil {
@@ -105,22 +106,17 @@ func (s *Service) CreateWithRestrictions(ctx context.Context, userID, name strin
 	return Key{ID: id, Name: name, Prefix: prefix, Scopes: scopes, Restrictions: restrictions, ExpiresAt: expiresAt, CreatedAt: now, Status: "active"}, plain, nil
 }
 
-func validateScopes(scopes []string) error {
-	allowed := map[string]bool{
-		"resolve-library-id": true, "query-docs": true,
-		"search-repositories": true, "search-source": true, "search-code": true, "find-file": true, "read-file": true, "get-file-history": true, "list-directory": true, "search-merge-requests": true, "find-dependents": true, "search-semantic": true,
-		"get-repository-map": true, "find-symbol": true, "get-symbol-context": true,
-		"trace-dependencies": true, "compare-refs": true, "get-change-impact": true,
-		"get-context-pack": true, "find-runbook": true, "export-context": true,
-		"explain-search-result": true,
-		"get-platform-status":   true, "list-index-jobs": true, "reindex-repository": true,
-	}
+// ValidateScopes verifies that every requested scope names a tool exposed by
+// the MCP catalogue. It is exported within the internal module so the MCP
+// registry contract test can prove that adding a tool cannot leave API-key
+// credentials unable to request it.
+func ValidateScopes(scopes []string) error {
 	if len(scopes) == 0 {
 		return errors.New("at least one scope is required")
 	}
 	seen := map[string]bool{}
 	for _, scope := range scopes {
-		if !allowed[scope] {
+		if !toolcatalog.Supports(scope) {
 			return fmt.Errorf("unsupported scope %q", scope)
 		}
 		if seen[scope] {
@@ -140,7 +136,7 @@ func (s *Service) UpdateScopesAdmin(ctx context.Context, id string, scopes []str
 }
 
 func (s *Service) updateScopes(ctx context.Context, userID, id string, scopes []string, administrator bool) error {
-	if err := validateScopes(scopes); err != nil {
+	if err := ValidateScopes(scopes); err != nil {
 		return err
 	}
 	query := `UPDATE api_keys SET scopes=? WHERE id=? AND revoked_at IS NULL`

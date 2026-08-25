@@ -96,3 +96,53 @@ func TestRepositoryHealthFailsClosed(t *testing.T) {
 		t.Error("a repository outside the caller's ACL was reported on")
 	}
 }
+
+func TestRepositoryHealthDoesNotTreatAnUnrelatedBareNameAsAConsumer(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:health-name-collision?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.DB.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	for _, repository := range []struct{ id, slug, externalID, libraryID string }{
+		{"target", "order", "1", "/core/order"},
+		{"consumer", "checkout", "2", "/core/checkout"},
+		{"hidden", "private-consumer", "3", "/core/private-consumer"},
+	} {
+		exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES(?,'core',?,?, 'gitlab',?,?,'main')`,
+			repository.id, repository.slug, repository.slug, repository.externalID, repository.libraryID)
+	}
+	exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('target','alice','read')`)
+	exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('consumer','alice','read')`)
+	exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('hidden','bob','read')`)
+
+	addSymbol := func(id, name, qualified string) {
+		exec(`INSERT INTO code_symbols(id,repository_id,ref_name,commit_id,file_path,name,qualified_name,symbol_kind,language,line_start,line_end,content_hash) VALUES(?,'target','main','abc','internal/order.go',?,?,'func','go',1,5,'h')`,
+			id, name, qualified)
+	}
+	addSymbol("collision", "Start", "order.Start")
+	addSymbol("external", "PublicAPI", "order.PublicAPI")
+	addSymbol("hidden-only", "HiddenAPI", "order.HiddenAPI")
+
+	// The other repository's unrelated Start call must not hide target.Start.
+	// Its exact qualified PublicAPI reference is an intentional external
+	// consumer and remains counted. An equally exact reference in a repository
+	// outside Alice's ACL must not influence what Alice's health report reveals.
+	exec(`INSERT INTO code_dependencies(id,repository_id,ref_name,commit_id,file_path,from_symbol,target,dependency_kind,line_number) VALUES('collision-call','consumer','main','def','checkout.go','Run','Start','call',1)`)
+	exec(`INSERT INTO code_dependencies(id,repository_id,ref_name,commit_id,file_path,from_symbol,target,dependency_kind,line_number) VALUES('qualified-call','consumer','main','def','checkout.go','Run','order.PublicAPI','call',2)`)
+	exec(`INSERT INTO code_dependencies(id,repository_id,ref_name,commit_id,file_path,from_symbol,target,dependency_kind,line_number) VALUES('hidden-call','hidden','main','ghi','private.go','Run','order.HiddenAPI','call',3)`)
+
+	unreferenced, err := New(db).unreferencedSymbols(ctx, []string{"alice"}, "target", "main")
+	if err != nil {
+		t.Fatalf("unreferencedSymbols: %v", err)
+	}
+	if got, want := strings.Join(unreferenced, ","), "HiddenAPI,Start"; got != want {
+		t.Fatalf("unreferenced=%q, want %q; bare-name collisions and ACL-hidden consumers must not suppress the flag", got, want)
+	}
+}

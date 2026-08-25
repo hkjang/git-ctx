@@ -4,6 +4,42 @@ const fs = require("node:fs");
 const html = fs.readFileSync("web/index.html", "utf8");
 const script = fs.readFileSync("web/app.js", "utf8");
 const styles = fs.readFileSync("web/app.css", "utf8");
+const openapi = fs.readFileSync("docs/openapi.yaml", "utf8");
+const toolCatalog = fs.readFileSync("internal/toolcatalog/catalog.go", "utf8");
+
+// MCP tool names are also API-key scopes. Keep every user-facing selector and
+// the REST schema aligned with the small Go catalogue that validates keys. This
+// catches the otherwise silent failure where a new tool appears in tools/list
+// but cannot be selected when a key is created or edited.
+const catalogConstants = toolCatalog.slice(
+  toolCatalog.indexOf("const ("),
+  toolCatalog.indexOf("\n)\n\nvar names"),
+);
+const supportedToolNames = [...catalogConstants.matchAll(/=\s*"([a-z][a-z0-9-]+)"/g)]
+  .map((match) => match[1]);
+assert.ok(supportedToolNames.length > 0, "tool catalogue could not be parsed");
+assert.equal(new Set(supportedToolNames).size, supportedToolNames.length, "duplicate backend tool name");
+
+function javascriptStringArray(name) {
+  const match = script.match(new RegExp(`const ${name} = \\[([\\s\\S]*?)\\];`));
+  assert.ok(match, `missing ${name}`);
+  return [...match[1].matchAll(/"([a-z][a-z0-9-]+)"/g)].map((item) => item[1]);
+}
+function sorted(values) { return [...values].sort(); }
+
+const javascriptScopes = [
+  ...javascriptStringArray("userMCPScopes"),
+  ...javascriptStringArray("managementMCPScopes"),
+];
+assert.deepEqual(sorted(javascriptScopes), sorted(supportedToolNames), "scope editor is out of sync with the backend catalogue");
+
+const keyForm = html.slice(html.indexOf('<form id="key-form"'), html.indexOf("</form>", html.indexOf('<form id="key-form"')));
+const createKeyScopes = [...keyForm.matchAll(/name="scope" value="([a-z][a-z0-9-]+)"/g)].map((match) => match[1]);
+assert.deepEqual(sorted(createKeyScopes), sorted(supportedToolNames), "create-key form is out of sync with the backend catalogue");
+
+const openapiScopes = openapi.slice(openapi.indexOf("    CreateAPIKey:"), openapi.indexOf("        expiresAt:", openapi.indexOf("    CreateAPIKey:")));
+const documentedScopes = [...openapiScopes.matchAll(/^\s+- ([a-z][a-z0-9-]+)$/gm)].map((match) => match[1]);
+assert.deepEqual(sorted(documentedScopes), sorted(supportedToolNames), "OpenAPI API-key scopes are out of sync with the backend catalogue");
 
 for (const id of [
   "admin-menu",

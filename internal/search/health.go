@@ -72,18 +72,18 @@ func (s *Service) RepositoryHealthReport(ctx context.Context, principals []strin
 		})
 	}
 
-	unreferenced, err := s.unreferencedSymbols(ctx, repositoryID, ref)
+	unreferenced, err := s.unreferencedSymbols(ctx, principals, repositoryID, ref)
 	if err != nil {
 		return RepositoryHealth{}, err
 	}
 	result.Measures = append(result.Measures, HealthMeasure{
 		Name: "symbols-referenced-somewhere", Value: symbols - len(unreferenced), Total: symbols,
-		Detail: "다른 코드가 참조하는 심볼 수. 참조가 없다고 해서 죽은 코드라는 뜻은 아닙니다 — 진입점, 핸들러, 리플렉션으로 호출되는 코드는 여기 잡히지 않습니다.",
+		Detail: "같은 ref 안의 코드 또는 접근 가능한 다른 저장소가 정확한 qualified name으로 참조하는 심볼 수. 참조가 없다고 해서 죽은 코드라는 뜻은 아닙니다 — 진입점, 핸들러, 리플렉션으로 호출되는 코드는 여기 잡히지 않습니다.",
 	})
 	if len(unreferenced) > 0 {
 		result.Flags = append(result.Flags, HealthFlag{
 			Name:     "unreferenced-symbols",
-			Summary:  fmt.Sprintf("심볼 %d개는 색인된 코드 어디에서도 참조되지 않습니다. 확인해 볼 후보이지, 삭제 목록이 아닙니다.", len(unreferenced)),
+			Summary:  fmt.Sprintf("심볼 %d개는 접근 가능한 색인 코드 어디에서도 참조되지 않습니다. 확인해 볼 후보이지, 삭제 목록이 아닙니다.", len(unreferenced)),
 			Examples: capped(unreferenced, 5),
 		})
 	}
@@ -180,15 +180,36 @@ func (s *Service) symbolCoverage(ctx context.Context, repositoryID, ref string) 
 	return len(names), tested, untested, nil
 }
 
-// unreferencedSymbols lists symbols nothing in the index depends on. It is a
-// list of candidates to look at, not of code to delete: entry points, handlers
-// and anything reached by reflection have no recorded caller.
-func (s *Service) unreferencedSymbols(ctx context.Context, repositoryID, ref string) ([]string, error) {
+// unreferencedSymbols lists symbols no accessible indexed code depends on. A
+// bare name is meaningful only inside the same repository and ref: treating a
+// `Start` call in an unrelated repository as a consumer of every `Start`
+// function in the catalogue creates false negatives. Cross-repository callers
+// are retained only when their source spelling exactly matches a non-bare
+// qualified name. It is still a candidate list, not a delete list: entry
+// points, handlers and anything reached by reflection have no recorded caller.
+func (s *Service) unreferencedSymbols(ctx context.Context, principals []string, repositoryID, ref string) ([]string, error) {
+	join, predicate, aclArgs := repositoryACL(principals)
+	args := append([]any{repositoryID, ref}, aclArgs...)
 	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(
 		`SELECT s.name FROM code_symbols s
 WHERE s.repository_id=? AND s.ref_name=?
-AND NOT EXISTS (SELECT 1 FROM code_dependencies d WHERE d.target=s.name OR d.target=s.qualified_name)
-ORDER BY s.name`), repositoryID, ref)
+AND NOT EXISTS (
+  SELECT 1 FROM code_dependencies d
+  WHERE d.repository_id=s.repository_id
+    AND d.ref_name=s.ref_name
+    AND d.target IN (s.name,s.qualified_name)
+)
+AND (
+  s.qualified_name=s.name OR NOT EXISTS (
+  SELECT 1 FROM code_dependencies d
+  JOIN repositories r ON r.id=d.repository_id `+join+`
+  WHERE d.target=s.qualified_name
+    AND d.repository_id<>s.repository_id
+    AND r.enabled=1
+    AND `+predicate+`
+  )
+)
+ORDER BY s.name`), args...)
 	if err != nil {
 		return nil, err
 	}

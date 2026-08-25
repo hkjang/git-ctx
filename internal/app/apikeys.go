@@ -6,6 +6,7 @@ import (
 
 	"git-ctx/internal/apikey"
 	"git-ctx/internal/auth"
+	"git-ctx/internal/toolcatalog"
 )
 
 // MCP API key lifecycle for the signed-in user.
@@ -51,15 +52,15 @@ func (a *App) createKey(w http.ResponseWriter, r *http.Request) {
 func keyScopesAllowed(p auth.Principal, scopes []string) bool {
 	for _, scope := range scopes {
 		switch scope {
-		case "get-platform-status":
+		case toolcatalog.GetPlatformStatus:
 			if !roleAllowed(p, "readonly-operator", "source-admin", "mcp-admin", "search-admin", "security-admin", "auditor") {
 				return false
 			}
-		case "list-index-jobs":
+		case toolcatalog.ListIndexJobs:
 			if !roleAllowed(p, "source-admin", "readonly-operator") {
 				return false
 			}
-		case "reindex-repository":
+		case toolcatalog.ReindexRepository:
 			if !roleAllowed(p, "source-admin") {
 				return false
 			}

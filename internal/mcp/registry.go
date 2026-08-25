@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"git-ctx/internal/auth"
+	"git-ctx/internal/toolcatalog"
 )
 
 // toolHandler runs one MCP tool after the dispatcher has authorised the call and
@@ -35,7 +36,7 @@ type tool struct {
 // derived from it.
 var registry = []tool{
 	{
-		name:        "resolve-library-id",
+		name:        toolcatalog.ResolveLibraryID,
 		description: "Resolves a repository or library name to a Context7-compatible library ID.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryName", "query"}, "properties": map[string]any{
 			"libraryName": map[string]string{"type": "string", "description": "Library or repository name"},
@@ -44,7 +45,7 @@ var registry = []tool{
 		handler: handleResolveLibraryId,
 	},
 	{
-		name:        "query-docs",
+		name:        toolcatalog.QueryDocs,
 		description: "Searches versioned documentation and code examples for a library ID.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId", "query"}, "properties": map[string]any{
 			"libraryId": map[string]string{"type": "string", "description": "Context7-compatible /organization/project[/version] ID"},
@@ -54,7 +55,7 @@ var registry = []tool{
 		handler:       handleQueryDocs,
 	},
 	{
-		name:        "search-repositories",
+		name:        toolcatalog.SearchRepositories,
 		description: "Lists matching Bitbucket and GitLab repositories by name or description only. This tool never returns file contents; call search-code when the user asks about code, symbols, configuration, or any file text.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
 			"query":      map[string]string{"type": "string", "description": "Project, repository, product, or description search text"},
@@ -63,7 +64,7 @@ var registry = []tool{
 		handler: handleSearchRepositories,
 	},
 	{
-		name:        "search-source",
+		name:        toolcatalog.SearchSource,
 		description: "Searches file contents through the connected Bitbucket or GitLab code search API across accessible repositories. Prefer search-code, which runs this search and repository discovery together.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
 			"query":      map[string]string{"type": "string", "description": "Code, symbol, API, or text query"},
@@ -75,7 +76,7 @@ var registry = []tool{
 		handler: handleSearchSource,
 	},
 	{
-		name:        "search-code",
+		name:        toolcatalog.SearchCode,
 		description: "Primary code search. Finds repositories AND matching file contents in one call, without a library ID, and falls back to the live Bitbucket or GitLab code search API for repositories that are not indexed yet. Use this first for any question about source code, symbols, configuration, or where something is implemented.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
 			"query":      map[string]string{"type": "string", "description": "Natural-language request, repository name, code symbol, API, or text query"},
@@ -87,7 +88,7 @@ var registry = []tool{
 		handler: handleSearchCode,
 	},
 	{
-		name:        "find-file",
+		name:        toolcatalog.FindFile,
 		description: "Finds files by name or path across accessible repositories. Use it for questions like where a Dockerfile, migration, config or module lives. Supports plain names (README), globs (*.tf, auth*.py) and path patterns (**/migrations/*.sql, internal/**/service.go).",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"pattern"}, "properties": map[string]any{
 			"pattern":    map[string]string{"type": "string", "description": "File name, glob or path pattern. Without a slash it matches the file name, with a slash the whole path."},
@@ -100,7 +101,7 @@ var registry = []tool{
 		handler: handleFindFile,
 	},
 	{
-		name:        "read-file",
+		name:        toolcatalog.ReadFile,
 		description: "Reads one file from a repository, optionally a line range. Use it after find-file or search-code to see the whole file instead of a snippet. Files without indexed content are read live from the source server; credentials are masked and long files are truncated with the range stated.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"path"}, "properties": map[string]any{
 			"path":       map[string]string{"type": "string", "description": "Repository-relative file path, for example charts/values.yaml"},
@@ -112,7 +113,7 @@ var registry = []tool{
 		handler: handleReadFile,
 	},
 	{
-		name:        "search-semantic",
+		name:        toolcatalog.SearchSemantic,
 		description: "Finds code and documentation across accessible repositories without requiring a library ID. In hybrid mode it searches by meaning; when embeddings are disabled or unavailable it transparently uses ACL-safe keyword and Bitbucket/GitLab query search.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
 			"query":      map[string]string{"type": "string", "description": "Describe the behaviour or concept in natural language"},
@@ -122,7 +123,7 @@ var registry = []tool{
 		handler: handleSearchSemantic,
 	},
 	{
-		name:        "find-dependents",
+		name:        toolcatalog.FindDependents,
 		description: "Finds every accessible repository that imports, calls or otherwise depends on a symbol, module, table or service. Use it before changing shared code to see who breaks; trace-dependencies only covers one repository.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"target"}, "properties": map[string]any{
 			"target":     map[string]string{"type": "string", "description": "Imported module, called symbol, table or service name"},
@@ -131,7 +132,7 @@ var registry = []tool{
 		handler: handleFindDependents,
 	},
 	{
-		name:        "search-merge-requests",
+		name:        toolcatalog.SearchMergeRequests,
 		description: "Searches GitLab merge requests and Bitbucket pull requests. Use it for why-questions: the reasoning, trade-offs and rollout notes live in the request description, not in the code or the commit subject.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
 			"query":      map[string]string{"type": "string", "description": "Text matched against title and description"},
@@ -142,7 +143,7 @@ var registry = []tool{
 		handler: handleSearchMergeRequests,
 	},
 	{
-		name:        "get-file-history",
+		name:        toolcatalog.GetFileHistory,
 		description: "Lists the commits that changed a file, newest first, with author, date and message. Use it to explain why code looks the way it does, when a behaviour changed, or who to ask.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"path"}, "properties": map[string]any{
 			"path":       map[string]string{"type": "string", "description": "Repository-relative file path"},
@@ -153,7 +154,7 @@ var registry = []tool{
 		handler: handleGetFileHistory,
 	},
 	{
-		name:        "list-directory",
+		name:        toolcatalog.ListDirectory,
 		description: "Lists the immediate contents of a repository directory, folders first. Use it to orient yourself before reading files.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
 			"path":       map[string]string{"type": "string", "description": "Directory path; omit or use an empty string for the repository root"},
@@ -163,7 +164,7 @@ var registry = []tool{
 		handler: handleListDirectory,
 	},
 	{
-		name:        "get-repository-map",
+		name:        toolcatalog.GetRepositoryMap,
 		description: "Returns the indexed languages, directories, key files, and entry points for a repository.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId"}, "properties": map[string]any{
 			"libraryId": map[string]string{"type": "string", "description": "Context7-compatible library ID"},
@@ -172,7 +173,7 @@ var registry = []tool{
 		handler:       handleGetRepositoryMap,
 	},
 	{
-		name:        "find-symbol",
+		name:        toolcatalog.FindSymbol,
 		description: "Finds functions, methods, classes, interfaces, and database objects in accessible repositories.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
 			"query":     map[string]string{"type": "string", "description": "Symbol name or signature"},
@@ -184,7 +185,7 @@ var registry = []tool{
 		handler:       handleFindSymbol,
 	},
 	{
-		name:        "get-symbol-context",
+		name:        toolcatalog.GetSymbolContext,
 		description: "Returns an indexed symbol definition, documentation, source context, and location.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId", "symbol"}, "properties": map[string]any{
 			"libraryId": map[string]string{"type": "string"},
@@ -194,7 +195,7 @@ var registry = []tool{
 		handler:       handleGetSymbolContext,
 	},
 	{
-		name:        "trace-dependencies",
+		name:        toolcatalog.TraceDependencies,
 		description: "Traces imports, calls, and data dependencies for a symbol or module.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId", "symbol"}, "properties": map[string]any{
 			"libraryId": map[string]string{"type": "string"},
@@ -205,7 +206,7 @@ var registry = []tool{
 		handler:       handleTraceDependencies,
 	},
 	{
-		name:        "compare-refs",
+		name:        toolcatalog.CompareRefs,
 		description: "Compares indexed symbols between two branches or tags.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId", "baseRef", "headRef"}, "properties": map[string]any{
 			"libraryId": map[string]string{"type": "string"},
@@ -215,7 +216,7 @@ var registry = []tool{
 		handler:       handleCompareRefs,
 	},
 	{
-		name:        "get-change-impact",
+		name:        toolcatalog.GetChangeImpact,
 		description: "Combines ref differences with incoming source dependencies to identify affected code.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId", "baseRef", "headRef"}, "properties": map[string]any{
 			"libraryId": map[string]string{"type": "string"},
@@ -226,7 +227,7 @@ var registry = []tool{
 		handler:       handleGetChangeImpact,
 	},
 	{
-		name:        "get-context-pack",
+		name:        toolcatalog.GetContextPack,
 		description: "Searches a curated multi-repository context pack while enforcing ACL per repository.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"pack", "query"}, "properties": map[string]any{
 			"pack":  map[string]string{"type": "string", "description": "Context pack slug"},
@@ -234,7 +235,7 @@ var registry = []tool{
 		handler: handleGetContextPack,
 	},
 	{
-		name:        "find-runbook",
+		name:        toolcatalog.FindRunbook,
 		description: "Finds operational runbooks and playbooks in accessible indexed repositories.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
 			"query":     map[string]string{"type": "string"},
@@ -244,7 +245,7 @@ var registry = []tool{
 		handler:       handleFindRunbook,
 	},
 	{
-		name:        "export-context",
+		name:        toolcatalog.ExportContext,
 		description: "Exports ACL-filtered repository context as a bounded Markdown bundle with an untrusted-data safety label.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryIds", "query"}, "properties": map[string]any{
 			"libraryIds": map[string]any{"type": "array", "minItems": 1, "maxItems": 20, "items": map[string]string{"type": "string"}},
@@ -252,7 +253,7 @@ var registry = []tool{
 		handler: handleExportContext,
 	},
 	{
-		name:        "explain-search-result",
+		name:        toolcatalog.ExplainSearchResult,
 		description: "Explains keyword matches, retrieval mode, source lines, and embedding metadata for accessible search candidates.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId", "query"}, "properties": map[string]any{
 			"libraryId": map[string]string{"type": "string"},
@@ -263,7 +264,7 @@ var registry = []tool{
 		handler:       handleExplainSearchResult,
 	},
 	{
-		name:        "build-context",
+		name:        toolcatalog.BuildContext,
 		description: "Assembles everything needed before changing a symbol: who calls it across accessible repositories, what it depends on, the tests that cover it, and its recent history. Ask this instead of running find-symbol, find-dependents, trace-dependencies and find-file yourself; it applies the repository ACL once and fits the result to a token budget, saying what did not fit.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"query"}, "properties": map[string]any{
 			"query":     map[string]string{"type": "string", "description": "What you are about to change, naming the type, function, table or service, for example \"OrderService 수정하려는데 영향 범위\""},
@@ -273,7 +274,7 @@ var registry = []tool{
 		handler:       handleBuildContext,
 	},
 	{
-		name:        "find-code-owner",
+		name:        toolcatalog.FindCodeOwner,
 		description: "Ranks the people who have worked on a file or directory, weighted so recent work outranks old work. Use it to find who to ask before changing unfamiliar code. git blame names whoever touched a line last, which is often whoever ran a formatter; this counts sustained involvement and reports the commit count and dates behind each name.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"path"}, "properties": map[string]any{
 			"path":       map[string]string{"type": "string", "description": "Repository-relative file or directory, for example internal/search or internal/search/service.go"},
@@ -285,7 +286,7 @@ var registry = []tool{
 		handler:       handleFindCodeOwner,
 	},
 	{
-		name:        "find-tests",
+		name:        toolcatalog.FindTests,
 		description: "Finds the tests that exercise a symbol. Tests the dependency graph shows calling or importing it are reported separately from tests merely named after it or sitting beside it, because the first will fail if the change is wrong and the second might not touch the code at all. Use it to decide what to run before or after a change.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"symbol"}, "properties": map[string]any{
 			"symbol":    map[string]string{"type": "string", "description": "The type, function or method being changed, for example OrderService"},
@@ -296,7 +297,7 @@ var registry = []tool{
 		handler:       handleFindTests,
 	},
 	{
-		name:        "get-architecture-map",
+		name:        toolcatalog.GetArchitectureMap,
 		description: "Reports what each accessible repository appears to be -- HTTP service, database user, message consumer, scheduler -- inferred from what it imports, and which repositories reference one another. Every claim carries the imports behind it. Endpoint paths, topic names and SQL embedded in application code are not indexed and are not reported.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
 			"sourceType": map[string]any{"type": "string", "enum": []string{"bitbucket", "gitlab", "confluence", "jira"}, "description": "Optional source filter"},
@@ -304,7 +305,7 @@ var registry = []tool{
 		handler: handleArchitectureMap,
 	},
 	{
-		name:        "assess-change-risk",
+		name:        toolcatalog.AssessChangeRisk,
 		description: "Assesses what a change between two refs puts at risk: symbols removed or resignatured, consumers in OTHER repositories, whether any test references what changed, schema files touched, and whether the index is fresh enough for the consumer list to be trusted. Reports named factors with their evidence rather than a single score, so a reader who disagrees with one can discount it and keep the rest.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId", "baseRef", "headRef"}, "properties": map[string]any{
 			"libraryId": map[string]string{"type": "string", "description": "Context7-compatible library ID of the repository being changed"},
@@ -314,7 +315,7 @@ var registry = []tool{
 		handler:       handleAssessChangeRisk,
 	},
 	{
-		name:        "get-repository-health",
+		name:        toolcatalog.GetRepositoryHealth,
 		description: "Counts what the index can support for one repository: symbols a test references, symbols nothing references, files that explain how to contribute, and how old the index is. Reports the counts with what they were counted from, plus what it deliberately did not measure, so a short report is not mistaken for a clean bill of health.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId"}, "properties": map[string]any{
 			"libraryId": map[string]string{"type": "string", "description": "Context7-compatible library ID of the repository"},
@@ -323,14 +324,14 @@ var registry = []tool{
 		handler:       handleRepositoryHealth,
 	},
 	{
-		name:        "get-platform-status",
+		name:        toolcatalog.GetPlatformStatus,
 		description: "Returns administrative MCP, source, index, database, and effective embedding retrieval status. Requires an administrator MCP API key.",
 		schema:      map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}},
 		adminRoles:  []string{"platform-admin", "readonly-operator", "source-admin", "mcp-admin", "search-admin", "security-admin", "auditor"},
 		handler:     handleGetPlatformStatus,
 	},
 	{
-		name:        "list-index-jobs",
+		name:        toolcatalog.ListIndexJobs,
 		description: "Lists recent indexing jobs for source administrators and operators using an MCP API key.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
 			"status": map[string]any{"type": "string", "enum": []string{"pending", "running", "completed", "failed"}},
@@ -339,7 +340,7 @@ var registry = []tool{
 		handler:    handleListIndexJobs,
 	},
 	{
-		name:        "reindex-repository",
+		name:        toolcatalog.ReindexRepository,
 		description: "Queues an idempotent repository reindex job. Requires a source administrator MCP API key.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId"}, "properties": map[string]any{
 			"libraryId": map[string]string{"type": "string", "description": "Repository library ID such as /project/repository"},

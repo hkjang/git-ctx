@@ -21,6 +21,12 @@ type cacheEntry struct {
 	expires time.Time
 }
 
+// maxToolCacheEntries is deliberately a hard in-process bound. Cache keys
+// include principals, repository restrictions, configuration revisions and
+// arguments, so a busy multi-tenant server can otherwise accumulate many
+// still-valid entries before their TTLs elapse.
+const maxToolCacheEntries = 10000
+
 func (s *Server) cacheKey(ctx context.Context, p auth.Principal, tool string, args map[string]any) string {
 	raw, _ := json.Marshal(args)
 	principals := principalACLs(p)
@@ -85,26 +91,59 @@ func (s *Server) cached(key string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if time.Now().After(entry.expires) {
+	if !time.Now().Before(entry.expires) {
 		delete(s.cache, key)
 		return "", false
 	}
 	return entry.text, true
 }
+
+func (s *Server) deleteExpiredCacheEntriesLocked(now time.Time) {
+	for key, entry := range s.cache {
+		if !now.Before(entry.expires) {
+			delete(s.cache, key)
+		}
+	}
+}
+
+// trimCacheLocked removes entries that will expire soonest. Choosing the key
+// lexicographically when expirations tie makes eviction deterministic without
+// maintaining a second unbounded ordering structure. In normal operation this
+// loop removes one entry; the loop also repairs a map left above the limit by
+// an older server version.
+func (s *Server) trimCacheLocked(limit int) {
+	for len(s.cache) > limit {
+		victimKey := ""
+		var victimExpiry time.Time
+		for key, entry := range s.cache {
+			if victimKey == "" || entry.expires.Before(victimExpiry) ||
+				(entry.expires.Equal(victimExpiry) && key < victimKey) {
+				victimKey = key
+				victimExpiry = entry.expires
+			}
+		}
+		delete(s.cache, victimKey)
+	}
+}
+
 func (s *Server) storeCache(ctx context.Context, tool, key, text string) {
 	var seconds int
 	if err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT cache_seconds FROM mcp_tools WHERE name=?`), tool).Scan(&seconds); err != nil || seconds <= 0 {
 		return
 	}
+	now := time.Now()
 	s.cacheMu.Lock()
 	defer s.cacheMu.Unlock()
-	if len(s.cache) > 10000 {
-		now := time.Now()
-		for item, entry := range s.cache {
-			if now.After(entry.expires) {
-				delete(s.cache, item)
-			}
-		}
+	if len(s.cache) >= maxToolCacheEntries {
+		s.deleteExpiredCacheEntriesLocked(now)
 	}
-	s.cache[key] = cacheEntry{text: text, expires: time.Now().Add(time.Duration(seconds) * time.Second)}
+
+	// Updating an existing entry needs no spare slot. A new key reserves one
+	// before insertion so the map never transiently exceeds the hard limit.
+	limit := maxToolCacheEntries
+	if _, exists := s.cache[key]; !exists {
+		limit--
+	}
+	s.trimCacheLocked(limit)
+	s.cache[key] = cacheEntry{text: text, expires: now.Add(time.Duration(seconds) * time.Second)}
 }

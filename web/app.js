@@ -1098,7 +1098,9 @@ const userMCPScopes = [
   "resolve-library-id", "query-docs", "search-repositories", "search-source",
   "search-code", "find-file", "read-file", "get-file-history", "list-directory", "search-merge-requests", "find-dependents", "search-semantic", "get-repository-map", "find-symbol", "get-symbol-context",
   "trace-dependencies", "compare-refs", "get-change-impact", "get-context-pack",
-  "find-runbook", "export-context", "explain-search-result",
+  "find-runbook", "export-context", "explain-search-result", "build-context",
+  "find-code-owner", "find-tests", "get-architecture-map", "assess-change-risk",
+  "get-repository-health",
 ];
 const managementMCPScopes = ["get-platform-status", "list-index-jobs", "reindex-repository"];
 
