@@ -262,7 +262,24 @@ jobs:
           verify_dir=$RUNNER_TEMP/release-assets
           release_exists=false
           release_is_draft=false
-          if release_json=$(/usr/bin/gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" 2>/dev/null); then
+
+          # GitHub's release-by-tag REST endpoint does not return draft
+          # releases. Search the authenticated, paginated release collection so
+          # a newly-created draft can be found immediately and a rerun can
+          # safely resume it.
+          find_release_by_tag() {
+            /usr/bin/gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+              /usr/bin/jq -cse --arg tag "$TAG" '
+                [.[][] | select(.tag_name == $tag)] as $matches
+                | if ($matches | length) == 1 then $matches[0]
+                  elif ($matches | length) == 0 then empty
+                  else error("multiple releases found for tag " + $tag)
+                  end
+              '
+          }
+
+          if release_json=$(find_release_by_tag); then
             release_exists=true
             release_is_draft=$(/usr/bin/jq -r '.draft' <<<"$release_json")
           fi
@@ -279,7 +296,7 @@ jobs:
               --generate-notes \
               "${prerelease[@]}"
             release_is_draft=true
-            release_json=$(/usr/bin/gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")
+            release_json=$(find_release_by_tag)
           fi
 
           required_assets_present() {
@@ -310,7 +327,7 @@ jobs:
             uploaded=true
           fi
 
-          release_json=$(/usr/bin/gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")
+          release_json=$(find_release_by_tag)
           required_assets_present "$release_json"
           rm -rf "$verify_dir"
           mkdir -p "$verify_dir"

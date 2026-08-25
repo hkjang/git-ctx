@@ -34,7 +34,7 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
-2026-08-25 v0.50.0 릴리스 전 검증 결과:
+2026-08-25 v0.50.1 릴리스 전 검증 결과:
 
 ```text
 go test -race -count=1 ./...                 PASS
@@ -43,8 +43,8 @@ PostgreSQL 16 + pgvector + Vault Integration PASS
 관리자 UI JavaScript parse·계약 시험 전체       PASS
 GitHub Actions actionlint·shell syntax         PASS
 govulncheck reachable symbols                  PASS (0)
-Kubernetes Kustomize·:4747·v0.50.0 렌더링      PASS
-Docker linux/amd64·UID 10001·v0.50.0 빌드      PASS
+Kubernetes Kustomize·:4747·v0.50.1 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.50.1 빌드      PASS
 공개 설정·상단·로그인·프로필 버전 표시 계약       PASS
 ```
 
