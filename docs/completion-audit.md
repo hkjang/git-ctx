@@ -35,6 +35,22 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.58.0 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./... (FTS5/태그 없음)  PASS
+전 구간 체인 통합 시험 신규(10.3초)            PASS
+마스킹 제거 시 체인 시험 실패 확인             PASS
+go vet ./... && go build ./...               PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.58.0 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.58.0 빌드      PASS
+```
+
+이번 릴리스는 그동안 릴리스마다 손으로 돌리던 전 구간 검증을 저장소에 남겼다. 소스
+서버·모델·알림 수신기를 같은 프로세스에 세우고 실제 핸들러와 워커로 설정→등록→색인→
+검색→발송을 확인한다. 최근 릴리스의 중대한 결함들이 모두 이 경로에서만 보였다.
+
 2026-08-26 v0.57.3 릴리스 전 검증 결과:
 
 ```text
