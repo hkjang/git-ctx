@@ -35,6 +35,24 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-25 v0.53.1 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./...                 PASS
+go vet ./... && go build ./...               PASS
+저장소 지도 스택 시험                          PASS
+전 도구 빈 응답 점검                           PASS(수정 없음)
+사용자·관리자 UI JavaScript parse·계약 시험    PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.53.1 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.53.1 빌드      PASS
+```
+
+이번 검증에는 저장소 지도의 의존성 스택이 포함된다. 직접 선언만 집계하고 전이·락파일
+항목은 제외하며, 인벤토리가 없으면 절 자체를 붙이지 않아 빈 목록이 "의존성 없음"으로
+읽히지 않는다. 비관리 도구 29종의 빈 응답은 모두 이유와 다음 행동을 제시하고 있어
+수정이 필요 없었다.
+
 2026-08-25 v0.53.0 릴리스 전 검증 결과:
 
 ```text

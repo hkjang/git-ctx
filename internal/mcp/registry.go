@@ -165,7 +165,7 @@ var registry = []tool{
 	},
 	{
 		name:        toolcatalog.GetRepositoryMap,
-		description: "Returns the indexed languages, directories, key files, and entry points for a repository.",
+		description: "Returns the indexed languages, directories, key files, entry points, project conventions and declared dependency stack of a repository. Read it before writing code for a repository you do not know: the stack tells you which libraries new code should use.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"libraryId"}, "properties": map[string]any{
 			"libraryId": map[string]string{"type": "string", "description": "Context7-compatible library ID"},
 			"ref":       map[string]string{"type": "string", "description": "Optional branch or tag"}}},

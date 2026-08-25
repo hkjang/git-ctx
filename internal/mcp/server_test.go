@@ -877,3 +877,53 @@ func TestNoToolLeaksOutsideTheKeyAllowlist(t *testing.T) {
 		}
 	}
 }
+
+// The libraries a repository already uses decide how new code in it should be
+// written. An agent orienting itself gets them with the map rather than having
+// to know to ask a second question.
+func TestRepositoryMapCarriesTheStack(t *testing.T) {
+	s := fixture(t)
+	must := func(query string, args ...any) {
+		t.Helper()
+		if _, err := s.store.DB.Exec(query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add := func(name, version, scope, path string) {
+		must(`INSERT INTO repository_packages(repository_id,ref_name,ecosystem,name,name_lower,version,scope,manifest_path,commit_id) VALUES('r1','main','go',?,?,?,?,?,'4fa21bd')`,
+			name, strings.ToLower(name), version, scope, path)
+	}
+	add("github.com/gin-gonic/gin", "v1.10.0", "direct", "go.mod")
+	add("github.com/stretchr/testify", "v1.9.0", "direct", "go.mod")
+	add("golang.org/x/sync", "v0.10.0", "transitive", "go.mod")
+	// The same package resolved in the lock file: it must not appear twice.
+	add("github.com/gin-gonic/gin", "v1.10.0", "resolved", "go.sum")
+
+	out := call(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get-repository-map","arguments":{"libraryId":"/kcb/clustara"}}}`)
+	text := out["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "Stack (2 direct dependencies)") {
+		t.Fatalf("the stack must be counted from direct declarations only:\n%s", text)
+	}
+	if !strings.Contains(text, "github.com/gin-gonic/gin") || !strings.Contains(text, "v1.10.0") {
+		t.Fatalf("a direct dependency is missing:\n%s", text)
+	}
+	// A transitive package and a lock-file entry are noise in an orientation.
+	if strings.Contains(text, "golang.org/x/sync") {
+		t.Fatalf("a transitive dependency must not be listed as the stack:\n%s", text)
+	}
+	if strings.Count(text, "github.com/gin-gonic/gin") != 1 {
+		t.Fatalf("the resolved copy must not duplicate the declaration:\n%s", text)
+	}
+
+	// A repository with no inventory yet keeps the previous output shape. The
+	// tool cache is cleared first: this asserts the rendering, not the cache.
+	must(`DELETE FROM repository_packages WHERE repository_id='r1'`)
+	s.cacheMu.Lock()
+	s.cache = map[string]cacheEntry{}
+	s.cacheMu.Unlock()
+	bare := call(t, s, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get-repository-map","arguments":{"libraryId":"/kcb/clustara"}}}`)
+	text = bare["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if strings.Contains(text, "Stack (") {
+		t.Fatalf("an uninventoried repository must not claim an empty stack:\n%s", text)
+	}
+}

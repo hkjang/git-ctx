@@ -309,6 +309,20 @@ type RepositoryMap struct {
 	// expects to be worked in. An agent that reads them writes code that fits
 	// the project instead of code that merely compiles.
 	Conventions []string
+	// Stack lists the third-party packages this repository declares, which is
+	// what an agent needs before writing a line: the libraries already in use
+	// decide how the code should be written, and reaching for a different HTTP
+	// client or test framework than the project uses is a review comment
+	// waiting to happen.
+	Stack []StackEntry
+	// StackTotal is how many direct declarations exist, so a trimmed list does
+	// not read as the whole stack.
+	StackTotal int
+}
+
+// StackEntry is one declared dependency of a repository.
+type StackEntry struct {
+	Ecosystem, Name, Version string
 }
 
 type DependencyResult struct {
@@ -388,7 +402,41 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 		return RepositoryMap{}, err
 	}
 	result.Conventions = s.conventionFiles(ctx, repositoryID, ref)
+	result.Stack, result.StackTotal = s.repositoryStack(ctx, repositoryID, ref)
 	return result, nil
+}
+
+// stackListLimit bounds the stack shown in a map. It is an orientation, not the
+// inventory: find-dependency-usage answers the exhaustive question.
+const stackListLimit = 25
+
+// repositoryStack lists the direct third-party dependencies of a ref. Resolved
+// lock-file entries are deliberately excluded: a transitive tree is noise when
+// the question is "what does this project build on".
+func (s *Service) repositoryStack(ctx context.Context, repositoryID, ref string) ([]StackEntry, int) {
+	var total int
+	_ = s.store.DB.QueryRowContext(ctx, s.store.Rebind(
+		`SELECT COUNT(*) FROM repository_packages WHERE repository_id=? AND ref_name=? AND scope<>'resolved' AND scope<>'transitive'`),
+		repositoryID, ref).Scan(&total)
+	if total == 0 {
+		return nil, 0
+	}
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(
+		`SELECT ecosystem,name,version FROM repository_packages
+WHERE repository_id=? AND ref_name=? AND scope<>'resolved' AND scope<>'transitive'
+ORDER BY ecosystem,name LIMIT ?`), repositoryID, ref, stackListLimit)
+	if err != nil {
+		return nil, total
+	}
+	defer rows.Close()
+	var out []StackEntry
+	for rows.Next() {
+		var entry StackEntry
+		if rows.Scan(&entry.Ecosystem, &entry.Name, &entry.Version) == nil {
+			out = append(out, entry)
+		}
+	}
+	return out, total
 }
 
 // conventionFileNames are the files that describe how to contribute to a

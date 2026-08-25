@@ -320,6 +320,21 @@ func formatRepositoryMap(item search.RepositoryMap) string {
 	}
 	pretty, _ := json.MarshalIndent(decoded, "", "  ")
 	text := fmt.Sprintf("## Repository Map\n\n- Library ID: %s\n- Ref: %s\n- Commit: %s\n\n```json\n%s\n```\n", item.LibraryID, item.Ref, item.CommitID, pretty)
+	if len(item.Stack) > 0 {
+		// The libraries a project already uses decide how new code in it should be
+		// written, so they belong in the orientation rather than a separate call.
+		text += fmt.Sprintf("\n### Stack (%d direct dependencies)\n\nWrite new code with these; do not introduce an alternative without checking.\n", item.StackTotal)
+		for _, entry := range item.Stack {
+			version := entry.Version
+			if version == "" {
+				version = "unspecified"
+			}
+			text += fmt.Sprintf("- `%s` %s (%s)\n", entry.Name, version, entry.Ecosystem)
+		}
+		if item.StackTotal > len(item.Stack) {
+			text += fmt.Sprintf("- …%d more; find-dependency-usage lists them in full.\n", item.StackTotal-len(item.Stack))
+		}
+	}
 	if len(item.Conventions) > 0 {
 		text += "\n### Project conventions\n\nRead these before writing code for this repository; use read-file.\n"
 		for _, path := range item.Conventions {
