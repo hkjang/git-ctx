@@ -275,7 +275,7 @@ var registry = []tool{
 	},
 	{
 		name:        toolcatalog.FindCodeOwner,
-		description: "Ranks the people who have worked on a file or directory, weighted so recent work outranks old work. Use it to find who to ask before changing unfamiliar code. git blame names whoever touched a line last, which is often whoever ran a formatter; this counts sustained involvement and reports the commit count and dates behind each name.",
+		description: "Answers who owns a file or directory. A CODEOWNERS declaration is reported first, with the rule that matched, because it is an answer someone wrote down on purpose; below it the people who have actually worked there are ranked, weighted so recent work outranks old work. git blame names whoever touched a line last, which is often whoever ran a formatter; this counts sustained involvement and reports the commit count and dates behind each name. The declaration still answers when the source server cannot be reached.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"path"}, "properties": map[string]any{
 			"path":       map[string]string{"type": "string", "description": "Repository-relative file or directory, for example internal/search or internal/search/service.go"},
 			"libraryId":  map[string]string{"type": "string", "description": "Library ID; required when the path exists in more than one repository"},

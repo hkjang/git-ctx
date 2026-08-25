@@ -37,7 +37,11 @@ type OwnerResult struct {
 // OwnershipResult answers a who-knows-this question for one path.
 type OwnershipResult struct {
 	LibraryID, Ref, Path string
-	Owners               []OwnerResult
+	// Declared are the CODEOWNERS rules covering this path. A declaration is an
+	// answer someone wrote down on purpose, so it leads; the commit ranking
+	// below it is the evidence of who has actually been working there.
+	Declared []OwnerDeclaration
+	Owners   []OwnerResult
 	// Examined is how many commits the ranking is based on. A ranking drawn from
 	// four commits deserves less confidence than one drawn from two hundred, and
 	// the caller cannot tell without being told.
@@ -70,20 +74,45 @@ func (s *Service) FindOwners(ctx context.Context, principals []string, libraryID
 	if limit < 1 || limit > 20 {
 		limit = 5
 	}
+	// Resolved first, and separately from the history call: the declaration is
+	// indexed here and must still answer when the source server cannot.
+	target, resolveErr := s.resolveRepositoryPath(ctx, principals, libraryID, repository, filePath, ref)
+	result := OwnershipResult{LibraryID: libraryID, Ref: ref, Path: filePath}
+	if resolveErr == nil {
+		result.LibraryID, result.Ref, result.Path = target.libraryID, target.refName, target.path
+		declared, source, declaredErr := s.declaredOwners(ctx, principals, target.repositoryID, target.refName, target.path)
+		switch {
+		case declaredErr != nil:
+			result.Diagnostics = append(result.Diagnostics, "codeowners: "+declaredErr.Error())
+		case len(declared) > 0:
+			result.Declared = declared
+			result.Diagnostics = append(result.Diagnostics,
+				fmt.Sprintf("codeowners: %s 의 규칙 %d건이 이 경로를 덮습니다. 마지막 규칙이 우선합니다.", source, len(declared)))
+		}
+	}
+
 	// The history call applies the repository ACL, so ownership cannot reveal
 	// activity in a repository the caller may not read.
 	history, err := s.FileHistory(ctx, principals, libraryID, repository, filePath, ref, 200)
 	if err != nil {
+		// A declared owner is an answer on its own. Failing the whole call
+		// because the source server could not be reached would throw away the
+		// part of the answer this platform already holds.
+		if len(result.Declared) > 0 {
+			result.Diagnostics = append(result.Diagnostics,
+				"history: 커밋 이력을 읽지 못해 선언된 소유자만 답합니다: "+err.Error())
+			return result, nil
+		}
 		return OwnershipResult{}, err
 	}
-
-	result := OwnershipResult{
-		LibraryID: history.LibraryID, Ref: history.Ref, Path: history.Path,
-		Examined: len(history.Commits), Diagnostics: history.Diagnostics,
-	}
+	result.LibraryID, result.Ref, result.Path = history.LibraryID, history.Ref, history.Path
+	result.Examined = len(history.Commits)
+	result.Diagnostics = append(result.Diagnostics, history.Diagnostics...)
 	if len(history.Commits) == 0 {
-		result.Diagnostics = append(result.Diagnostics,
-			"이 경로에 대한 커밋 이력이 없습니다. 경로가 맞는지, 저장소가 연결돼 있는지 확인하세요.")
+		if len(result.Declared) == 0 {
+			result.Diagnostics = append(result.Diagnostics,
+				"이 경로에 대한 커밋 이력이 없습니다. 경로가 맞는지, 저장소가 연결돼 있는지 확인하세요.")
+		}
 		return result, nil
 	}
 
@@ -157,9 +186,27 @@ func FormatOwners(result OwnershipResult) string {
 	if result.LibraryID != "" {
 		fmt.Fprintf(&out, "%s · %s\n\n", result.LibraryID, result.Ref)
 	}
+	if len(result.Declared) > 0 {
+		out.WriteString("## 선언된 소유자 (CODEOWNERS)\n\n")
+		// Last match wins, so the effective rule is stated as such and the rules
+		// it overrode are kept visible — that is how a reader checks the answer.
+		effective := result.Declared[len(result.Declared)-1]
+		fmt.Fprintf(&out, "- **%s** — 규칙 `%s`", strings.Join(effective.Owners, ", "), effective.Pattern)
+		if effective.Section != "" {
+			fmt.Fprintf(&out, " · 섹션 %s", effective.Section)
+		}
+		fmt.Fprintf(&out, " · %s\n", effective.Source)
+		for _, item := range result.Declared[:len(result.Declared)-1] {
+			fmt.Fprintf(&out, "  - (덮임) %s — `%s`\n", strings.Join(item.Owners, ", "), item.Pattern)
+		}
+		out.WriteString("\n")
+	}
 	if len(result.Owners) == 0 {
-		out.WriteString("순위를 매길 커밋 이력이 없습니다.\n")
+		if len(result.Declared) == 0 {
+			out.WriteString("순위를 매길 커밋 이력이 없습니다.\n")
+		}
 	} else {
+		out.WriteString("## 최근 작업자\n\n")
 		fmt.Fprintf(&out, "최근 커밋 %d건을 기준으로, 반감기 %d일의 최신성 가중치를 적용했습니다.\n\n",
 			result.Examined, int(ownershipHalfLifeDays))
 		for index, owner := range result.Owners {

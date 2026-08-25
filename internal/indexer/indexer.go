@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -36,6 +37,26 @@ const (
 	embeddingBatchSize    = 32
 	indexProgressInterval = 25
 )
+
+// PolicyChangedRevision marks a ref whose policy was edited since it was
+// indexed. It can never equal a real fingerprint, so the next run re-reads the
+// ref even though its commit has not moved.
+const PolicyChangedRevision = "policy-changed"
+
+// Revision fingerprints the policy the content was built with. A ref whose
+// commit has not moved is normally left alone, which is right until an operator
+// changes what may be indexed: the stored chunks then reflect a policy nobody
+// is using any more, and a manual reindex reports "0 files" because the commit
+// is unchanged. Comparing this value makes a policy change a reason to re-read,
+// exactly as an embedding model change already is.
+func (p Policy) Revision() string {
+	extensions := append([]string(nil), p.IncludeExtensions...)
+	prefixes := append([]string(nil), p.ExcludePrefixes...)
+	sort.Strings(extensions)
+	sort.Strings(prefixes)
+	sum := sha256.Sum256([]byte(strings.Join(extensions, ",") + "\x00" + strings.Join(prefixes, ",") + "\x00" + strconv.FormatInt(p.MaxFileBytes, 10)))
+	return hex.EncodeToString(sum[:8])
+}
 
 // DefaultPolicy covers the languages and configuration formats found in a normal
 // enterprise repository. The list used to stop at a handful of extensions, so a
@@ -297,14 +318,20 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 	}
 	previousCommit := ""
 	previousEmbeddingRevision := ""
-	err := i.store.DB.QueryRowContext(ctx, i.store.Rebind(`SELECT commit_id,embedding_revision FROM repository_ref_states WHERE repository_id=? AND ref_name=?`), repoID, ref.Name).Scan(&previousCommit, &previousEmbeddingRevision)
+	previousPolicyRevision := ""
+	policyRevision := i.policy.Revision()
+	err := i.store.DB.QueryRowContext(ctx, i.store.Rebind(`SELECT commit_id,embedding_revision,policy_revision FROM repository_ref_states WHERE repository_id=? AND ref_name=?`), repoID, ref.Name).Scan(&previousCommit, &previousEmbeddingRevision, &previousPolicyRevision)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = i.store.DB.QueryRowContext(ctx, i.store.Rebind(`SELECT commit_id FROM document_chunks WHERE repository_id=? AND ref_name=? ORDER BY indexed_at DESC LIMIT 1`), repoID, ref.Name).Scan(&previousCommit)
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fail(err)
 	}
-	if previousCommit != "" && previousCommit == ref.LatestCommit && previousEmbeddingRevision == embeddingRevision {
+	// An empty stored policy revision is a ref indexed before this was recorded.
+	// Treating that as a mismatch would re-read every repository on upgrade, so
+	// it is accepted as "unknown but current" until the policy next changes.
+	policyChanged := previousPolicyRevision != "" && previousPolicyRevision != policyRevision
+	if previousCommit != "" && previousCommit == ref.LatestCommit && previousEmbeddingRevision == embeddingRevision && !policyChanged {
 		var totalChunks, embeddedChunks int
 		tx, txErr := i.store.DB.BeginTx(ctx, nil)
 		if txErr != nil {
@@ -320,9 +347,9 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 			return fail(err)
 		}
 		embeddingStatus, embeddingError := describeEmbeddingState(embeddingRevision, totalChunks, embeddedChunks, nil)
-		_, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,indexed_at,embedding_revision,total_chunks,embedded_chunks,embedding_status,embedding_error)
-VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET commit_id=excluded.commit_id,indexed_at=excluded.indexed_at,embedding_revision=excluded.embedding_revision,total_chunks=excluded.total_chunks,embedded_chunks=excluded.embedded_chunks,embedding_status=excluded.embedding_status,embedding_error=excluded.embedding_error`),
-			repoID, ref.Name, ref.LatestCommit, time.Now().UTC(), embeddingRevision, totalChunks, embeddedChunks, embeddingStatus, embeddingError)
+		_, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,indexed_at,embedding_revision,policy_revision,total_chunks,embedded_chunks,embedding_status,embedding_error)
+VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET commit_id=excluded.commit_id,indexed_at=excluded.indexed_at,embedding_revision=excluded.embedding_revision,policy_revision=excluded.policy_revision,total_chunks=excluded.total_chunks,embedded_chunks=excluded.embedded_chunks,embedding_status=excluded.embedding_status,embedding_error=excluded.embedding_error`),
+			repoID, ref.Name, ref.LatestCommit, time.Now().UTC(), embeddingRevision, policyRevision, totalChunks, embeddedChunks, embeddingStatus, embeddingError)
 		if err != nil {
 			_ = tx.Rollback()
 			return fail(err)
@@ -342,7 +369,10 @@ VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET comm
 	var files []source.File
 	removedPaths := map[string]bool{}
 	upsertPaths := map[string]bool{}
-	forceFull := previousCommit == ref.LatestCommit && previousEmbeddingRevision != embeddingRevision
+	// A changed policy invalidates the whole ref, not the files a diff names:
+	// the paths that were excluded before are exactly the ones a diff will not
+	// mention.
+	forceFull := previousCommit == ref.LatestCommit && (previousEmbeddingRevision != embeddingRevision || policyChanged)
 	snapshotRef := ref.LatestCommit
 	if snapshotRef == "" {
 		snapshotRef = ref.Name
@@ -767,9 +797,9 @@ FROM repository_packages_staging WHERE generation_id=?`), generationID); err != 
 		return fail(err)
 	}
 	embeddingStatus, embeddingError := describeEmbeddingState(embeddingRevision, totalChunks, embeddedChunks, embeddingWarnings)
-	if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,indexed_at,embedding_revision,total_chunks,embedded_chunks,embedding_status,embedding_error)
-VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET commit_id=excluded.commit_id,indexed_at=excluded.indexed_at,embedding_revision=excluded.embedding_revision,total_chunks=excluded.total_chunks,embedded_chunks=excluded.embedded_chunks,embedding_status=excluded.embedding_status,embedding_error=excluded.embedding_error`),
-		repoID, ref.Name, ref.LatestCommit, time.Now().UTC(), embeddingRevision, totalChunks, embeddedChunks, embeddingStatus, embeddingError); err != nil {
+	if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,indexed_at,embedding_revision,policy_revision,total_chunks,embedded_chunks,embedding_status,embedding_error)
+VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET commit_id=excluded.commit_id,indexed_at=excluded.indexed_at,embedding_revision=excluded.embedding_revision,policy_revision=excluded.policy_revision,total_chunks=excluded.total_chunks,embedded_chunks=excluded.embedded_chunks,embedding_status=excluded.embedding_status,embedding_error=excluded.embedding_error`),
+		repoID, ref.Name, ref.LatestCommit, time.Now().UTC(), embeddingRevision, policyRevision, totalChunks, embeddedChunks, embeddingStatus, embeddingError); err != nil {
 		_ = tx.Rollback()
 		return fail(err)
 	}

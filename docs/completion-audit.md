@@ -35,6 +35,24 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-25 v0.55.0 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./...                 PASS
+go vet ./... && go build ./...               PASS
+CODEOWNERS 선언 소유자 실인스턴스 확인          PASS
+정책 변경 후 동일 커밋 재색인 실측              PASS
+CODEOWNERS 패턴·섹션 파싱 시험                 PASS
+사용자·관리자 UI JavaScript parse·계약 시험    PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.55.0 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.55.0 빌드      PASS
+```
+
+이번 검증은 소유권 질문과 색인 정책을 실인스턴스에서 확인했다. 저장소가 CODEOWNERS 로
+이미 답을 적어 두었는데도 커밋 이력만 추정하고 있었고, 색인 정책을 바꿔도 커밋이
+움직이지 않으면 재색인이 0건으로 끝나 새 확장자가 반영되지 않았다.
+
 2026-08-25 v0.54.1 릴리스 전 검증 결과:
 
 ```text

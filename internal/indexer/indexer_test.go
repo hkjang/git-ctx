@@ -1006,3 +1006,73 @@ func TestATakenRepositoryPathIsExplainedNotDumped(t *testing.T) {
 		t.Fatalf("the existing repository was disturbed: %v", err)
 	}
 }
+
+// Changing what may be indexed has to change what is indexed. The ref's commit
+// does not move when an operator edits the policy, and that used to mean the
+// stored content kept reflecting the old policy — a manual reindex reported
+// "completed, 0 files" and the newly included files never appeared.
+func TestAPolicyChangeRebuildsTheRefAtTheSameCommit(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file:policy-revision?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+	feed := &incrementalSource{files: map[string]string{
+		"README.md":  "# Payments\n\nThe payment service.\n",
+		"service.go": "package main\n\nfunc GetPayment() error { return nil }\n",
+	}}
+	repo := source.Repository{ID: 7, ProjectKey: "core", Slug: "api", Name: "api", DefaultBranch: "main"}
+	refs := []source.Reference{{Name: "main", LatestCommit: "abc123"}}
+
+	markdownOnly := Policy{IncludeExtensions: []string{".md"}, MaxFileBytes: 1 << 20}
+	if err = New(s, markdownOnly).SyncRepository(ctx, feed, "gitlab", repo, refs); err != nil {
+		t.Fatal(err)
+	}
+	indexed := func() []string {
+		t.Helper()
+		rows, err := s.DB.Query(`SELECT DISTINCT file_path FROM document_chunks WHERE repository_id='gitlab:7' ORDER BY file_path`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var paths []string
+		for rows.Next() {
+			var path string
+			if err := rows.Scan(&path); err != nil {
+				t.Fatal(err)
+			}
+			paths = append(paths, path)
+		}
+		return paths
+	}
+	if got := indexed(); strings.Join(got, ",") != "README.md" {
+		t.Fatalf("the first run must honour the policy: %v", got)
+	}
+
+	// The same commit, indexed again under the same policy, is left alone.
+	before := feed.getFileCall
+	if err = New(s, markdownOnly).SyncRepository(ctx, feed, "gitlab", repo, refs); err != nil {
+		t.Fatal(err)
+	}
+	if feed.getFileCall != before {
+		t.Fatalf("an unchanged ref must not be re-read: %d reads", feed.getFileCall-before)
+	}
+
+	// Widening the policy re-reads the ref even though nothing was pushed.
+	widened := Policy{IncludeExtensions: []string{".md", ".go"}, MaxFileBytes: 1 << 20}
+	if err = New(s, widened).SyncRepository(ctx, feed, "gitlab", repo, refs); err != nil {
+		t.Fatal(err)
+	}
+	if got := indexed(); strings.Join(got, ",") != "README.md,service.go" {
+		t.Fatalf("the widened policy did not take effect: %v", got)
+	}
+
+	// Narrowing it again drops what is no longer allowed.
+	if err = New(s, markdownOnly).SyncRepository(ctx, feed, "gitlab", repo, refs); err != nil {
+		t.Fatal(err)
+	}
+	if got := indexed(); strings.Join(got, ",") != "README.md" {
+		t.Fatalf("the narrowed policy left content behind: %v", got)
+	}
+}

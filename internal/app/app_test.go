@@ -19,6 +19,7 @@ import (
 
 	"git-ctx/internal/auth"
 	"git-ctx/internal/config"
+	"git-ctx/internal/indexer"
 	runtimelogging "git-ctx/internal/logging"
 	"git-ctx/internal/observability"
 	"git-ctx/internal/recovery"
@@ -2808,5 +2809,59 @@ func TestWebhookFailuresAreDistinguishedByStatus(t *testing.T) {
 	a.store.DB.Close()
 	if broken := post(`{"project":{"id":4243},"ref":"refs/heads/main"}`); broken.Code != http.StatusInternalServerError {
 		t.Fatalf("a failure on this side must be retryable: status=%d body=%s", broken.Code, broken.Body.String())
+	}
+}
+
+// Saving an index policy that nothing acts on is how "I added the extension and
+// nothing happened" is produced: the stored content was built by the old policy
+// and no future push rebuilds it, because the ref's commit does not move when a
+// policy changes.
+func TestSavingAnIndexPolicyQueuesTheRebuild(t *testing.T) {
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:policy-rebuild?mode=memory&cache=shared&_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if _, err = a.store.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,enabled) VALUES('gitlab:1','core','api','api','','gitlab','1','/core/api','main',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.store.DB.Exec(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id) VALUES('gitlab:1','main','abc'),('gitlab:1','release','def')`); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/admin/repositories/gitlab:1/policy",
+		strings.NewReader(`{"includeExtensions":[".go",".md",".tf"],"excludePrefixes":["vendor/"],"maxFileBytes":1048576}`))
+	request.Header.Set("Authorization", "Bearer bootstrap")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	a.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var saved struct {
+		QueuedRefs        []string `json:"queuedRefs"`
+		IncludeExtensions []string `json:"includeExtensions"`
+	}
+	if err = json.Unmarshal(recorder.Body.Bytes(), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(saved.QueuedRefs, ",") != "main,release" {
+		t.Fatalf("every indexed ref must be queued: %#v", saved)
+	}
+	if strings.Join(saved.IncludeExtensions, ",") != ".go,.md,.tf" {
+		t.Fatalf("the saved policy must still be returned: %#v", saved)
+	}
+	var jobs int
+	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM index_jobs WHERE repository_id='gitlab:1' AND kind='policy' AND status='pending'`).Scan(&jobs); err != nil || jobs != 2 {
+		t.Fatalf("jobs=%d err=%v", jobs, err)
+	}
+	// The queued job only rebuilds if the ref is marked as built by a different
+	// policy. A ref indexed before fingerprints existed carries an empty one,
+	// which the indexer reads as current, so the mark has to be written here.
+	var marked int
+	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM repository_ref_states WHERE repository_id='gitlab:1' AND policy_revision=?`, indexer.PolicyChangedRevision).Scan(&marked); err != nil || marked != 2 {
+		t.Fatalf("refs marked=%d err=%v", marked, err)
 	}
 }

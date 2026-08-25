@@ -335,7 +335,51 @@ func (a *App) putRepositoryPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.audit(r, p, "repository.policy_update", "repository", r.PathValue("id"), "success", policy)
-	jsonOut(w, 200, policy)
+	// A saved policy that nothing acts on is the shape of "I added the extension
+	// and nothing happened": the stored content was built by the old policy and
+	// the ref's commit has not moved, so no future push would rebuild it either.
+	// Every indexed ref of this repository is queued so the change takes effect.
+	queued := a.queuePolicyRebuild(r, r.PathValue("id"))
+	jsonOut(w, 200, map[string]any{"includeExtensions": policy.IncludeExtensions, "excludePrefixes": policy.ExcludePrefixes,
+		"maxFileBytes": policy.MaxFileBytes, "queuedRefs": queued})
+}
+
+// queuePolicyRebuild enqueues one job per indexed ref, and the default branch
+// when nothing is indexed yet. It reports how many were queued so the caller can
+// say so rather than leaving the operator to guess.
+func (a *App) queuePolicyRebuild(r *http.Request, repositoryID string) []string {
+	rows, err := a.store.DB.QueryContext(r.Context(), a.store.Rebind(`SELECT ref_name FROM repository_ref_states WHERE repository_id=? ORDER BY ref_name`), repositoryID)
+	var refs []string
+	if err == nil {
+		for rows.Next() {
+			var ref string
+			if rows.Scan(&ref) == nil {
+				refs = append(refs, ref)
+			}
+		}
+		rows.Close()
+	}
+	if len(refs) == 0 {
+		var defaultRef string
+		if a.store.DB.QueryRowContext(r.Context(), a.store.Rebind(`SELECT default_branch FROM repositories WHERE id=? AND enabled=1`), repositoryID).Scan(&defaultRef) == nil && defaultRef != "" {
+			refs = append(refs, defaultRef)
+		}
+	}
+	// The stored fingerprint is what tells the indexer the content was built by
+	// a different policy. A ref indexed before fingerprints existed carries an
+	// empty one, which is deliberately read as "current" so an upgrade does not
+	// re-read the whole estate — so the change is marked here, where it is known
+	// that the policy really did change.
+	_, _ = a.store.DB.ExecContext(r.Context(), a.store.Rebind(`UPDATE repository_ref_states SET policy_revision=? WHERE repository_id=?`),
+		indexer.PolicyChangedRevision, repositoryID)
+	queued := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		jobID, _ := randomToken(18)
+		if _, err := a.store.DB.ExecContext(r.Context(), a.store.Rebind(`INSERT INTO index_jobs(id,repository_id,ref_name,kind,status) VALUES(?,?,?,'policy','pending')`), jobID, repositoryID, ref); err == nil {
+			queued = append(queued, ref)
+		}
+	}
+	return queued
 }
 func (a *App) indexJobs(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.store.DB.QueryContext(r.Context(), `SELECT id,repository_id,ref_name,kind,status,attempts,error_message,files_processed,created_at,started_at,completed_at FROM index_jobs ORDER BY created_at DESC LIMIT 500`)

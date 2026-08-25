@@ -4434,17 +4434,24 @@ function setupIndexPolicyDialog() {
     event.preventDefault();
     const list = (value) => value.split(",").map((item) => item.trim()).filter(Boolean);
     try {
-      await api(`/api/v1/admin/repositories/${encodeURIComponent(activeIndexPolicy)}/policy`, {
+      // 저장하면 서버가 색인된 ref마다 재색인 작업을 만든다. 여기서 따로
+      // 작업을 하나 더 넣으면 같은 ref를 두 번 읽게 된다.
+      const saved = (await api(`/api/v1/admin/repositories/${encodeURIComponent(activeIndexPolicy)}/policy`, {
         method: "PUT",
         body: JSON.stringify({
           includeExtensions: list($("#index-policy-extensions").value),
           excludePrefixes: list($("#index-policy-excludes").value),
           maxFileBytes: Number($("#index-policy-max-bytes").value),
         }),
-      });
-      await api(`/api/v1/admin/repositories/${encodeURIComponent(activeIndexPolicy)}/index`, { method: "POST", body: "{}" });
+      })) || {};
+      const queued = Array.isArray(saved.queuedRefs) ? saved.queuedRefs : [];
       dialog.close();
-      showAdmin("색인 정책을 저장하고 재색인 작업을 생성했습니다.", true);
+      showAdmin(
+        queued.length
+          ? `색인 정책을 저장하고 ref ${queued.join(", ")} 재색인 작업을 생성했습니다.`
+          : "색인 정책을 저장했습니다. 색인된 ref가 없어 재색인 작업은 만들지 않았습니다.",
+        true,
+      );
       refreshOps(activeCapabilities);
     } catch (error) {
       reportError(error, "색인 정책 저장");
