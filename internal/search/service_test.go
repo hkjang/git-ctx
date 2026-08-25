@@ -2175,3 +2175,61 @@ func TestIndexedSearchFindsTheSameContentThroughEitherPath(t *testing.T) {
 		t.Fatalf("the lookup leaked past the ACL: %#v", denied.Hits)
 	}
 }
+
+// Every path that filters chunks by words has to give the same answer whether
+// it reaches the index or scans, including the fallback that answers
+// search-semantic when embeddings are off — which on an on-premises install is
+// the usual case, not the exception.
+func TestSemanticFallbackAndDocsFindTheSameContentThroughEitherPath(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:lexical-parity?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.DB.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,enabled) VALUES('gitlab:1','core','api','api','','gitlab','1','/core/api','main',1)`)
+	exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('gitlab:1','alice','read')`)
+	exec(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id) VALUES('gitlab:1','main','abc')`)
+	exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES
+('c1','gitlab:1','main','abc','docs/settlement.md',1,20,'Settlement runbook','document','정산 배치는 settleInvoice 를 호출한다.','h1'),
+('c2','gitlab:1','main','abc','docs/cache.md',1,20,'Cache','document','캐시는 warmCache 로 채운다.','h2')`)
+
+	service := New(db)
+	for _, query := range []string{"settleInvoice", "settlement", "settle", "invoice", "정산"} {
+		semantic, err := service.SemanticSearch(ctx, []string{"alice"}, query, "", "", 10)
+		if err != nil {
+			t.Fatalf("semantic %q: %v", query, err)
+		}
+		if len(semantic.Hits) == 0 || semantic.Hits[0].FilePath != "docs/settlement.md" {
+			t.Fatalf("semantic %q found %#v (full text: %v)", query, semantic.Hits, db.FullTextAvailable())
+		}
+	}
+	// query-docs ranks whole words; a fragment has never matched there and this
+	// change does not alter that. What must hold is that the words it did match
+	// still match now that the candidates come from the index.
+	for _, query := range []string{"settleInvoice", "settlement", "정산"} {
+		docs, err := service.Query(ctx, []string{"alice"}, "/core/api", query)
+		if err != nil {
+			t.Fatalf("docs %q: %v", query, err)
+		}
+		if !strings.Contains(docs, "settlement") {
+			t.Fatalf("docs %q missed the file:\n%s", query, docs)
+		}
+	}
+	// A term that appears nowhere stays empty on either path.
+	absent, err := service.SemanticSearch(ctx, []string{"alice"}, "kubernetes", "", "", 10)
+	if err == nil && len(absent.Hits) != 0 {
+		t.Fatalf("unrelated term matched: %#v", absent.Hits)
+	}
+	// The ACL applies to the lookup as it does to the scan.
+	denied, err := service.SemanticSearch(ctx, []string{"mallory"}, "settleInvoice", "", "", 10)
+	if err == nil && len(denied.Hits) != 0 {
+		t.Fatalf("the lookup leaked past the ACL: %#v", denied.Hits)
+	}
+}

@@ -35,6 +35,21 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.56.2 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./... (FTS5/태그 없음)  PASS
+어휘 경로 동등성 시험(색인·훑기)               PASS
+20만 청크 지연 실측                            PASS
+go vet ./... && go build ./...               PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.56.2 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.56.2 빌드      PASS
+```
+
+이번 검증에서 search-semantic 이 같은 코퍼스를 두 번 훑고 있던 것을 실측으로
+발견해 없앴다. 어휘 대체 경로와 query-docs 후보 선별도 인덱스를 쓰도록 옮겼다.
+
 2026-08-26 v0.56.1 릴리스 전 검증 결과:
 
 ```text

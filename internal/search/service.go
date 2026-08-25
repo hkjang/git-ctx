@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1354,6 +1355,26 @@ func (s *Service) indexedSourceHits(ctx context.Context, principals []string, qu
 	return out, capped, nil
 }
 
+// fullTextRestriction narrows any query over document_chunks to the rows the
+// index says match. It is written as a restriction rather than a join so every
+// caller — catalogue-wide search, the semantic fallback, a repository-scoped
+// documentation query — reaches the same index without restating its own query.
+// ok is false when there is no index or the terms cannot be looked up, and the
+// caller then filters the way it always did.
+func (s *Service) fullTextRestriction(alias string, terms []string) (string, []any, bool) {
+	if !s.store.FullTextAvailable() {
+		return "", nil, false
+	}
+	match := s.store.FullTextQuery(terms)
+	if match == "" {
+		return "", nil, false
+	}
+	if s.store.Driver() == "postgres" {
+		return alias + `.search_vector @@ to_tsquery('simple',?)`, []any{match}, true
+	}
+	return alias + `.rowid IN (SELECT rowid FROM document_chunks_fts WHERE document_chunks_fts MATCH ?)`, []any{match}, true
+}
+
 // scanCandidates builds the substring-scan form of the candidate query, which
 // is both the fallback for a store without an index and the way a match inside
 // a word is still found.
@@ -2283,26 +2304,38 @@ WHERE r.enabled=1 AND ` + predicate
 		args = append(args, sourceType)
 	}
 	terms := unique(embedding.Tokens(query))
+	// This fallback is what a caller gets whenever embeddings are off, which on
+	// an on-premises install is most of the time, so it reaches the index the
+	// same way the code search does: look the terms up, and scan only to top up
+	// what a word index cannot match inside a word.
+	scanClause, scanArgs := "", append([]any(nil), args...)
 	if len(terms) > 0 {
-		statement += ` AND (`
+		scanClause = ` AND (`
 		for index, term := range terms[:min(len(terms), 6)] {
 			if index > 0 {
-				statement += ` OR `
+				scanClause += ` OR `
 			}
-			statement += `LOWER(c.file_path || ' ' || c.heading || ' ' || c.content) LIKE ?`
-			args = append(args, "%"+term+"%")
+			scanClause += `LOWER(c.file_path || ' ' || c.heading || ' ' || c.content) LIKE ?`
+			scanArgs = append(scanArgs, "%"+term+"%")
 		}
-		statement += `)`
+		scanClause += `)`
 	}
-	statement += ` LIMIT ?`
-	args = append(args, indexedScanLimit)
-	rows, localErr := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
 	scanned := 0
-	if localErr == nil {
+	seen := map[string]bool{}
+	gather := func(clause string, clauseArgs []any) error {
+		rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement+clause+` LIMIT ?`), append(append([]any(nil), clauseArgs...), indexedScanLimit)...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
 		for rows.Next() {
 			scanned++
 			var hit SemanticHit
 			if rows.Scan(&hit.LibraryID, &hit.SourceType, &hit.Ref, &hit.CommitID, &hit.FilePath, &hit.Heading, &hit.Content, &hit.LineStart, &hit.LineEnd) != nil {
+				continue
+			}
+			key := hit.LibraryID + "\x00" + hit.Ref + "\x00" + hit.FilePath + "\x00" + strconv.Itoa(hit.LineStart)
+			if seen[key] {
 				continue
 			}
 			haystack := strings.ToLower(hit.FilePath + " " + hit.Heading + " " + hit.Content)
@@ -2310,10 +2343,22 @@ WHERE r.enabled=1 AND ` + predicate
 				hit.Score += float64(strings.Count(haystack, term))
 			}
 			if hit.Score > 0 {
+				seen[key] = true
 				result.Hits = append(result.Hits, hit)
 			}
 		}
-		rows.Close()
+		return rows.Err()
+	}
+	var localErr error
+	usedIndex := false
+	if clause, matchArgs, ok := s.fullTextRestriction("c", terms); ok {
+		localErr = gather(` AND `+clause, append(append([]any(nil), args...), matchArgs...))
+		usedIndex = localErr == nil
+	}
+	if localErr == nil && (!usedIndex || len(result.Hits) < limit) {
+		localErr = gather(scanClause, scanArgs)
+	}
+	if localErr == nil {
 		sort.SliceStable(result.Hits, func(i, j int) bool { return result.Hits[i].Score > result.Hits[j].Score })
 		if len(result.Hits) > limit {
 			result.Hits = result.Hits[:limit]
@@ -2332,7 +2377,11 @@ WHERE r.enabled=1 AND ` + predicate
 	if len(result.Hits) >= limit {
 		return result, nil
 	}
-	code, err := s.SearchCode(ctx, principals, query, sourceType, "", repository, "", limit)
+	// Only the live source query is asked for here. Calling search-code would
+	// repeat the index lookup and the scan this function has just done over the
+	// same corpus, which on a large catalogue is the whole cost of the call
+	// paid twice — measured at nearly a second for a term that matches nothing.
+	remote, err := s.SearchSource(ctx, principals, query, sourceType, "", repository, "", limit)
 	if err != nil {
 		if len(result.Hits) > 0 {
 			result.Diagnostics = append(result.Diagnostics, "source search: "+err.Error())
@@ -2340,17 +2389,14 @@ WHERE r.enabled=1 AND ` + predicate
 		}
 		return SemanticSearch{}, err
 	}
-	result.Diagnostics = append(result.Diagnostics, code.Diagnostics...)
-	if code.Warning != "" {
-		result.Diagnostics = append(result.Diagnostics, "source search: "+code.Warning)
-	}
-	seen := map[string]bool{}
+	code := CodeSearchResult{Hits: remote}
+	merged := map[string]bool{}
 	for _, item := range result.Hits {
-		seen[item.LibraryID+"\x00"+item.Ref+"\x00"+item.FilePath] = true
+		merged[item.LibraryID+"\x00"+item.Ref+"\x00"+item.FilePath] = true
 	}
 	for index, item := range code.Hits {
 		key := item.LibraryID + "\x00" + item.Ref + "\x00" + item.Path
-		if seen[key] {
+		if merged[key] {
 			continue
 		}
 		result.Hits = append(result.Hits, SemanticHit{
@@ -3878,16 +3924,32 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 			args = append(args, id)
 		}
 	} else if len(terms) > 0 {
-		candidateSQL += " AND ("
-		limit := min(len(terms), 5)
-		for n, term := range terms[:limit] {
-			if n > 0 {
-				candidateSQL += " OR "
+		// A monorepo's ref can hold a hundred thousand chunks, so this narrowing
+		// uses the index when there is one. The scan stays as the fallback and
+		// as the way a match inside a word is still found.
+		indexed := false
+		if clause, matchArgs, ok := s.fullTextRestriction("document_chunks", terms); ok {
+			var candidates int
+			probe := `SELECT COUNT(*) FROM document_chunks WHERE repository_id=? AND ref_name=? AND ` + clause
+			probeArgs := append([]any{repoID, ref}, matchArgs...)
+			if s.store.DB.QueryRowContext(ctx, s.store.Rebind(probe), probeArgs...).Scan(&candidates) == nil && candidates > 0 {
+				candidateSQL += " AND " + clause
+				args = append(args, matchArgs...)
+				indexed = true
 			}
-			candidateSQL += "LOWER(heading || ' ' || content) LIKE ?"
-			args = append(args, "%"+term+"%")
 		}
-		candidateSQL += ")"
+		if !indexed {
+			candidateSQL += " AND ("
+			limit := min(len(terms), 5)
+			for n, term := range terms[:limit] {
+				if n > 0 {
+					candidateSQL += " OR "
+				}
+				candidateSQL += "LOWER(heading || ' ' || content) LIKE ?"
+				args = append(args, "%"+term+"%")
+			}
+			candidateSQL += ")"
+		}
 	}
 	candidateSQL += fmt.Sprintf(" LIMIT %d", cfg.CandidateLimit)
 	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(candidateSQL), args...)
