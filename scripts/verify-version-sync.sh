@@ -135,8 +135,13 @@ if [ -n "$version" ]; then
     block && $0 == "```" { exit }
     block { print }
   ' "$repository_root/docs/completion-audit.md")
-  check_values "docs/completion-audit.md" "version in newest release audit block" \
-    "$(printf '%s\n' "$newest_audit_block" | sed -n 's/.*v\([0-9][0-9A-Za-z.-]*\).*/\1/p')" 0
+  # The block records what was verified, and its Kustomize and Docker lines
+  # name the artifacts this release produces. Those lines must carry this
+  # version; the rest of the block is prose, and a note that mentions an older
+  # release — "upgraded from 0.50" — is a fact, not a stale version. Checking
+  # every number in the block made writing that fact break the release.
+  check_values "docs/completion-audit.md" "artifact version in newest release audit block" \
+    "$(printf '%s\n' "$newest_audit_block" | grep -E 'Kustomize|Docker' | sed -n 's/.*v\([0-9][0-9A-Za-z.-]*\).*/\1/p')" 2
 fi
 
 if [ "$failures" -ne 0 ]; then

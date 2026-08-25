@@ -35,6 +35,23 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.58.6 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./... (FTS5/태그 없음)  PASS
+릴리스 도구 시험(정합성·노트)                  PASS
+감사 블록의 옛 버전 언급 허용 시험             PASS
+산출물 줄 버전 불일치 시 실패 확인             PASS
+go vet ./... && go build ./...               PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.58.6 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.58.6 빌드      PASS
+```
+
+이번 릴리스는 절차 자체의 결함을 고쳤다. 정합성 검사가 감사 블록의 모든 버전을
+검사해, 업그레이드 확인 같은 사실을 적으면 릴리스가 깨졌다. 이제 산출물 줄만
+검사하고, 릴리스 스크립트가 커밋 확인 뒤에만 태그를 만든다.
+
 2026-08-26 v0.58.5 릴리스 전 검증 결과:
 
 ```text

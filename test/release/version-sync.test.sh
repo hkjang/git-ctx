@@ -43,6 +43,23 @@ printf '%s\n' \
 
 sh "$repository_root/scripts/verify-version-sync.sh" "$fixture" >/dev/null
 
+# A verification note that mentions an older release is a fact about the
+# upgrade path, not a stale version. Requiring every number in the block to
+# match the release turned writing that fact into a failed release twice.
+printf '%s\n' '이전 0.50 계열 데이터베이스에서 v0.50.0 로 만든 파일을 열어 확인했다.' \
+  >> "$fixture/docs/completion-audit.md"
+sh "$repository_root/scripts/verify-version-sync.sh" "$fixture" >/dev/null
+
+# The artifact lines are a different matter: a stale version there describes an
+# image nobody built.
+sed -i 's/Docker linux\/amd64·v1.2.3 빌드/Docker linux\/amd64·v1.2.2 빌드/' "$fixture/docs/completion-audit.md"
+if sh "$repository_root/scripts/verify-version-sync.sh" "$fixture" >"$fixture/out" 2>"$fixture/err"; then
+  echo "stale artifact version in the audit block was accepted" >&2
+  exit 1
+fi
+grep -F 'artifact version in newest release audit block is 1.2.2, expected 1.2.3' "$fixture/err" >/dev/null
+sed -i 's/Docker linux\/amd64·v1.2.2 빌드/Docker linux\/amd64·v1.2.3 빌드/' "$fixture/docs/completion-audit.md"
+
 sed -i 's/version: 1.2.3/version: 1.2.2/' "$fixture/docs/openapi.yaml"
 if sh "$repository_root/scripts/verify-version-sync.sh" "$fixture" >"$fixture/out" 2>"$fixture/err"; then
   echo "stale OpenAPI version was accepted" >&2
