@@ -47,6 +47,16 @@ func (a *App) authenticate(next http.Handler) http.Handler {
 		if raw == "" {
 			raw = r.Header.Get("X-API-Key")
 		}
+		// Several MCP clients and gateways can only send an Authorization
+		// header, and a key pasted there used to be checked against Keycloak
+		// and rejected with an error about a login system the caller never
+		// used. The key format identifies itself, so it is accepted wherever
+		// it arrives — and nothing else is treated as a key.
+		if raw == "" {
+			if bearer := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")); apikey.Looks(bearer) {
+				raw = bearer
+			}
+		}
 		if raw != "" {
 			info, err := a.keys.AuthenticateRequest(r.Context(), raw, a.requestIP(r))
 			if err != nil {

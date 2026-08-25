@@ -2716,3 +2716,50 @@ func TestEveryDocumentedEndpointIsRouted(t *testing.T) {
 		t.Fatalf("documented but unreachable: %v", missing)
 	}
 }
+
+// An MCP client that can only set an Authorization header used to be told its
+// key failed Keycloak validation — an error about a login system it never
+// touched. The key format identifies itself, so it is accepted wherever it
+// arrives, and nothing that is not a key reaches the API-key path.
+func TestAPIKeyIsAcceptedFromTheAuthorizationHeader(t *testing.T) {
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:bearer-api-key?mode=memory&cache=shared&_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if _, err = a.store.DB.Exec(`INSERT INTO users(id,subject,username,email,status) VALUES('u1','u1','agent','','active')`); err != nil {
+		t.Fatal(err)
+	}
+	_, secret, err := a.keys.Create(context.Background(), "u1", "cli", []string{"search-repositories"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(header, value string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/me", nil)
+		request.Header.Set(header, value)
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+	if result := call("Authorization", "Bearer "+secret); result.Code != http.StatusOK {
+		t.Fatalf("a key sent as a bearer token must authenticate: status=%d body=%s", result.Code, result.Body.String())
+	}
+	// The documented header keeps working exactly as before.
+	if result := call("CONTEXT7_API_KEY", secret); result.Code != http.StatusOK {
+		t.Fatalf("the documented header regressed: status=%d body=%s", result.Code, result.Body.String())
+	}
+	// A key that looks right but is not one must be rejected as a key, not sent
+	// to Keycloak, and must never authenticate.
+	rejected := call("Authorization", "Bearer bctx_live_AAAAAA_forged")
+	if rejected.Code != http.StatusUnauthorized || !strings.Contains(rejected.Body.String(), "API key") {
+		t.Fatalf("a forged key must be refused as a key: status=%d body=%s", rejected.Code, rejected.Body.String())
+	}
+	// Anything that is not shaped like a key still takes the identity path.
+	other := call("Authorization", "Bearer eyJhbGciOiJIUzI1NiJ9.e30.signature")
+	if other.Code != http.StatusUnauthorized || strings.Contains(other.Body.String(), "API key is invalid") {
+		t.Fatalf("a bearer token must not be treated as a key: status=%d body=%s", other.Code, other.Body.String())
+	}
+}

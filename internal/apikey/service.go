@@ -93,7 +93,7 @@ func (s *Service) CreateWithRestrictions(ctx context.Context, userID, name strin
 	if _, err = rand.Read(secret); err != nil {
 		return Key{}, "", err
 	}
-	plain := "bctx_live_" + prefix + "_" + base64.RawURLEncoding.EncodeToString(secret)
+	plain := PlainPrefix + prefix + "_" + base64.RawURLEncoding.EncodeToString(secret)
 	now := time.Now().UTC()
 	tx, err := s.store.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -163,6 +163,17 @@ func (s *Service) updateScopes(ctx context.Context, userID, id string, scopes []
 	}
 	return nil
 }
+
+// PlainPrefix opens every issued key. The format is self-identifying on
+// purpose: a caller that puts its key in the wrong header can be told what it
+// actually sent instead of being handed an error about a different credential
+// system.
+const PlainPrefix = "bctx_live_"
+
+// Looks reports whether a credential is shaped like a git-ctx API key. It says
+// nothing about whether the key is valid.
+func Looks(raw string) bool { return strings.HasPrefix(raw, PlainPrefix) }
+
 func (s *Service) Authenticate(ctx context.Context, raw string) (userID, keyID, prefix string, scopes []string, err error) {
 	info, err := s.AuthenticateRequest(ctx, raw, "")
 	return info.UserID, info.KeyID, info.Prefix, info.Scopes, err

@@ -28,7 +28,7 @@ Go 모듈형 모놀리스로 시작하되 API/MCP/indexer/scheduler 프로세스
 `mcp.strictCompatibility=true`일 때는 기존 Context7 도구 2개만 노출한다. 확장 및
 관리 도구는 API 키 Scope와 현재 사용자 역할을 모두 만족해야 하며, 관리자 도구는
 브라우저 세션이나 일반 OAuth 사용자 토큰이 아닌 사용자별 MCP API 키에서만 노출한다.
-| 인증 | Keycloak Bearer, `CONTEXT7_API_KEY`, `X-API-Key` |
+| 인증 | Keycloak Bearer, `CONTEXT7_API_KEY`, `X-API-Key`, `Authorization: Bearer <API 키>` |
 | Library ID | `/project/repository[/branch-or-tag]`, 소문자 정규형 |
 | DB | PostgreSQL 운영 기본, SQLite 개발·단일 노드 지원 |
 

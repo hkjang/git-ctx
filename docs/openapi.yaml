@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.53.4
+  version: 0.53.5
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -776,6 +776,12 @@ paths:
 components:
   securitySchemes:
     keycloakBearer: { type: http, scheme: bearer, bearerFormat: JWT }
+    apiKeyBearer:
+      type: http
+      scheme: bearer
+      description: >-
+        MCP API 키는 Authorization 헤더로도 보낼 수 있습니다. 값이 bctx_live_ 로
+        시작하면 Keycloak 토큰이 아니라 API 키로 인증합니다.
     context7Key: { type: apiKey, in: header, name: CONTEXT7_API_KEY }
   parameters:
     Id: { name: id, in: path, required: true, schema: { type: string } }

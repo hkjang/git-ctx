@@ -30,3 +30,21 @@ DB에서 `No accessible libraries matched` 텍스트 콘텐츠를 정상 반환�
 6. 서버 감사 로그에서 사용자, 키 prefix, 도구, 결과를 대조한다.
 7. 시험 키를 즉시 폐기한다.
 
+
+## 2026-08-25 인증 헤더 확장 실측
+
+`v0.53.4` 바이너리를 4747 포트로 실행하고, 4개 scope를 가진 사용자 API 키를
+`Authorization: Bearer` 헤더로만 전달해 `/mcp` 를 호출했다.
+
+| 단계 | 결과 |
+|---|---|
+| initialize (Mcp-Session-Id 발급) | 통과 |
+| `tools/list` | 키 scope와 동일한 4개 도구만 노출 |
+| `find-dependency-usage` (fixedIn 포함) | 영향/안전 저장소 분류 및 근거 출력 |
+| `get-repository-map` | 요약과 함께 Stack 3건 출력 |
+| scope 밖 `read-file` | `This MCP tool is unavailable for this credential.` 거부 |
+
+키 형식(`bctx_live_`)이 스스로를 식별하므로 `CONTEXT7_API_KEY`, `X-API-Key`,
+`Authorization: Bearer` 어느 헤더로 와도 API 키로 인증한다. 헤더를 하나만 설정할 수
+있는 MCP 클라이언트·게이트웨이를 위한 확장이며, 키 형식이 아닌 값은 이전과 같이
+Keycloak 토큰으로만 검증한다.
