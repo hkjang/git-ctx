@@ -2986,16 +2986,38 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 	}
 	// Whatever the source servers could not answer, the index may already hold.
 	indexedFallback, answeredFromIndex := "", false
-	if len(hits) == 0 {
+	// The index is consulted whenever the live query left room, not only when
+	// it returned nothing. A catalogue holds several sources, and only some of
+	// them answer a live query at all: a Confluence page or a Jira issue lives
+	// in the index alone. Treating any live hit as "the answer" let one talkative
+	// source hide every other source's content — measured with a Git server, a
+	// wiki and an issue tracker configured together, where the tracker's two
+	// unrelated issues suppressed the page that actually matched.
+	if len(hits) < limit {
 		indexSpan := calltrace.Start(ctx, "indexed-content", sourceType)
 		indexed, capped, indexErr := s.indexedSourceHits(ctx, principals, normalized, sourceType, project, repository, ref, limit)
 		if indexErr != nil {
 			indexSpan.Fail(indexErr)
 		} else {
 			indexSpan.End(statusFor(len(indexed)), len(indexed), len(indexed), "answered from the local index")
-			if len(indexed) > 0 {
-				hits = indexed
-				indexedFallback = fmt.Sprintf("index: the source query returned nothing, so %d match(es) come from the indexed content. They are as recent as the last index run.", len(indexed))
+			// Live results keep their place at the front: they are the fresher
+			// answer where a source can give one.
+			seen := make(map[string]bool, len(hits))
+			for _, hit := range hits {
+				seen[hit.LibraryID+"\x00"+hit.Ref+"\x00"+hit.Path] = true
+			}
+			added := 0
+			for _, hit := range indexed {
+				key := hit.LibraryID + "\x00" + hit.Ref + "\x00" + hit.Path
+				if seen[key] || len(hits) >= limit {
+					continue
+				}
+				seen[key] = true
+				hits = append(hits, hit)
+				added++
+			}
+			if added > 0 {
+				indexedFallback = fmt.Sprintf("index: %d match(es) come from the indexed content, which is where a source that answers no live query — a wiki page, an issue — can be found. They are as recent as the last index run.", added)
 				if capped {
 					// The rows past the cap were never read, so the repositories
 					// in this answer are the ones the scan reached first — not
@@ -3003,8 +3025,8 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 					indexedFallback += fmt.Sprintf(" Only the first %d indexed chunks were scanned, so this is a sample rather than every match: narrow with libraryId, repository or path.", indexedScanLimit)
 				}
 				// The live path's failure is still reported below — it explains
-				// why the answer is index-aged — but it no longer decides the
-				// call, because the call now has an answer.
+				// why part of the answer is index-aged — but it no longer decides
+				// the call, because the call now has an answer.
 				answeredFromIndex = true
 			}
 		}

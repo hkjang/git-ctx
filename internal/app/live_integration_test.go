@@ -1083,3 +1083,187 @@ func mcpDeniedWithKey(t *testing.T, a *App, secret, tool, arguments string) stri
 	}
 	return response.Result.Content[0].Text
 }
+
+// Confluence and Jira are content sources like the two Git servers, and they
+// fail the same way if their wiring is wrong: nothing arrives, the catalogue
+// looks normal, and the pages or issues an agent was supposed to find simply do
+// not exist as far as the platform is concerned. Only contract tests covered
+// them, so the path from the settings screen to an answer was never run.
+func TestDocumentSourceChainIntegration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("the platform chain waits on the background worker")
+	}
+	ctx := context.Background()
+
+	confluence := newFakeConfluence()
+	defer confluence.Close()
+	jira := newFakeJira()
+	defer jira.Close()
+
+	directory := t.TempDir()
+	a, err := New(ctx, config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(directory, "documents.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
+		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer bootstrap")
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	// Both sources are read with a token and hand out their ACL explicitly:
+	// there is no per-page permission model to import, so the operator names
+	// who may read what this connector brings in.
+	for _, item := range []struct{ category, url string }{
+		{"confluence", confluence.URL},
+		{"jira", jira.URL},
+	} {
+		saved := call(http.MethodPut, "/api/v1/admin/settings/"+item.category,
+			fmt.Sprintf(`{"baseUrl":%q,"authType":"bearer","token":"t","allowedPrincipals":["group:platform"]}`, item.url))
+		if saved.Code != http.StatusOK {
+			t.Fatalf("%s settings status=%d body=%s", item.category, saved.Code, saved.Body.String())
+		}
+	}
+
+	registered := map[string]string{}
+	for _, item := range []struct{ sourceType, project, slug, name string }{
+		{"confluence", "OPS", "OPS", "Operations space"},
+		{"jira", "PAY", "PAY", "Payments project"},
+	} {
+		created := call(http.MethodPost, "/api/v1/admin/repositories",
+			fmt.Sprintf(`{"sourceType":%q,"repository":{"id":1,"projectKey":%q,"slug":%q,"name":%q,"description":"","defaultBranch":"current"}}`,
+				item.sourceType, item.project, item.slug, item.name))
+		if created.Code != http.StatusCreated {
+			t.Fatalf("%s register status=%d body=%s", item.sourceType, created.Code, created.Body.String())
+		}
+		var repository struct{ ID, LibraryID string }
+		if err = json.Unmarshal(created.Body.Bytes(), &repository); err != nil {
+			t.Fatal(err)
+		}
+		registered[item.sourceType] = repository.ID
+	}
+
+	for sourceType, id := range registered {
+		waitFor(t, 60*time.Second, sourceType+" to finish indexing", func() bool {
+			var chunks int
+			_ = a.store.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id=?`, id).Scan(&chunks)
+			return chunks > 0
+		})
+		// The connector's declared principals become the ACL, which is the only
+		// thing standing between these documents and everyone.
+		var principal string
+		if err = a.store.DB.QueryRow(`SELECT principal FROM repository_permissions WHERE repository_id=? LIMIT 1`, id).Scan(&principal); err != nil {
+			t.Fatalf("%s imported no principal: %v", sourceType, err)
+		}
+		if principal != "group:platform" {
+			t.Fatalf("%s imported the wrong principal: %q", sourceType, principal)
+		}
+	}
+
+	// A Confluence page arrives as text, not as the storage-format markup it is
+	// stored in — an agent handed raw markup would quote tags at the reader.
+	var page string
+	if err = a.store.DB.QueryRow(`SELECT content FROM document_chunks WHERE repository_id=? LIMIT 1`, registered["confluence"]).Scan(&page); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(page, "<p>") || strings.Contains(page, "<ac:") {
+		t.Fatalf("the page kept its markup: %q", page)
+	}
+	if !strings.Contains(page, "장애 대응") {
+		t.Fatalf("the page body did not arrive: %q", page)
+	}
+
+	// The library identifiers are derived from the space and project keys, so
+	// the answer is checked against those rather than against a title.
+	// A wiki and an issue tracker answer no live query, so their content exists
+	// only in the index. An answer that skipped the index because some other
+	// source replied would never contain them.
+	answer := mcpCall(t, a, "search-code", `{"query":"컨슈머를 재시작"}`)
+	if !strings.Contains(strings.ToLower(answer), "/confluence~") {
+		t.Fatalf("the Confluence page is not searchable:\n%s", answer)
+	}
+	issues := mcpCall(t, a, "search-code", `{"query":"정산 배치 실패"}`)
+	if !strings.Contains(strings.ToLower(issues), "/jira~") {
+		t.Fatalf("the Jira issue is not searchable:\n%s", issues)
+	}
+}
+
+// newFakeConfluence serves the space and page endpoints the connector reads.
+func newFakeConfluence() *httptest.Server {
+	pages := map[string]map[string]string{
+		"101": {"title": "장애 대응 런북", "body": "<p>장애 대응 절차: 컨슈머를 재시작한다.</p>"},
+		"102": {"title": "배포 절차", "body": "<p>배포는 카나리로 시작한다.</p>"},
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.EscapedPath()
+		write := func(value any) { _ = json.NewEncoder(w).Encode(value) }
+		switch {
+		case strings.HasSuffix(path, "/rest/api/space"):
+			write(map[string]any{"results": []map[string]any{{"key": "OPS", "name": "Operations"}}})
+		case strings.Contains(path, "/rest/api/space/"):
+			write(map[string]any{"id": "1", "key": "OPS", "name": "Operations", "description": "운영 공간"})
+		case strings.HasSuffix(path, "/rest/api/content"):
+			results := make([]map[string]any, 0, len(pages))
+			for id, page := range pages {
+				results = append(results, map[string]any{"id": id, "title": page["title"],
+					"version": map[string]any{"number": 3}})
+			}
+			write(map[string]any{"results": results})
+		case strings.Contains(path, "/rest/api/content/"):
+			id := path[strings.LastIndex(path, "/")+1:]
+			page, ok := pages[id]
+			if !ok {
+				http.Error(w, `{"message":"not found"}`, http.StatusNotFound)
+				return
+			}
+			write(map[string]any{"id": id, "title": page["title"],
+				"body": map[string]any{"storage": map[string]any{"value": page["body"]}}})
+		default:
+			write(map[string]any{"results": []any{}})
+		}
+	}))
+}
+
+// newFakeJira serves the project and issue endpoints the connector reads.
+func newFakeJira() *httptest.Server {
+	issues := []map[string]any{
+		{"key": "PAY-1", "fields": map[string]any{"summary": "정산 배치 실패", "updated": "2026-08-01T00:00:00.000+0900",
+			"description": "야간 정산 배치가 타임아웃으로 실패한다."}},
+		{"key": "PAY-2", "fields": map[string]any{"summary": "환불 지연", "updated": "2026-08-02T00:00:00.000+0900",
+			"description": "환불 처리가 지연된다."}},
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.EscapedPath()
+		write := func(value any) { _ = json.NewEncoder(w).Encode(value) }
+		switch {
+		case strings.HasSuffix(path, "/rest/api/2/project"):
+			write([]map[string]any{{"key": "PAY", "name": "Payments"}})
+		case strings.Contains(path, "/rest/api/2/project/"):
+			write(map[string]any{"key": "PAY", "name": "Payments", "description": "결제"})
+		case strings.HasSuffix(path, "/rest/api/2/search"):
+			write(map[string]any{"issues": issues})
+		case strings.Contains(path, "/rest/api/2/issue/"):
+			key := path[strings.LastIndex(path, "/")+1:]
+			for _, issue := range issues {
+				if issue["key"] == key {
+					write(issue)
+					return
+				}
+			}
+			http.Error(w, `{"errorMessages":["not found"]}`, http.StatusNotFound)
+		default:
+			write(map[string]any{"issues": []any{}})
+		}
+	}))
+}

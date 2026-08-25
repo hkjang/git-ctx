@@ -7,7 +7,7 @@ import (
 
 // Version is the released version of this build. It is a constant so an
 // offline build without git metadata still reports something meaningful.
-const Version = "0.58.7"
+const Version = "0.59.0"
 
 // Commit and BuildTime are injected at build time with -ldflags. They answer
 // the question a version string alone cannot: "is the container actually
