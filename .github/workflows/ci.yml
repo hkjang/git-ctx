@@ -141,6 +141,16 @@ jobs:
           for file in test/web/*.test.js; do
             node "$file"
           done
+      # The contract tests read the console as text. This one loads it in the
+      # browser that ships with the runner and opens every administrator
+      # screen, which is the only way an empty screen is visible.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Console render sweep
+        run: |
+          go build -tags sqlite_fts5 -o "$RUNNER_TEMP/git-ctx" ./cmd/git-ctx
+          GIT_CTX_BINARY="$RUNNER_TEMP/git-ctx" node test/web/render-sweep.js
 
   docker:
     name: Docker image

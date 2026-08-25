@@ -35,6 +35,23 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.58.7 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./... (FTS5/태그 없음)  PASS
+콘솔 렌더 스윕 신규(관리자 화면 11종)          PASS(수정 없음)
+빈 화면 주입 시 실패 확인                      PASS
+콘솔 계약 시험 5종                             PASS
+go vet ./... && go build ./...               PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.58.7 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.58.7 빌드      PASS
+```
+
+이번 검증은 콘솔을 실제 브라우저에서 열어 관리자 화면을 모두 클릭했다. 화면 11종이
+오류 없이 렌더링됐고, 라우팅 누락으로 비어 있던 두 카드가 실데이터를 보여주는 것도
+확인했다. 텍스트로만 읽던 시험으로는 볼 수 없던 층이다.
+
 2026-08-26 v0.58.6 릴리스 전 검증 결과:
 
 ```text
