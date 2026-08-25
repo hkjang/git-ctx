@@ -54,7 +54,7 @@ jobs:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - name: Check out the release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
@@ -64,7 +64,7 @@ jobs:
       # Take the tooling from the exact commit that supplied this workflow, while
       # the application and Dockerfile continue to come from the release tag.
       - name: Check out trusted release tooling
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.workflow_sha }}
           path: .release-tooling
@@ -108,15 +108,16 @@ jobs:
           echo "checksum=git-ctx-v${version}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
+          package-manager-cache: false
 
       - name: Verify formatting, build and tests
         shell: bash
@@ -191,7 +192,7 @@ jobs:
           test "$(find release-artifact -maxdepth 1 -type f | wc -l)" -eq 2
 
       - name: Transfer verified files to the publish job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: offline-release-${{ steps.release.outputs.version }}
           path: release-artifact/
@@ -208,7 +209,7 @@ jobs:
       contents: write
     steps:
       - name: Download the verified build artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: offline-release-${{ needs.build.outputs.version }}
           path: release-artifact
@@ -216,7 +217,7 @@ jobs:
       # Do not trust executable files transported with a build artifact. Fetch
       # the verifier from the immutable commit that supplied this workflow.
       - name: Check out trusted release tooling
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.workflow_sha }}
           path: .release-tooling
