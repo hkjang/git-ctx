@@ -31,6 +31,7 @@ jobs:
       target_sha: ${{ steps.release.outputs.target_sha }}
       archive: ${{ steps.release.outputs.archive }}
       checksum: ${{ steps.release.outputs.checksum }}
+      notes: ${{ steps.release.outputs.notes }}
     services:
       postgres:
         image: pgvector/pgvector:0.8.1-pg16@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337
@@ -68,7 +69,9 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           path: .release-tooling
-          sparse-checkout: scripts
+          sparse-checkout: |
+            scripts
+            test/release
           persist-credentials: false
 
       - name: Validate tag and source version
@@ -106,6 +109,7 @@ jobs:
           echo "build_time=$build_time" >> "$GITHUB_OUTPUT"
           echo "archive=git-ctx-v${version}.tar.gz" >> "$GITHUB_OUTPUT"
           echo "checksum=git-ctx-v${version}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+          echo "notes=release-notes-v${version}.md" >> "$GITHUB_OUTPUT"
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -118,6 +122,18 @@ jobs:
         with:
           node-version: "22"
           package-manager-cache: false
+
+      - name: Verify version metadata
+        run: |
+          # Keep workflow_dispatch usable for immutable legacy tags created
+          # before this contract existed. Every new tag carries the verifier,
+          # and CI also requires it before the change can reach main.
+          if [ -f scripts/verify-version-sync.sh ]; then
+            sh scripts/verify-version-sync.sh "$GITHUB_WORKSPACE"
+          else
+            echo "legacy tag has no version-sync contract; tag/source validation remains active"
+          fi
+          sh .release-tooling/test/release/version-sync.test.sh
 
       - name: Verify formatting, build and tests
         shell: bash
@@ -133,7 +149,7 @@ jobs:
           go vet ./...
           go test ./...
           go test -race ./...
-          for file in web/app.js web/guides.js web/roles.js; do
+          for file in web/app.js web/clients.js web/guides.js web/roles.js; do
             node --check "$file"
           done
           for file in test/web/*.test.js; do
@@ -189,7 +205,8 @@ jobs:
           mkdir release-artifact
           install -m 0644 "dist/${{ steps.release.outputs.archive }}" release-artifact/
           install -m 0644 "dist/${{ steps.release.outputs.checksum }}" release-artifact/
-          test "$(find release-artifact -maxdepth 1 -type f | wc -l)" -eq 2
+          install -m 0644 "docs/${{ steps.release.outputs.notes }}" release-artifact/
+          test "$(find release-artifact -maxdepth 1 -type f | wc -l)" -eq 3
 
       - name: Transfer verified files to the publish job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -232,12 +249,14 @@ jobs:
           TARGET_SHA: ${{ needs.build.outputs.target_sha }}
           ARCHIVE_NAME: ${{ needs.build.outputs.archive }}
           CHECKSUM_NAME: ${{ needs.build.outputs.checksum }}
+          NOTES_NAME: ${{ needs.build.outputs.notes }}
         run: |
           set -Eeuo pipefail
           local_dir=$GITHUB_WORKSPACE/release-artifact
           verifier=$GITHUB_WORKSPACE/.release-tooling/scripts/verify-offline-image.sh
           test -s "$local_dir/$ARCHIVE_NAME"
           test -s "$local_dir/$CHECKSUM_NAME"
+          test -s "$local_dir/$NOTES_NAME"
           test -s "$verifier"
           sh "$verifier" "$VERSION" "$local_dir/$ARCHIVE_NAME" "$TARGET_SHA"
 
@@ -256,9 +275,11 @@ jobs:
           TAG: ${{ needs.build.outputs.tag }}
           ARCHIVE_NAME: ${{ needs.build.outputs.archive }}
           CHECKSUM_NAME: ${{ needs.build.outputs.checksum }}
+          NOTES_NAME: ${{ needs.build.outputs.notes }}
         run: |
           set -Eeuo pipefail
           local_dir=$GITHUB_WORKSPACE/release-artifact
+          notes_file=$local_dir/$NOTES_NAME
           verify_dir=$RUNNER_TEMP/release-assets
           release_exists=false
           release_is_draft=false
@@ -324,7 +345,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --draft \
-              --generate-notes \
+              --notes-file "$notes_file" \
               "${prerelease[@]}"
             release_is_draft=true
             release_json=$(wait_for_release_by_tag)
@@ -432,6 +453,7 @@ jobs:
           TAG: ${{ needs.build.outputs.tag }}
           MARK_LATEST: ${{ github.event_name == 'push' }}
           REQUIRES_PUBLISH: ${{ steps.prepare.outputs.requires_publish }}
+          NOTES_NAME: ${{ needs.build.outputs.notes }}
         run: |
           set -Eeuo pipefail
           publish_flags=()
@@ -441,8 +463,11 @@ jobs:
           if [[ $TAG != *-* && $MARK_LATEST == true ]]; then
             publish_flags+=(--latest)
           fi
-          if [[ ${#publish_flags[@]} -gt 0 ]]; then
-            /usr/bin/gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" "${publish_flags[@]}"
-          fi
+          # Always replace generated or stale text with the reviewed notes from
+          # the exact release tag. This also repairs the body on a rerun.
+          /usr/bin/gh release edit "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --notes-file "$GITHUB_WORKSPACE/release-artifact/$NOTES_NAME" \
+            "${publish_flags[@]}"
           /usr/bin/gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
             --jq 'select(.draft == false) | [.tag_name, (.assets | length)] | @tsv'

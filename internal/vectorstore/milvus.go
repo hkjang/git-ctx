@@ -87,12 +87,19 @@ func (m *milvusStore) call(ctx context.Context, path string, payload map[string]
 		return err
 	}
 	defer response.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(response.Body, 32<<20))
+	responseLimit := int64(32 << 20)
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		// Error text is diagnostic only. Do not buffer a proxy/server error page
+		// up to the successful search-response limit before truncating it below.
+		responseLimit = 4 << 10
+	}
+	raw, err := io.ReadAll(io.LimitReader(response.Body, responseLimit))
 	if err != nil {
 		return err
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("milvus %s: %s", response.Status, truncate(string(raw), 400))
+		return netclient.NewHTTPStatusError(response.StatusCode,
+			fmt.Errorf("milvus %s: %s", response.Status, truncate(string(raw), 400)))
 	}
 	var envelope struct {
 		Code    int             `json:"code"`

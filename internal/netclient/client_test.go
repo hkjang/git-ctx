@@ -1,6 +1,8 @@
 package netclient
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -10,6 +12,26 @@ import (
 	"testing"
 	"time"
 )
+
+func TestHTTPStatusErrorPreservesCauseMessageAndStatus(t *testing.T) {
+	cause := errors.New("provider returned its existing message")
+	statusErr := NewHTTPStatusError(http.StatusServiceUnavailable, cause)
+	if got := statusErr.Error(); got != cause.Error() {
+		t.Fatalf("Error() = %q, want %q", got, cause.Error())
+	}
+	if !errors.Is(statusErr, cause) {
+		t.Fatal("HTTP status carrier lost its cause")
+	}
+
+	wrapped := fmt.Errorf("connection test: %w", statusErr)
+	var carrier interface{ Status() int }
+	if !errors.As(wrapped, &carrier) {
+		t.Fatal("wrapped error no longer exposes an HTTP status")
+	}
+	if got := carrier.Status(); got != http.StatusServiceUnavailable {
+		t.Fatalf("Status() = %d, want %d", got, http.StatusServiceUnavailable)
+	}
+}
 
 func TestSecureDefaultsAndValidation(t *testing.T) {
 	client, err := New(Config{Timeout: time.Second})

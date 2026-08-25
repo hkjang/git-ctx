@@ -84,7 +84,8 @@ func (v *Vault) request(ctx context.Context, method, path string, body io.Reader
 func vaultError(resp *http.Response) error {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	return fmt.Errorf("vault returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	return netclient.NewHTTPStatusError(resp.StatusCode,
+		fmt.Errorf("vault returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body))))
 }
 
 func (v *Vault) Validate(ctx context.Context) error {

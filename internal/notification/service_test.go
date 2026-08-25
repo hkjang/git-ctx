@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"git-ctx/internal/source"
 	"git-ctx/internal/store"
 )
 
@@ -78,6 +79,21 @@ func TestWebhookFailureBackoffAndDeadLetter(t *testing.T) {
 	}
 	if status != "dead" || attempts != 2 || strings.Contains(lastError, "response body") {
 		t.Fatalf("status=%s attempts=%d lastError=%q", status, attempts, lastError)
+	}
+}
+
+func TestWebhookHTTPErrorCarriesStatusWithoutBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "response body must remain private", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	err := postWebhook(context.Background(), http.DefaultClient, server.URL, "",
+		delivery{NotificationID: "n", Title: "t", Message: "m"})
+	if source.StatusOf(err) != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d err=%v", source.StatusOf(err), err)
+	}
+	if !strings.Contains(err.Error(), "notification endpoint returned 503 Service Unavailable") || strings.Contains(err.Error(), "remain private") {
+		t.Fatalf("webhook error changed or exposed its response body: %v", err)
 	}
 }
 

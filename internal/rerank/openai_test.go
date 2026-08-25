@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"git-ctx/internal/source"
 )
 
 func TestOpenAIRerankMapsScoresByIndex(t *testing.T) {
@@ -45,5 +48,21 @@ func TestOpenAIRerankRejectsIncompleteResults(t *testing.T) {
 	}
 	if _, err = provider.Rerank(context.Background(), "q", []string{"a", "b"}); err == nil {
 		t.Fatal("expected incomplete response error")
+	}
+}
+
+func TestOpenAIRerankHTTPErrorCarriesStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("ranker is loading"))
+	}))
+	defer server.Close()
+	provider, err := NewOpenAI(OpenAIConfig{BaseURL: server.URL, Model: "ranker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = provider.Rerank(context.Background(), "q", []string{"document"})
+	if source.StatusOf(err) != http.StatusServiceUnavailable || !strings.Contains(err.Error(), "reranker API 503 Service Unavailable: ranker is loading") {
+		t.Fatalf("status=%d err=%v", source.StatusOf(err), err)
 	}
 }

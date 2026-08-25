@@ -102,21 +102,19 @@ func embeddingRetryDelay(err error, attempt int) time.Duration {
 func retryableEmbeddingError(err error) bool {
 	var status *statusError
 	if errors.As(err, &status) {
-		return status.code == http.StatusTooManyRequests || status.code >= 500
+		code := status.Status()
+		return code == http.StatusTooManyRequests || code >= 500
 	}
 	// Transport failures (timeout, reset connection) are always worth retrying.
 	return true
 }
 
 type statusError struct {
-	code int
-	body string
+	*netclient.HTTPStatusError
 	// header is kept so the retry can honour a window the server named. A 429
 	// answered on the client's own schedule is just another 429.
 	header http.Header
 }
-
-func (e *statusError) Error() string { return fmt.Sprintf("embedding API %d: %s", e.code, e.body) }
 
 func (o *OpenAI) embedOnce(ctx context.Context, texts []string) ([][]float32, error) {
 	raw, _ := json.Marshal(map[string]any{"model": o.model, "input": texts})
@@ -135,7 +133,11 @@ func (o *OpenAI) embedOnce(ctx context.Context, texts []string) ([][]float32, er
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, &statusError{code: resp.StatusCode, body: string(body), header: resp.Header}
+		return nil, &statusError{
+			HTTPStatusError: netclient.NewHTTPStatusError(resp.StatusCode,
+				fmt.Errorf("embedding API %d: %s", resp.StatusCode, string(body))),
+			header: resp.Header.Clone(),
+		}
 	}
 	var out struct {
 		Data []struct {

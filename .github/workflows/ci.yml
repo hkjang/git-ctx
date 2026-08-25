@@ -42,6 +42,11 @@ jobs:
       - name: Build
         run: go build ./...
 
+      - name: Version metadata sync
+        run: |
+          sh scripts/verify-version-sync.sh
+          sh test/release/version-sync.test.sh
+
       - name: Vet
         run: go vet ./...
 
@@ -128,7 +133,7 @@ jobs:
           package-manager-cache: false
       - name: Parse the console scripts
         run: |
-          for file in web/app.js web/guides.js web/roles.js; do
+          for file in web/app.js web/clients.js web/guides.js web/roles.js; do
             node --check "$file"
           done
       - name: Console contract tests

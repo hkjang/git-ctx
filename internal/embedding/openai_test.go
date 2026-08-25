@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"git-ctx/internal/source"
 )
 
 func TestOpenAICompatibleEmbedding(t *testing.T) {
@@ -86,6 +89,22 @@ func TestOpenAIEmbeddingDoesNotRetryClientErrors(t *testing.T) {
 	}
 	if attempts != 1 {
 		t.Fatalf("client errors must not be retried, attempts=%d", attempts)
+	}
+}
+
+func TestOpenAIEmbeddingHTTPErrorCarriesStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("model is loading"))
+	}))
+	defer server.Close()
+	provider, err := NewOpenAI(OpenAIConfig{BaseURL: server.URL, Model: "embed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = provider.(*OpenAI).embedOnce(context.Background(), []string{"hello"})
+	if source.StatusOf(err) != http.StatusServiceUnavailable || !strings.Contains(err.Error(), "embedding API 503: model is loading") {
+		t.Fatalf("status=%d err=%v", source.StatusOf(err), err)
 	}
 }
 

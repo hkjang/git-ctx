@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"git-ctx/internal/source"
 )
 
 func TestVaultKVV2Contract(t *testing.T) {
@@ -54,5 +56,21 @@ func TestVaultKVV2Contract(t *testing.T) {
 func TestVaultRejectsUnsafePaths(t *testing.T) {
 	if _, err := NewVault(VaultConfig{BaseURL: "https://vault.example", Token: "x", Mount: "../secret"}); err == nil {
 		t.Fatal("unsafe mount accepted")
+	}
+}
+
+func TestVaultHTTPErrorCarriesStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("vault is sealed"))
+	}))
+	defer server.Close()
+	vault, err := NewVault(VaultConfig{BaseURL: server.URL, Token: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = vault.Validate(context.Background())
+	if source.StatusOf(err) != http.StatusServiceUnavailable || !strings.Contains(err.Error(), "vault returned HTTP 503: vault is sealed") {
+		t.Fatalf("status=%d err=%v", source.StatusOf(err), err)
 	}
 }

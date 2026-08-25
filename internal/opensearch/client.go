@@ -82,7 +82,8 @@ func (c *Client) request(ctx context.Context, method, path, contentType string, 
 func statusError(resp *http.Response) error {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	return fmt.Errorf("opensearch returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	return netclient.NewHTTPStatusError(resp.StatusCode,
+		fmt.Errorf("opensearch returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body))))
 }
 
 func (c *Client) Validate(ctx context.Context) error {

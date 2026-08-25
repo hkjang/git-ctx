@@ -11,8 +11,25 @@ import (
 	"sync"
 	"testing"
 
+	"git-ctx/internal/source"
 	"git-ctx/internal/store"
 )
+
+func TestHTTPErrorCarriesStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("cluster is restarting"))
+	}))
+	defer server.Close()
+	client, err := New(Config{BaseURL: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.Validate(context.Background())
+	if source.StatusOf(err) != http.StatusServiceUnavailable || !strings.Contains(err.Error(), "opensearch returned HTTP 503: cluster is restarting") {
+		t.Fatalf("status=%d err=%v", source.StatusOf(err), err)
+	}
+}
 
 func TestValidateSyncAndACLSearch(t *testing.T) {
 	var mu sync.Mutex

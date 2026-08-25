@@ -16,20 +16,21 @@
       <span id="brand-tagline" class="topbar-tagline">사내 개발 지식 MCP</span>
       <span id="service-version" class="version-badge">v-</span>
       <nav class="header-actions" aria-label="계정">
-        <button id="quick-nav-button" class="ghost" type="button" hidden>빠른 이동 <kbd>⌘K</kbd></button>
+        <button id="quick-nav-button" class="ghost" type="button" aria-label="빠른 이동 열기" hidden>빠른 이동 <kbd>⌘K</kbd></button>
         <button id="theme-toggle" class="icon-button" type="button" aria-label="화면 테마 전환" title="화면 테마 전환">◐</button>
         <button id="help-button" class="ghost" type="button" title="설정·권한 가이드">가이드</button>
         <div id="profile-menu" class="profile-menu" hidden>
           <button id="profile-toggle" type="button" aria-expanded="false" aria-controls="profile-dropdown"><span id="profile-avatar">U</span><span id="profile-name">내 프로필</span></button>
-          <div id="profile-dropdown" class="profile-dropdown" hidden>
-            <button type="button" data-profile-target="account">프로필</button>
-            <button type="button" data-profile-target="connections">MCP 연결</button>
-            <button type="button" data-profile-target="keys">API 키 관리</button>
-            <button type="button" data-profile-target="knowledge">코드 지식 검색</button>
-            <button type="button" data-profile-target="activity">내 활동·저장소</button>
+          <div id="profile-dropdown" class="profile-dropdown" role="menu" aria-label="개인 메뉴" hidden>
+            <button type="button" role="menuitem" data-profile-target="home">내 홈</button>
+            <button type="button" role="menuitem" data-profile-target="account">프로필</button>
+            <button type="button" role="menuitem" data-profile-target="connections">MCP 연결</button>
+            <button type="button" role="menuitem" data-profile-target="keys">API 키 관리</button>
+            <button type="button" role="menuitem" data-profile-target="knowledge">코드 지식 검색</button>
+            <button type="button" role="menuitem" data-profile-target="activity">내 활동·저장소</button>
             <hr />
-            <button id="profile-acl" type="button">내 권한 진단</button>
-            <button id="profile-logout" type="button" class="danger-text">로그아웃</button>
+            <button id="profile-acl" type="button" role="menuitem">내 권한 진단</button>
+            <button id="profile-logout" type="button" role="menuitem" class="danger-text">로그아웃</button>
           </div>
         </div>
         <button id="login">Keycloak SSO 로그인</button>
@@ -46,6 +47,7 @@
         </nav>
         <nav id="personal-menu" class="side-nav" aria-label="개인화 메뉴">
           <p class="side-nav-title">내 공간</p>
+          <button type="button" data-personal-target="home"><span class="nav-icon">⌂</span>홈</button>
           <button type="button" data-personal-target="account"><span class="nav-icon">👤</span>프로필</button>
           <button type="button" data-personal-target="connections"><span class="nav-icon">🔌</span>MCP 연결</button>
           <button type="button" data-personal-target="keys"><span class="nav-icon">🔑</span>API 키</button>
@@ -73,6 +75,51 @@
           </div>
         </section>
         <div id="personal-workspace" class="workspace" hidden>
+          <section id="home" class="personal-panel" hidden>
+            <div class="dashboard-hero">
+              <div>
+                <span class="eyebrow">MY GIT CONTEXT</span>
+                <h1 id="dashboard-greeting">개발 지식 작업 공간</h1>
+                <p id="dashboard-summary">내 저장소와 MCP 연결 상태를 확인하고 바로 검색을 시작하세요.</p>
+              </div>
+              <button type="button" data-dashboard-target="knowledge">코드 지식 검색</button>
+            </div>
+            <div id="personal-stats" class="stat-grid dashboard-stats" aria-live="polite">
+              <article><strong>–</strong><span>접근 가능한 저장소</span></article>
+              <article><strong>–</strong><span>활성 API 키</span></article>
+              <article><strong>–</strong><span>최근 MCP 호출</span></article>
+              <article><strong>–</strong><span>읽지 않은 알림</span></article>
+            </div>
+            <div class="dashboard-grid">
+              <article class="panel onboarding-card">
+                <div class="section-title">
+                  <div><h2>시작 체크리스트</h2><p>AI 도구에서 검색하기까지 필요한 준비 상태입니다.</p></div>
+                  <span id="onboarding-progress" class="progress-label">확인 중</span>
+                </div>
+                <div class="progress-track" aria-hidden="true"><span id="onboarding-progress-bar"></span></div>
+                <div id="personal-checklist" class="checklist" aria-live="polite"></div>
+              </article>
+              <article class="panel">
+                <div class="section-title"><div><h2>빠른 작업</h2><p>자주 쓰는 기능을 한 번에 엽니다.</p></div></div>
+                <div class="quick-actions">
+                  <button type="button" class="action-card" data-dashboard-target="keys"><span>🔑</span><strong>API 키 발급</strong><small>최소 권한 Preset으로 만들기</small></button>
+                  <button type="button" class="action-card" data-dashboard-target="connections"><span>🔌</span><strong>MCP 연결</strong><small>클라이언트별 설정 복사</small></button>
+                  <button type="button" class="action-card" data-dashboard-target="knowledge"><span>⌕</span><strong>소스 검색</strong><small>Library ID 없이 찾기</small></button>
+                  <button type="button" class="action-card" data-dashboard-target="activity"><span>↗</span><strong>내 활동</strong><small>호출과 사용량 확인</small></button>
+                </div>
+              </article>
+            </div>
+            <div class="dashboard-grid">
+              <article class="panel">
+                <div class="section-title"><div><h2>최근 저장소</h2><p>접근 가능한 저장소에서 바로 검색합니다.</p></div><button type="button" class="secondary" data-dashboard-target="activity">전체 보기</button></div>
+                <div id="dashboard-repositories" class="dashboard-list"><div class="empty">불러오는 중…</div></div>
+              </article>
+              <article class="panel">
+                <div class="section-title"><div><h2>최근 MCP 호출</h2><p>최근 실행 결과와 응답 시간을 확인합니다.</p></div><button type="button" class="secondary" data-dashboard-target="activity">전체 보기</button></div>
+                <div id="dashboard-calls" class="dashboard-list"><div class="empty">불러오는 중…</div></div>
+              </article>
+            </div>
+          </section>
           <section id="account" class="panel personal-panel" hidden>
             <div class="section-title">
               <div><h2>내 계정</h2><p>Keycloak 신원, 플랫폼 역할과 소스 ACL Principal입니다.</p></div>
@@ -85,19 +132,23 @@
           <section id="connections" class="personal-panel" hidden>
             <div class="grid">
               <article class="panel">
-                <h2>내 MCP 연결</h2>
-                <pre>{
-  "mcpServers": {
-    "git-ctx": {
-      "url": "<span id="endpoint"></span>/mcp",
-      "headers": {
-        "CONTEXT7_API_KEY": "${GIT_CTX_API_KEY}"
-      }
-    }
-  }
-}</pre>
-                <p>키 원문은 환경변수에 저장하고 설정 파일에는 넣지 마세요.</p>
-                <button class="secondary" type="button" data-guide="mcp-client">클라이언트 연결 가이드</button>
+                <div class="section-title">
+                  <div><h2>내 MCP 연결</h2><p>클라이언트를 선택하고 설정을 그대로 복사하세요.</p></div>
+                  <button class="secondary" type="button" data-guide="mcp-client">연결 가이드</button>
+                </div>
+                <div class="endpoint-row"><code id="endpoint"></code><button id="copy-endpoint" class="secondary" type="button">주소 복사</button></div>
+                <div id="mcp-client-tabs" class="client-tabs" role="tablist" aria-label="MCP 클라이언트"></div>
+                <div class="config-toolbar">
+                  <div><strong id="mcp-client-title">클라이언트 선택</strong><small id="mcp-client-file"></small></div>
+                  <button id="copy-client-config" type="button">설정 복사</button>
+                </div>
+                <p id="mcp-client-description" class="field-help"></p>
+                <pre id="mcp-client-config" class="client-config" tabindex="0">설정을 준비하고 있습니다…</pre>
+                <div class="environment-command">
+                  <div><strong>API 키 환경변수</strong><small>키 원문을 설정 파일에 직접 넣지 않습니다.</small></div>
+                  <button id="copy-env-command" class="secondary" type="button">명령 복사</button>
+                </div>
+                <pre id="mcp-env-command" class="compact-code">export GIT_CTX_API_KEY='발급받은-키'</pre>
               </article>
               <article class="panel">
                 <h2>지원 도구</h2>
@@ -132,6 +183,12 @@
                   <dd>업무 단위 복합 검색, 운영 절차 검색과 안전한 Markdown 내보내기</dd>
                   <dt>explain-search-result</dt>
                   <dd>검색 후보의 키워드 근거, 모델 버전과 원문 line 범위 설명</dd>
+                  <dt>build-context / get-architecture-map</dt>
+                  <dd>작업 목적에 맞는 컨텍스트와 저장소 아키텍처 구성</dd>
+                  <dt>find-code-owner / find-tests</dt>
+                  <dd>코드 담당자와 변경 관련 테스트 탐색</dd>
+                  <dt>assess-change-risk / get-repository-health</dt>
+                  <dd>변경 위험과 저장소의 색인·의존성 상태 진단</dd>
                 </dl>
               </article>
             </div>
@@ -152,35 +209,41 @@
               <label>만료일<input name="expiresAt" type="date" /></label>
               <fieldset class="wide">
                 <legend>허용 도구</legend>
+                <div class="scope-presets" role="group" aria-label="Scope Preset">
+                  <button type="button" class="secondary" data-scope-preset="context7">Context7 기본</button>
+                  <button type="button" class="secondary" data-scope-preset="code">코드 탐색</button>
+                  <button type="button" class="secondary" data-scope-preset="all">전체 도구</button>
+                  <span id="scope-selection-count" class="field-help"></span>
+                </div>
                 <div class="scope-grid">
                   <label><input type="checkbox" name="scope" value="resolve-library-id" checked /> resolve-library-id</label>
                   <label><input type="checkbox" name="scope" value="query-docs" checked /> query-docs</label>
-                  <label><input type="checkbox" name="scope" value="search-repositories" checked /> search-repositories</label>
-                  <label><input type="checkbox" name="scope" value="search-source" checked /> search-source</label>
-                  <label><input type="checkbox" name="scope" value="search-code" checked /> search-code</label>
-                  <label><input type="checkbox" name="scope" value="find-file" checked /> find-file</label>
-                  <label><input type="checkbox" name="scope" value="read-file" checked /> read-file</label>
-                  <label><input type="checkbox" name="scope" value="get-file-history" checked /> get-file-history</label>
-                  <label><input type="checkbox" name="scope" value="list-directory" checked /> list-directory</label>
-                  <label><input type="checkbox" name="scope" value="search-merge-requests" checked /> search-merge-requests</label>
-                  <label><input type="checkbox" name="scope" value="find-dependents" checked /> find-dependents</label>
-                  <label><input type="checkbox" name="scope" value="search-semantic" checked /> search-semantic</label>
-                  <label><input type="checkbox" name="scope" value="get-repository-map" checked /> get-repository-map</label>
-                  <label><input type="checkbox" name="scope" value="find-symbol" checked /> find-symbol</label>
-                  <label><input type="checkbox" name="scope" value="get-symbol-context" checked /> get-symbol-context</label>
-                  <label><input type="checkbox" name="scope" value="trace-dependencies" checked /> trace-dependencies</label>
-                  <label><input type="checkbox" name="scope" value="compare-refs" checked /> compare-refs</label>
-                  <label><input type="checkbox" name="scope" value="get-change-impact" checked /> get-change-impact</label>
-                  <label><input type="checkbox" name="scope" value="get-context-pack" checked /> get-context-pack</label>
-                  <label><input type="checkbox" name="scope" value="find-runbook" checked /> find-runbook</label>
-                  <label><input type="checkbox" name="scope" value="export-context" checked /> export-context</label>
-                  <label><input type="checkbox" name="scope" value="explain-search-result" checked /> explain-search-result</label>
-                  <label><input type="checkbox" name="scope" value="build-context" checked /> build-context</label>
-                  <label><input type="checkbox" name="scope" value="find-code-owner" checked /> find-code-owner</label>
-                  <label><input type="checkbox" name="scope" value="find-tests" checked /> find-tests</label>
-                  <label><input type="checkbox" name="scope" value="get-architecture-map" checked /> get-architecture-map</label>
-                  <label><input type="checkbox" name="scope" value="assess-change-risk" checked /> assess-change-risk</label>
-                  <label><input type="checkbox" name="scope" value="get-repository-health" checked /> get-repository-health</label>
+                  <label><input type="checkbox" name="scope" value="search-repositories" /> search-repositories</label>
+                  <label><input type="checkbox" name="scope" value="search-source" /> search-source</label>
+                  <label><input type="checkbox" name="scope" value="search-code" /> search-code</label>
+                  <label><input type="checkbox" name="scope" value="find-file" /> find-file</label>
+                  <label><input type="checkbox" name="scope" value="read-file" /> read-file</label>
+                  <label><input type="checkbox" name="scope" value="get-file-history" /> get-file-history</label>
+                  <label><input type="checkbox" name="scope" value="list-directory" /> list-directory</label>
+                  <label><input type="checkbox" name="scope" value="search-merge-requests" /> search-merge-requests</label>
+                  <label><input type="checkbox" name="scope" value="find-dependents" /> find-dependents</label>
+                  <label><input type="checkbox" name="scope" value="search-semantic" /> search-semantic</label>
+                  <label><input type="checkbox" name="scope" value="get-repository-map" /> get-repository-map</label>
+                  <label><input type="checkbox" name="scope" value="find-symbol" /> find-symbol</label>
+                  <label><input type="checkbox" name="scope" value="get-symbol-context" /> get-symbol-context</label>
+                  <label><input type="checkbox" name="scope" value="trace-dependencies" /> trace-dependencies</label>
+                  <label><input type="checkbox" name="scope" value="compare-refs" /> compare-refs</label>
+                  <label><input type="checkbox" name="scope" value="get-change-impact" /> get-change-impact</label>
+                  <label><input type="checkbox" name="scope" value="get-context-pack" /> get-context-pack</label>
+                  <label><input type="checkbox" name="scope" value="find-runbook" /> find-runbook</label>
+                  <label><input type="checkbox" name="scope" value="export-context" /> export-context</label>
+                  <label><input type="checkbox" name="scope" value="explain-search-result" /> explain-search-result</label>
+                  <label><input type="checkbox" name="scope" value="build-context" /> build-context</label>
+                  <label><input type="checkbox" name="scope" value="find-code-owner" /> find-code-owner</label>
+                  <label><input type="checkbox" name="scope" value="find-tests" /> find-tests</label>
+                  <label><input type="checkbox" name="scope" value="get-architecture-map" /> get-architecture-map</label>
+                  <label><input type="checkbox" name="scope" value="assess-change-risk" /> assess-change-risk</label>
+                  <label><input type="checkbox" name="scope" value="get-repository-health" /> get-repository-health</label>
                 </div>
               </fieldset>
               <fieldset id="admin-key-scopes" class="wide" hidden>
@@ -198,7 +261,7 @@
               <label>일일 제한<input name="rateDay" type="number" min="0" value="0" /></label>
               <div class="wide button-row"><button type="submit">생성</button></div>
             </form>
-            <div id="secret" class="secret" hidden></div>
+            <div id="secret" class="secret" role="status" aria-live="assertive" tabindex="-1" hidden></div>
             <div id="key-list" class="table-wrap"></div>
           </section>
           <section id="knowledge" class="panel personal-panel" hidden>
@@ -209,8 +272,19 @@
               </div>
               <button class="secondary" type="button" data-guide="code-search">검색 가이드</button>
             </div>
-            <div class="grid">
-              <article class="card">
+            <div class="tool-catalog-toolbar">
+              <label>도구 검색<input id="knowledge-tool-query" type="search" placeholder="예: 파일, 심볼, 영향 분석" autocomplete="off" /></label>
+              <div class="tool-filter" role="group" aria-label="도구 종류">
+                <button type="button" class="secondary active" data-tool-filter="all">전체</button>
+                <button type="button" class="secondary" data-tool-filter="discover">발견</button>
+                <button type="button" class="secondary" data-tool-filter="explore">탐색</button>
+                <button type="button" class="secondary" data-tool-filter="analyze">분석</button>
+                <button type="button" class="secondary" data-tool-filter="context">컨텍스트</button>
+              </div>
+              <span id="knowledge-tool-count" class="field-help" aria-live="polite"></span>
+            </div>
+            <div id="knowledge-tools" class="grid tool-catalog">
+              <article class="card" data-tool-category="discover" data-tool-search="source query repository remote bitbucket gitlab confluence jira">
                 <h3>Source Query Search</h3>
                 <form id="search-code-form" class="form-row">
                   <label class="wide">질의<input name="query" required placeholder="dify 소스 검색해" /></label>
@@ -221,7 +295,7 @@
                   <div class="wide button-row"><button type="submit">원격 소스 검색</button></div>
                 </form>
               </article>
-              <article class="card">
+              <article class="card" data-tool-category="discover" data-tool-search="semantic meaning vector embedding">
                 <h3>Semantic Search</h3>
                 <form id="semantic-form" class="form-row">
                   <label class="wide">설명형 질의<input name="query" required placeholder="실패한 웹훅을 재시도하는 부분" /></label>
@@ -230,7 +304,7 @@
                   <div class="wide button-row"><button type="submit">의미 검색</button></div>
                 </form>
               </article>
-              <article class="card">
+              <article class="card" data-tool-category="explore" data-tool-search="file filename path find">
                 <h3>File Search</h3>
                 <form id="find-file-form" class="form-row">
                   <label class="wide">파일명 또는 경로 패턴<input name="pattern" required placeholder="Dockerfile, *.tf, **/migrations/*.sql" /></label>
@@ -239,7 +313,7 @@
                   <div class="wide button-row"><button type="submit">파일 찾기</button></div>
                 </form>
               </article>
-              <article class="card">
+              <article class="card" data-tool-category="explore" data-tool-search="file read source lines">
                 <h3>File Read</h3>
                 <form id="read-file-form" class="form-row">
                   <label class="wide">파일 경로<input name="path" required placeholder="charts/values.yaml" /></label>
@@ -250,7 +324,7 @@
                   <div class="wide button-row"><button type="submit">파일 열기</button></div>
                 </form>
               </article>
-              <article class="card">
+              <article class="card" data-tool-category="explore" data-tool-search="directory folder tree list">
                 <h3>Directory</h3>
                 <form id="directory-form" class="form-row">
                   <label class="wide">디렉터리 경로 (비우면 루트)<input name="path" placeholder="internal/app" /></label>
@@ -259,7 +333,7 @@
                   <div class="wide button-row"><button type="submit">목록 보기</button></div>
                 </form>
               </article>
-              <article class="card">
+              <article class="card" data-tool-category="explore" data-tool-search="file history commit change">
                 <h3>File History</h3>
                 <form id="file-history-form" class="form-row">
                   <label class="wide">파일 경로<input name="path" required placeholder="internal/app/app.go" /></label>
@@ -268,7 +342,7 @@
                   <div class="wide button-row"><button type="submit">이력 보기</button></div>
                 </form>
               </article>
-              <article class="card">
+              <article class="card" data-tool-category="discover" data-tool-search="merge pull request mr pr">
                 <h3>Merge / Pull Requests</h3>
                 <form id="merge-request-form" class="form-row">
                   <label class="wide">검색어 (선택)<input name="query" placeholder="인증 리팩터링" /></label>
@@ -277,7 +351,7 @@
                   <div class="wide button-row"><button type="submit">MR·PR 검색</button></div>
                 </form>
               </article>
-              <article class="card">
+              <article class="card" data-tool-category="analyze" data-tool-search="dependents usages references impact">
                 <h3>Dependents</h3>
                 <form id="dependents-form" class="form-row">
                   <label class="wide">대상 심볼·모듈·테이블<input name="target" required placeholder="Service.GetGPU, internal/auth, users 테이블" /></label>
@@ -285,7 +359,7 @@
                   <div class="wide button-row"><button type="submit">사용처 역추적</button></div>
                 </form>
               </article>
-              <article class="card">
+              <article class="card" data-tool-category="explore" data-tool-search="repository map structure languages entrypoints">
                 <h3>Repository Map</h3>
                 <form id="repository-map-form" class="form-row">
                   <label>Library ID<input name="libraryId" required placeholder="/kcb/clustara" /></label>
@@ -293,7 +367,7 @@
                   <div class="wide button-row"><button type="submit">구조 조회</button></div>
                 </form>
               </article>
-              <article class="card">
+              <article class="card" data-tool-category="explore" data-tool-search="symbol function class method interface">
                 <h3>Symbol Search</h3>
                 <form id="symbol-search-form" class="form-row">
                   <label>Library ID<input name="libraryId" placeholder="/kcb/clustara" /></label>
@@ -302,7 +376,7 @@
                   <div class="wide button-row"><button type="submit">심볼 검색</button></div>
                 </form>
               </article>
-              <article class="card">
+              <article class="card" data-tool-category="analyze" data-tool-search="dependency trace graph module symbol">
                 <h3>Dependency Trace</h3>
                 <form id="dependency-form" class="form-row">
                   <label>Library ID<input name="libraryId" required placeholder="/kcb/clustara" /></label>
@@ -311,7 +385,7 @@
                   <div class="wide button-row"><button type="submit">의존성 추적</button></div>
                 </form>
               </article>
-              <article class="card">
+              <article class="card" data-tool-category="analyze" data-tool-search="change impact compare refs branch tag risk">
                 <h3>Change Impact</h3>
                 <form id="change-impact-form" class="form-row">
                   <label class="wide">Library ID<input name="libraryId" required placeholder="/kcb/clustara" /></label>
@@ -320,7 +394,7 @@
                   <div class="wide button-row"><button type="submit">변경 영향 분석</button></div>
                 </form>
               </article>
-              <article class="card">
+              <article class="card" data-tool-category="context" data-tool-search="context pack system knowledge">
                 <h3>Context Pack</h3>
                 <form id="context-pack-form" class="form-row">
                   <label>Pack Slug<input name="pack" required placeholder="gpu-platform" /></label>
@@ -328,7 +402,7 @@
                   <div class="wide button-row"><button type="submit">Pack 검색</button></div>
                 </form>
               </article>
-              <article class="card">
+              <article class="card" data-tool-category="context" data-tool-search="runbook operation incident troubleshooting">
                 <h3>Runbook Search</h3>
                 <form id="runbook-form" class="form-row">
                   <label>Library ID<input name="libraryId" placeholder="/kcb/clustara" /></label>
@@ -336,7 +410,7 @@
                   <div class="wide button-row"><button type="submit">Runbook 검색</button></div>
                 </form>
               </article>
-              <article class="card">
+              <article class="card" data-tool-category="context" data-tool-search="safe context export markdown">
                 <h3>Safe Context Export</h3>
                 <form id="context-export-form" class="form-row">
                   <label class="wide">Library IDs<input name="libraryIds" required placeholder="/kcb/api, /kcb/agent" /></label>
@@ -345,10 +419,17 @@
                 </form>
               </article>
             </div>
-            <pre id="knowledge-result">검색 결과가 여기에 표시됩니다.</pre>
+            <div class="result-toolbar">
+              <div><strong id="knowledge-result-title">검색 결과</strong><small id="knowledge-result-meta" aria-live="polite">도구를 선택해 실행하세요.</small></div>
+              <div class="button-row"><button id="copy-knowledge-result" class="secondary" type="button">복사</button><button id="download-knowledge-result" class="secondary" type="button">Markdown 저장</button><button id="clear-knowledge-result" class="secondary" type="button">지우기</button></div>
+            </div>
+            <pre id="knowledge-result" tabindex="0" aria-live="polite">검색 결과가 여기에 표시됩니다.</pre>
           </section>
           <section id="activity" class="panel personal-panel" hidden>
-            <h2>내 저장소와 MCP 사용량</h2>
+            <div class="section-title">
+              <div><h2>내 저장소와 MCP 사용량</h2><p id="activity-updated-at">활동 정보를 불러오는 중…</p></div>
+              <button id="refresh-activity" class="secondary" type="button">새로고침</button>
+            </div>
             <h3>알림</h3>
             <div id="my-notifications" class="table-wrap"></div>
             <h3>접근 가능한 저장소</h3>
@@ -426,10 +507,11 @@
                     </div>
                     <div class="button-row">
                       <button id="refresh-vector-status" class="secondary" type="button">상태 새로고침</button>
+                      <button id="test-embedding-model" class="secondary" type="button">임베딩 모델 시험</button>
                       <button id="rebuild-vectors" type="button">벡터 재적재 (마이그레이션)</button>
                     </div>
                   </div>
-                  <div id="vector-status" class="result-panel" hidden></div>
+                  <div id="vector-status" class="result-panel" role="status" aria-live="polite" hidden></div>
                 </div>
                 <div id="source-test-card" class="wide card subtle-card" hidden>
                   <div class="section-title">
@@ -443,7 +525,7 @@
                     <label>프로젝트/그룹 (선택)<input id="source-test-project" /></label>
                     <div class="button-row"><button type="submit">검색 테스트 실행</button></div>
                   </form>
-                  <div id="source-test-result" class="result-panel" hidden></div>
+                  <div id="source-test-result" class="result-panel" role="status" aria-live="polite" hidden></div>
                 </div>
                 <details id="advanced-setting-json" class="wide advanced-json">
                   <summary>고급 JSON 설정</summary>
@@ -461,11 +543,13 @@
                     <label class="inline-field">가져올 파일<input id="import-settings-file" type="file" accept="application/json,.json" /></label>
                     <button id="preview-import-settings" type="button" class="secondary">변경 미리보기</button>
                     <button id="apply-import-settings" type="button" hidden>미리본 내용 적용</button>
+                    <label class="inline-field"><input id="force-import-external" type="checkbox" /> 외부 시스템 연결 불가 항목만 검증 건너뛰기</label>
                   </div>
                   <div id="import-settings-result" class="table-wrap"></div>
                 </details>
-                <div id="setting-test-result" class="wide result-panel" hidden></div>
+                <div id="setting-test-result" class="wide result-panel" role="status" aria-live="polite" hidden></div>
                 <div class="wide setting-actions">
+                  <span id="setting-dirty-state" class="dirty-state" aria-live="polite">저장된 상태</span>
                   <button id="validate-setting" class="secondary">설정 검증</button>
                   <button id="test-connection">연결 테스트·검증</button>
                   <button id="preview-keycloak" class="secondary">Claim·역할 미리보기</button>
@@ -721,9 +805,9 @@
               <form id="database-form" class="form-row">
                 <label class="wide">PostgreSQL DSN<input id="database-dsn" type="password" required autocomplete="new-password" placeholder="postgres://user:password@db:5432/gitctx?sslmode=require" /></label>
                 <label>마이그레이션 확인<input id="database-confirm" placeholder="MIGRATE TO POSTGRES" /></label>
-                <div class="button-row"><button id="test-database" type="button">연결 시험</button><button id="migrate-database" type="button" class="danger">데이터 이전</button></div>
+                <div class="button-row"><button id="test-database" type="button">연결 시험</button><button id="migrate-database" type="button" class="danger" disabled title="현재 DSN의 연결 시험을 먼저 통과해야 합니다.">데이터 이전</button></div>
               </form>
-              <div id="database-action-result" class="notice" hidden></div>
+              <div id="database-action-result" class="notice" role="status" aria-live="polite" hidden></div>
             </div>
           </section>
           <section id="status-admin-section" class="panel admin-panel" hidden>
@@ -749,12 +833,13 @@
         </div>
       </main>
     </div>
+    <button id="sidebar-backdrop" type="button" aria-label="메뉴 닫기" hidden></button>
     <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
     <dialog id="quick-nav-dialog" class="app-dialog quick-nav-dialog" aria-labelledby="quick-nav-title">
       <div class="dialog-head"><strong id="quick-nav-title">빠른 이동</strong><button id="quick-nav-close" type="button" aria-label="닫기">×</button></div>
       <!-- A placeholder is not an accessible name: it disappears on the first
            keystroke and is announced inconsistently. -->
-      <input id="quick-nav-query" type="search" placeholder="메뉴 검색…" autocomplete="off" aria-label="메뉴 검색" aria-controls="quick-nav-results" />
+      <input id="quick-nav-query" type="search" role="combobox" aria-autocomplete="list" aria-expanded="false" placeholder="메뉴 검색…" autocomplete="off" aria-label="메뉴 검색" aria-controls="quick-nav-results" />
       <!-- Results are replaced as the query changes, so they have to be announced. -->
       <div id="quick-nav-results" class="quick-nav-results" role="listbox" aria-label="검색 결과" aria-live="polite"></div>
       <small>↑↓ 이동 · Enter 선택 · Esc 닫기</small>
@@ -861,6 +946,7 @@
     </dialog>
     <script src="/roles.js"></script>
     <script src="/guides.js"></script>
+    <script src="/clients.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

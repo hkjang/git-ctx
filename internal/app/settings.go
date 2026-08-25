@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/cipher"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -17,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"git-ctx/internal/auth"
@@ -36,6 +39,119 @@ import (
 
 // Platform settings: reading, validating, masking secrets, versioning and
 // restoring the configuration an operator edits.
+
+const externalSettingUnreachableCode = "external_setting_unreachable"
+
+// externalSettingUnreachableError is deliberately distinct from ordinary
+// setting validation errors. An administrator may choose to save a valid
+// integration configuration while its target is temporarily unavailable, but
+// force must never turn into a way to bypass structural or security checks.
+type externalSettingUnreachableError struct {
+	category string
+	err      error
+}
+
+func (e *externalSettingUnreachableError) Error() string {
+	return fmt.Sprintf("%s setting target is unreachable: %v", e.category, e.err)
+}
+
+func (e *externalSettingUnreachableError) Unwrap() error { return e.err }
+
+// classifyExternalSettingError is called only around an operation that has
+// already crossed an integration boundary. Configuration constructors and
+// local validators return before this point, so their errors can never become
+// force-saveable by accident.
+func classifyExternalSettingError(category string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var classified *externalSettingUnreachableError
+	if errors.As(err, &classified) {
+		return err
+	}
+	if isExternalNetworkUnreachable(err) {
+		return &externalSettingUnreachableError{category: category, err: err}
+	}
+	switch source.StatusOf(err) {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return &externalSettingUnreachableError{category: category, err: err}
+	default:
+		return err
+	}
+}
+
+// isExternalNetworkUnreachable accepts only failures that mean the target
+// cannot currently be reached. net/url.Error implements net.Error for many
+// policy and TLS failures too, so treating every net.Error as an outage would
+// let force=true bypass certificate and redirect protection.
+func isExternalNetworkUnreachable(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var certificateVerification *tls.CertificateVerificationError
+	var unknownAuthority x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalidCertificate x509.CertificateInvalidError
+	var invalidTLSRecord tls.RecordHeaderError
+	if errors.As(err, &certificateVerification) ||
+		errors.As(err, &unknownAuthority) ||
+		errors.As(err, &hostname) ||
+		errors.As(err, &invalidCertificate) ||
+		errors.As(err, &invalidTLSRecord) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var dnsError *net.DNSError
+	if errors.As(err, &dnsError) {
+		return true
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return true
+	}
+	for _, unavailable := range []error{
+		syscall.ECONNREFUSED,
+		syscall.ECONNRESET,
+		syscall.ECONNABORTED,
+		syscall.EHOSTUNREACH,
+		syscall.ENETUNREACH,
+		syscall.ETIMEDOUT,
+		syscall.EPIPE,
+	} {
+		if errors.Is(err, unavailable) {
+			return true
+		}
+	}
+	return false
+}
+
+func isExternalSettingUnreachable(err error) bool {
+	var target *externalSettingUnreachableError
+	return errors.As(err, &target)
+}
+
+func settingValidationProblem(w http.ResponseWriter, status int, fallbackCode string, err error) {
+	code := fallbackCode
+	if isExternalSettingUnreachable(err) {
+		code = externalSettingUnreachableCode
+	}
+	jsonOut(w, status, map[string]any{
+		"type": "about:blank", "title": code, "code": code,
+		"status": status, "detail": err.Error(),
+	})
+}
+
+func settingSupportsConnectionTest(category string) bool {
+	switch category {
+	case "keycloak", "bitbucket", "gitlab", "confluence", "jira", "model",
+		"opensearch", "vault", "vector", "observability", "backup", "notifications":
+		return true
+	default:
+		return false
+	}
+}
 
 func (a *App) listSettings(w http.ResponseWriter, r *http.Request) {
 	rows, e := a.store.DB.QueryContext(r.Context(), `SELECT category,version,updated_by,updated_at FROM system_settings ORDER BY category`)
@@ -162,8 +278,11 @@ func (a *App) putSetting(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	validationSkipped := ""
 	if err := a.validateSetting(ctx, category, value); err != nil {
-		if !force {
-			problem(w, 400, "setting_validation_failed", err.Error())
+		// Only a typed external reachability failure may be skipped. In
+		// particular, force=true does not relax schema, range, URL, CIDR or other
+		// local validation rules.
+		if !force || !settingSupportsConnectionTest(category) || !isExternalSettingUnreachable(err) {
+			settingValidationProblem(w, http.StatusBadRequest, "setting_validation_failed", err)
 			return
 		}
 		validationSkipped = err.Error()
@@ -316,7 +435,7 @@ func (a *App) validateIntegrationSetting(w http.ResponseWriter, r *http.Request)
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	if err := a.validateSetting(ctx, category, value); err != nil {
-		problem(w, http.StatusBadRequest, "setting_validation_failed", err.Error())
+		settingValidationProblem(w, http.StatusBadRequest, "setting_validation_failed", err)
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{
@@ -342,8 +461,7 @@ func maskedCopy(value map[string]any) map[string]any {
 func (a *App) testIntegrationSetting(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
 	category := r.PathValue("category")
-	allowed := map[string]bool{"keycloak": true, "bitbucket": true, "gitlab": true, "confluence": true, "jira": true, "model": true, "opensearch": true, "vault": true, "vector": true, "observability": true, "backup": true, "notifications": true}
-	if !allowed[category] {
+	if !settingSupportsConnectionTest(category) {
 		problem(w, 400, "setting_test_unsupported", "This setting category has no external or storage connection test")
 		return
 	}
@@ -363,7 +481,7 @@ func (a *App) testIntegrationSetting(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	if err := a.validateSetting(ctx, category, value); err != nil {
 		a.audit(r, p, "settings.test", category, category, "failure", map[string]any{"error": truncateText(err.Error(), 500)})
-		problem(w, 400, "setting_connection_test_failed", err.Error())
+		settingValidationProblem(w, http.StatusBadRequest, "setting_connection_test_failed", err)
 		return
 	}
 	if category == "notifications" {
@@ -373,8 +491,9 @@ func (a *App) testIntegrationSetting(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if cfgErr = outboundnotification.Validate(ctx, cfg); cfgErr != nil {
+			cfgErr = classifyExternalSettingError(category, cfgErr)
 			a.audit(r, p, "settings.test", category, category, "failure", map[string]any{"error": truncateText(cfgErr.Error(), 500)})
-			problem(w, 400, "setting_connection_test_failed", cfgErr.Error())
+			settingValidationProblem(w, http.StatusBadRequest, "setting_connection_test_failed", cfgErr)
 			return
 		}
 	}
@@ -391,8 +510,9 @@ func (a *App) testIntegrationSetting(w http.ResponseWriter, r *http.Request) {
 		}
 		queryStatus, queryErr := testSourceQueryAPI(ctx, category, sourceValue)
 		if queryErr != nil {
+			queryErr = classifyExternalSettingError(category, queryErr)
 			a.audit(r, p, "settings.test", category, category, "failure", map[string]any{"component": "query-search", "error": truncateText(queryErr.Error(), 500)})
-			problem(w, 400, "setting_query_search_test_failed", queryErr.Error())
+			settingValidationProblem(w, http.StatusBadRequest, "setting_query_search_test_failed", queryErr)
 			return
 		}
 		details["querySearch"] = queryStatus
@@ -546,7 +666,7 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 	if a.secrets != nil && category != "vault" {
 		resolved, err := a.secrets.Resolve(ctx, value)
 		if err != nil {
-			return err
+			return classifyExternalSettingError(category, err)
 		}
 		value = resolved
 	}
@@ -558,7 +678,7 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 			return err
 		}
 		_, err := auth.OAuthConfig(ctx, cfg)
-		return err
+		return classifyExternalSettingError(category, err)
 	case "bitbucket", "gitlab", "confluence", "jira":
 		adapter, err := sourceAdapterFromMap(category, value)
 		if err != nil {
@@ -566,24 +686,24 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 		}
 		projects, err := adapter.ListProjects(ctx)
 		if err != nil {
-			return fmt.Errorf("%s connection test: %w", category, err)
+			return classifyExternalSettingError(category, fmt.Errorf("%s connection test: %w", category, err))
 		}
 		if len(projects) == 0 {
 			return nil
 		}
 		repositories, err := adapter.ListRepositories(ctx, projects[0].Key)
 		if err != nil {
-			return fmt.Errorf("%s repository discovery test: %w", category, err)
+			return classifyExternalSettingError(category, fmt.Errorf("%s repository discovery test: %w", category, err))
 		}
 		if len(repositories) == 0 {
 			return nil
 		}
 		repository := source.RepositoryRef{ProjectKey: repositories[0].ProjectKey, Slug: repositories[0].Slug}
 		if _, err = adapter.GetPermissions(ctx, repository); err != nil {
-			return fmt.Errorf("%s ACL synchronization test: %w", category, err)
+			return classifyExternalSettingError(category, fmt.Errorf("%s ACL synchronization test: %w", category, err))
 		}
 		if _, err = adapter.ListBranches(ctx, repository); err != nil {
-			return fmt.Errorf("%s branch discovery test: %w", category, err)
+			return classifyExternalSettingError(category, fmt.Errorf("%s branch discovery test: %w", category, err))
 		}
 	case "ui":
 		if value, ok := value["publicUrl"].(string); ok && value != "" {
@@ -690,7 +810,7 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 			return err
 		}
 		if _, err = provider.Embed(ctx, "git-ctx embedding connection test"); err != nil {
-			return fmt.Errorf("embedding connection test: %w", err)
+			return classifyExternalSettingError(category, fmt.Errorf("embedding connection test: %w", err))
 		}
 		reranker, err := rerankerProviderFromMap(value)
 		if err != nil {
@@ -698,7 +818,7 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 		}
 		if reranker != nil {
 			if _, err = reranker.Rerank(ctx, "git-ctx reranker connection test", []string{"relevant document", "unrelated document"}); err != nil {
-				return fmt.Errorf("reranker connection test: %w", err)
+				return classifyExternalSettingError(category, fmt.Errorf("reranker connection test: %w", err))
 			}
 		}
 	case "vector":
@@ -707,7 +827,7 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 			return nil
 		}
 		_, err := vectorstore.TestConnection(ctx, cfg, a.postgresDSN(ctx))
-		return err
+		return classifyExternalSettingError(category, err)
 	case "opensearch":
 		cfg, err := openSearchConfigFromMap(value)
 		if err != nil {
@@ -720,7 +840,7 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 		if err != nil {
 			return err
 		}
-		return client.Validate(ctx)
+		return classifyExternalSettingError(category, client.Validate(ctx))
 	case "vault":
 		cfg, err := vaultConfigFromMap(value)
 		if err != nil {
@@ -733,9 +853,9 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 		if err != nil {
 			return err
 		}
-		return client.Validate(ctx)
+		return classifyExternalSettingError(category, client.Validate(ctx))
 	case "observability":
-		return observability.Validate(ctx, observabilityConfigFromMap(value))
+		return classifyExternalSettingError(category, observability.Validate(ctx, observabilityConfigFromMap(value)))
 	case "backup":
 		return backup.ValidateStorage(backupConfigFromMap(value, a.cfg.BackupDirectory))
 	case "logging":
@@ -1196,13 +1316,20 @@ func (a *App) importSettings(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		validationErr := a.validateSetting(ctx, category, normalized)
 		cancel()
-		if validationErr != nil && !force {
+		canSkipValidation := force && settingSupportsConnectionTest(category) && isExternalSettingUnreachable(validationErr)
+		if validationErr != nil && !canSkipValidation {
 			item["status"], item["detail"] = "invalid", validationErr.Error()
+			if isExternalSettingUnreachable(validationErr) {
+				item["code"] = externalSettingUnreachableCode
+			} else {
+				item["code"] = "setting_validation_failed"
+			}
 			results = append(results, item)
 			continue
 		}
 		if validationErr != nil {
 			item["validationSkipped"] = validationErr.Error()
+			item["validationSkippedCode"] = externalSettingUnreachableCode
 		}
 		if !apply {
 			item["status"], item["detail"] = "ready", fmt.Sprintf("%d개 항목이 바뀝니다.", len(changes))

@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"git-ctx/internal/source"
 )
 
 // The default deployment has no vector database, and that must be reported as a
@@ -39,6 +41,25 @@ func TestCollectionNameIsValidated(t *testing.T) {
 	}
 	if name, err := identifier(""); err != nil || name != defaultCollection {
 		t.Fatalf("name=%s err=%v", name, err)
+	}
+}
+
+func TestMilvusHTTPErrorCarriesStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("milvus is starting"))
+	}))
+	defer server.Close()
+	vectorStore, err := Open(FromMap(map[string]any{
+		"provider": "milvus", "baseUrl": server.URL, "dimensions": float64(4),
+	}), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vectorStore.Close()
+	_, err = vectorStore.Status(context.Background())
+	if source.StatusOf(err) != http.StatusServiceUnavailable || !strings.Contains(err.Error(), "milvus 503 Service Unavailable: milvus is starting") {
+		t.Fatalf("status=%d err=%v", source.StatusOf(err), err)
 	}
 }
 

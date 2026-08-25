@@ -62,7 +62,8 @@ func (o *OpenAI) Rerank(ctx context.Context, query string, documents []string) (
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("reranker API %s: %s", resp.Status, string(body))
+		return nil, netclient.NewHTTPStatusError(resp.StatusCode,
+			fmt.Errorf("reranker API %s: %s", resp.Status, string(body)))
 	}
 	var out struct {
 		Results []struct {

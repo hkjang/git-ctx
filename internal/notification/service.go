@@ -377,7 +377,8 @@ func postWebhook(ctx context.Context, client *http.Client, endpoint, authorizati
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("notification endpoint returned %s", response.Status)
+		return netclient.NewHTTPStatusError(response.StatusCode,
+			fmt.Errorf("notification endpoint returned %s", response.Status))
 	}
 	return nil
 }

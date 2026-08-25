@@ -2073,9 +2073,9 @@ func TestSettingVersionDiffRestoreAndConflict(t *testing.T) {
 	}
 }
 
-// A source server in a maintenance window must not stop an administrator from
-// saving a configuration, but the skipped validation has to be visible rather
-// than silently accepted.
+// Force is intentionally narrow: a source server in a maintenance window must
+// not stop an administrator from preparing a valid configuration, but force
+// must never bypass local structure, range or security validation.
 func TestSettingForceSaveRecordsSkippedValidation(t *testing.T) {
 	a, err := New(context.Background(), config.Config{DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(t.TempDir(), "settings-force.db") + "?_foreign_keys=on", KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(t.TempDir(), "backups")})
 	if err != nil {
@@ -2091,10 +2091,89 @@ func TestSettingForceSaveRecordsSkippedValidation(t *testing.T) {
 		a.Handler().ServeHTTP(recorder, request)
 		return recorder
 	}
+	problemCode := func(t *testing.T, response *httptest.ResponseRecorder) string {
+		t.Helper()
+		var body struct {
+			Code  string `json:"code"`
+			Title string `json:"title"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode problem response: %v body=%s", err, response.Body.String())
+		}
+		if body.Title != body.Code {
+			t.Fatalf("problem title=%q code=%q body=%s", body.Title, body.Code, response.Body.String())
+		}
+		return body.Code
+	}
+	for _, test := range []struct {
+		category string
+		body     string
+	}{
+		{category: "search", body: `{"keywordWeight":0,"vectorWeight":0}`},
+		{category: "security", body: `{"trustedProxyCidrs":["not-a-cidr"]}`},
+		{category: "operations", body: `{"listenAddress":"all-interfaces"}`},
+	} {
+		t.Run("local-validation-"+test.category, func(t *testing.T) {
+			response := call("/api/v1/admin/settings/"+test.category+"?force=true", test.body)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("force accepted invalid %s setting: %d %s", test.category, response.Code, response.Body.String())
+			}
+			if code := problemCode(t, response); code != "setting_validation_failed" {
+				t.Fatalf("invalid %s code=%q body=%s", test.category, code, response.Body.String())
+			}
+			var stored int
+			if err := a.store.DB.QueryRow(`SELECT COUNT(*) FROM system_settings WHERE category=?`, test.category).Scan(&stored); err != nil {
+				t.Fatal(err)
+			}
+			if stored != 0 {
+				t.Fatalf("invalid %s setting was persisted", test.category)
+			}
+		})
+	}
+	// A server that answered with an application/authentication failure is
+	// reachable. Force may not treat that response as a transport outage.
+	reachable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	badCredentialSetting := `{"provider":"milvus","baseUrl":"` + reachable.URL + `","collection":"git_ctx_chunk_vectors","dimensions":256,"timeoutSeconds":1}`
+	badCredential := call("/api/v1/admin/settings/vector?force=true", badCredentialSetting)
+	reachable.Close()
+	if badCredential.Code != http.StatusBadRequest || problemCode(t, badCredential) != "setting_validation_failed" {
+		t.Fatalf("force accepted a reachable target's rejected request: %d %s", badCredential.Code, badCredential.Body.String())
+	}
+	// An HTTPS endpoint with an untrusted certificate is reachable, but its
+	// transport identity is not verified. It must never be reclassified as a
+	// temporary outage that force=true can bypass.
+	untrustedTLS := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"data":{}}`))
+	}))
+	untrustedTLSSetting := `{"provider":"milvus","baseUrl":"` + untrustedTLS.URL + `","collection":"git_ctx_chunk_vectors","dimensions":256,"timeoutSeconds":1}`
+	untrusted := call("/api/v1/admin/settings/vector?force=true", untrustedTLSSetting)
+	untrustedTLS.Close()
+	if untrusted.Code != http.StatusBadRequest || problemCode(t, untrusted) != "setting_validation_failed" {
+		t.Fatalf("force accepted an untrusted TLS endpoint: %d %s", untrusted.Code, untrusted.Body.String())
+	}
+	// A typed gateway/service outage is the narrow HTTP case force is meant to
+	// support. The first request must explain that it is forceable; the explicit
+	// retry may persist it while retaining the skipped-validation warning.
+	unavailable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "milvus is starting", http.StatusServiceUnavailable)
+	}))
+	unavailableSetting := `{"provider":"milvus","baseUrl":"` + unavailable.URL + `","collection":"git_ctx_chunk_vectors","dimensions":256,"timeoutSeconds":1}`
+	unavailableByDefault := call("/api/v1/admin/settings/vector", unavailableSetting)
+	if unavailableByDefault.Code != http.StatusBadRequest || problemCode(t, unavailableByDefault) != externalSettingUnreachableCode {
+		t.Fatalf("503 target was not reported as forceable: %d %s", unavailableByDefault.Code, unavailableByDefault.Body.String())
+	}
+	forcedUnavailable := call("/api/v1/admin/settings/vector?force=true", unavailableSetting)
+	unavailable.Close()
+	if forcedUnavailable.Code != http.StatusOK || !strings.Contains(forcedUnavailable.Body.String(), "validationSkipped") {
+		t.Fatalf("forced 503 save=%d body=%s", forcedUnavailable.Code, forcedUnavailable.Body.String())
+	}
 	// Nothing listens on this port, so validation fails.
 	setting := `{"provider":"milvus","baseUrl":"http://127.0.0.1:9","collection":"git_ctx_chunk_vectors","dimensions":256,"timeoutSeconds":1}`
 	refused := call("/api/v1/admin/settings/vector", setting)
-	if refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), "setting_validation_failed") {
+	if refused.Code != http.StatusBadRequest || problemCode(t, refused) != externalSettingUnreachableCode {
 		t.Fatalf("unreachable target must be refused by default: %d %s", refused.Code, refused.Body.String())
 	}
 	forced := call("/api/v1/admin/settings/vector?force=true", setting)

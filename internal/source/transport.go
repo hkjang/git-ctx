@@ -40,8 +40,8 @@ func StatusOf(err error) int {
 	if errors.As(err, &api) {
 		return api.StatusCode
 	}
-	// Bitbucket has carried its own error type since before this package
-	// existed; it exposes the same field name through this interface.
+	// Source adapters and the shared HTTP client expose the same narrow method,
+	// so wrapped non-2xx errors retain their status without package coupling.
 	var coded interface{ Status() int }
 	if errors.As(err, &coded) {
 		return coded.Status()

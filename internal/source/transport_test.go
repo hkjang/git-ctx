@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"testing"
@@ -54,6 +55,21 @@ func TestErrorClassificationAndRetryDelay(t *testing.T) {
 	}
 	if first, second := RetryDelay(nil, 0), RetryDelay(nil, 2); second <= first {
 		t.Fatalf("backoff must grow: %s then %s", first, second)
+	}
+}
+
+func TestStatusOfRecognizesSharedHTTPStatusCarrier(t *testing.T) {
+	for _, status := range []int{
+		http.StatusUnauthorized,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout,
+	} {
+		err := fmt.Errorf("connection test: %w",
+			netclient.NewHTTPStatusError(status, errors.New("provider response")))
+		if got := StatusOf(err); got != status {
+			t.Fatalf("StatusOf(shared status %d) = %d", status, got)
+		}
 	}
 }
 

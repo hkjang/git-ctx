@@ -115,6 +115,51 @@ function toast(message, level = "info", action = null) {
   setTimeout(() => item.remove(), level === "error" ? 15000 : 7000);
 }
 
+// 복사는 API 키와 MCP 설정에서 가장 중요한 동작입니다. HTTPS clipboard API를
+// 우선 사용하되 폐쇄망의 HTTP 접속에서도 동작하도록 선택 영역 기반 fallback을
+// 제공합니다. 복사한 값은 어떤 브라우저 저장소에도 남기지 않습니다.
+async function copyText(value, success = "클립보드에 복사했습니다.") {
+  const text = String(value ?? "");
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const field = document.createElement("textarea");
+      try {
+        field.value = text;
+        field.setAttribute("readonly", "");
+        field.style.position = "fixed";
+        field.style.opacity = "0";
+        document.body.append(field);
+        field.select();
+        if (!document.execCommand("copy")) throw new Error("copy command failed");
+      } finally {
+        // A failed legacy copy must not leave an API key in a textarea that is
+        // still reachable from the live document.
+        field.value = "";
+        field.remove();
+      }
+    }
+    toast(success, "ok");
+    return true;
+  } catch {
+    toast("자동 복사에 실패했습니다. 내용을 직접 선택해 복사하세요.", "error");
+    return false;
+  }
+}
+
+function downloadText(filename, value, type = "text/markdown;charset=utf-8") {
+  const url = URL.createObjectURL(new Blob([String(value ?? "")], { type }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  toast(`${filename} 파일로 저장했습니다.`, "ok");
+}
+
 const THEME_KEY = "git_ctx_theme";
 function applyTheme(theme) {
   if (theme === "light" || theme === "dark") {
@@ -636,7 +681,13 @@ function reportError(error, context = "") {
     return;
   }
   if (error?.status === 401) {
-    toast(prefix + "인증이 만료되었습니다. 다시 로그인하세요.", "error");
+    toast(prefix + "인증이 만료되었습니다. 다시 로그인하세요.", "error", {
+      label: "로그인",
+      run: () => {
+        const returnTo = location.pathname.startsWith("/admin") ? "/admin" : "/";
+        location.href = `/auth/login?return_to=${encodeURIComponent(returnTo)}`;
+      },
+    });
     return;
   }
   toast(prefix + (error?.message || "알 수 없는 오류"), "error");
@@ -684,7 +735,7 @@ function showUpgradeNotice(version) {
   badge.onclick = () => location.reload();
 }
 
-$("#endpoint").textContent = location.origin;
+$("#endpoint").textContent = `${location.origin}/mcp`;
 async function loadBranding() {
   try {
     const config = await api("/api/v1/public/config");
@@ -706,6 +757,7 @@ async function loadBranding() {
       ssoConfigured: Boolean(config.ssoConfigured),
     };
     $("#login").disabled = !bootstrapInfo.ssoConfigured;
+    $("#login").hidden = isAdminEntry && bootstrapInfo.required && !bootstrapInfo.ssoConfigured;
     $("#login").title = bootstrapInfo.ssoConfigured
       ? "Keycloak SSO로 로그인"
       : "관리자가 Keycloak SSO를 먼저 설정해야 합니다.";
@@ -723,6 +775,12 @@ async function loadBranding() {
     }
   } catch (e) {
     console.warn("브랜드 설정을 불러오지 못했습니다.", e);
+    $("#login").disabled = true;
+    $("#login").title = "공개 설정 API에 연결할 수 없습니다.";
+    $("#service-notice").hidden = false;
+    $("#service-notice").className = "notice error";
+    $("#service-notice").textContent =
+      "서비스 설정을 불러오지 못했습니다. 잠시 후 새로고침하거나 관리자에게 문의하세요.";
   }
 }
 async function loadPublicStatus() {
@@ -737,6 +795,69 @@ async function loadPublicStatus() {
     $("#database-status").textContent = "메타 DB 상태 API에 연결할 수 없습니다.";
     $("#database-status").classList.add("error");
   }
+}
+
+const MCP_CLIENT_KEY = "git_ctx_mcp_client";
+function setupClientConnections() {
+  if (!window.GitCtxClients) return;
+  const endpoint = `${location.origin}/mcp`;
+  let configurations;
+  try {
+    configurations = GitCtxClients.configurations(endpoint);
+  } catch (error) {
+    $("#mcp-client-config").textContent = error.message;
+    return;
+  }
+  const preferred = localStorage.getItem(MCP_CLIENT_KEY);
+  let active = configurations.find((item) => item.id === preferred) || configurations[0];
+  const render = () => {
+    $("#mcp-client-title").textContent = active.label;
+    $("#mcp-client-file").textContent = active.file;
+    $("#mcp-client-description").textContent = active.description;
+    $("#mcp-client-config").textContent = active.config;
+    $$('[data-mcp-client]').forEach((button) => {
+      const selected = button.dataset.mcpClient === active.id;
+      button.classList.toggle("active", selected);
+      button.setAttribute("aria-selected", String(selected));
+      button.tabIndex = selected ? 0 : -1;
+    });
+  };
+  $("#mcp-client-tabs").innerHTML = configurations
+    .map(
+      (item) =>
+        `<button type="button" role="tab" data-mcp-client="${esc(item.id)}">${esc(item.label)}</button>`,
+    )
+    .join("");
+  $$('[data-mcp-client]').forEach((button) => {
+    button.onclick = () => {
+      active = configurations.find((item) => item.id === button.dataset.mcpClient);
+      localStorage.setItem(MCP_CLIENT_KEY, active.id);
+      render();
+    };
+    button.onkeydown = (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const tabs = $$('[data-mcp-client]');
+      const index = tabs.indexOf(button);
+      const next = event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? tabs.length - 1
+          : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+      tabs[next].click();
+      tabs[next].focus();
+    };
+  });
+  const commands = GitCtxClients.environmentCommands();
+  const windows = /Win/i.test(navigator.platform || navigator.userAgent || "");
+  const command = commands.find((item) => item.id === (windows ? "powershell" : "posix")) || commands[0];
+  $("#mcp-env-command").textContent = command.command;
+  $("#copy-endpoint").onclick = () => copyText(endpoint, "MCP 주소를 복사했습니다.");
+  $("#copy-client-config").onclick = () =>
+    copyText(active.config, `${active.label} 설정을 복사했습니다.`);
+  $("#copy-env-command").onclick = () =>
+    copyText(command.command, `${command.label} 환경변수 명령을 복사했습니다.`);
+  render();
 }
 $("#login").onclick = () => {
   if (bootstrapInfo.ssoConfigured) {
@@ -790,10 +911,22 @@ const performLogout = async () => {
 };
 $("#logout").onclick = performLogout;
 $("#profile-logout").onclick = performLogout;
+let currentUser = null;
+const personalSnapshot = {
+  keys: null,
+  notifications: null,
+  repositories: null,
+  usage: null,
+  calls: null,
+};
 async function boot() {
   try {
     const me = await api("/api/v1/me");
-    $("#status").textContent = "Keycloak 인증이 완료되었습니다.";
+    currentUser = me;
+    const recoverySession = ["bootstrap-admin", "break-glass-admin"].includes(me.UserID);
+    $("#status").textContent = recoverySession
+      ? "제한된 관리자 복구 세션입니다. Keycloak SSO 설정과 로그인 시험을 완료하세요."
+      : "Keycloak 인증이 완료되었습니다.";
     $("#status").classList.add("ok");
     // 로그인 후에는 소개 문구 대신 작업 화면이 먼저 보이도록 환영 패널을 접습니다.
     document.querySelector(".welcome-panel").classList.add("compact");
@@ -824,15 +957,35 @@ async function boot() {
     setupWorkspaceNavigation(hasAdmin);
     setupProfileMenu();
     setupQuickNavigation(capabilities, me.Roles || []);
+    setupClientConnections();
+    $("#refresh-activity").onclick = (event) =>
+      withBusy(event.currentTarget, "새로고침 중…", loadActivity);
+    updateKeyScopeCount();
     applyInitialNavigation(hasAdmin);
     loadKeys();
     loadActivity();
     setupKnowledgeSearch();
     loadAccessDiagnostics();
   } catch (e) {
-    $("#status").textContent =
-      "Keycloak으로 로그인하면 개인 MCP 키와 관리자 기능을 사용할 수 있습니다.";
-    if (isAdminEntry && !bootstrapInfo.required && !isRecoveryEntry) {
+    currentUser = null;
+    $("#status").classList.remove("ok", "error");
+    if (e?.status === 401) {
+      $("#status").textContent =
+        "Keycloak으로 로그인하면 개인 MCP 키와 검색 기능을 사용할 수 있습니다.";
+    } else if (e?.status === 403) {
+      $("#status").classList.add("error");
+      $("#status").textContent =
+        "로그인은 되었지만 이 서비스에 접근할 역할이 없습니다. 관리자에게 역할을 요청하세요.";
+    } else {
+      $("#status").classList.add("error");
+      $("#status").textContent =
+        `사용자 정보를 확인하지 못했습니다: ${e?.message || "서비스 연결 오류"}`;
+      toast("로그인 상태 확인 중 서비스 오류가 발생했습니다.", "error", {
+        label: "다시 시도",
+        run: boot,
+      });
+    }
+    if (e?.status === 401 && isAdminEntry && !bootstrapInfo.required && !isRecoveryEntry) {
       location.href = `/auth/login?return_to=${encodeURIComponent("/admin")}`;
     }
   }
@@ -1091,6 +1244,72 @@ function setupKnowledgeSearch() {
       output.textContent = error.message;
     }
   };
+
+  // 도구 수가 늘어나도 원하는 작업을 빠르게 찾고 실행 상태를 놓치지 않도록
+  // 카탈로그 검색, 범주 필터와 공통 결과 동작을 한곳에서 관리합니다.
+  let activeFilter = "all";
+  let activeTool = "검색 결과";
+  let runStartedAt = 0;
+  const toolCards = $$("#knowledge-tools [data-tool-category]");
+  const filterTools = () => {
+    const query = $("#knowledge-tool-query").value.trim().toLowerCase();
+    let visible = 0;
+    for (const card of toolCards) {
+      const categoryMatches = activeFilter === "all" || card.dataset.toolCategory === activeFilter;
+      const haystack = `${card.querySelector("h3")?.textContent || ""} ${card.dataset.toolSearch || ""} ${card.textContent}`.toLowerCase();
+      card.hidden = !categoryMatches || (query !== "" && !haystack.includes(query));
+      if (!card.hidden) visible += 1;
+    }
+    $("#knowledge-tool-count").textContent = `${visible}/${toolCards.length}개 도구`;
+  };
+  $$("[data-tool-filter]").forEach((button) => {
+    button.onclick = () => {
+      activeFilter = button.dataset.toolFilter;
+      $$("[data-tool-filter]").forEach((candidate) => {
+        const active = candidate === button;
+        candidate.classList.toggle("active", active);
+        candidate.setAttribute("aria-pressed", String(active));
+      });
+      filterTools();
+    };
+  });
+  $("#knowledge-tool-query").oninput = filterTools;
+  toolCards.forEach((card) => {
+    card.querySelector("form")?.addEventListener(
+      "submit",
+      () => {
+        activeTool = card.querySelector("h3")?.textContent || "검색";
+        runStartedAt = performance.now();
+        $("#knowledge-result-title").textContent = activeTool;
+        $("#knowledge-result-meta").textContent = "실행 중…";
+        output.setAttribute("aria-busy", "true");
+      },
+      true,
+    );
+  });
+  new MutationObserver(() => {
+    const value = output.textContent.trim();
+    if (!runStartedAt || /중…$/.test(value)) return;
+    const elapsed = Math.max(0, performance.now() - runStartedAt);
+    $("#knowledge-result-meta").textContent = `응답 완료 · ${new Date().toLocaleTimeString()} · ${(elapsed / 1000).toFixed(1)}초`;
+    output.removeAttribute("aria-busy");
+    runStartedAt = 0;
+  }).observe(output, { childList: true, characterData: true, subtree: true });
+  $("#copy-knowledge-result").onclick = () =>
+    copyText(output.textContent, "검색 결과를 복사했습니다.");
+  $("#download-knowledge-result").onclick = () => {
+    const slug = activeTool.toLowerCase().replace(/[^a-z0-9가-힣]+/g, "-").replace(/^-|-$/g, "") || "result";
+    downloadText(`git-ctx-${slug}.md`, output.textContent);
+  };
+  $("#clear-knowledge-result").onclick = () => {
+    activeTool = "검색 결과";
+    runStartedAt = 0;
+    output.removeAttribute("aria-busy");
+    output.textContent = "검색 결과가 여기에 표시됩니다.";
+    $("#knowledge-result-title").textContent = activeTool;
+    $("#knowledge-result-meta").textContent = "도구를 선택해 실행하세요.";
+  };
+  filterTools();
 }
 let currentRoleSet = new Set();
 let activeScopeEditor = null;
@@ -1151,6 +1370,7 @@ $("#key-scope-form").onsubmit = async (event) => {
     $("#key-scope-dialog").close();
     activeScopeEditor = null;
     await onSaved();
+    toast("API 키 Scope를 변경했습니다.", "ok");
   } catch (error) {
     $("#key-scope-description").textContent = error.message;
   }
@@ -1197,7 +1417,7 @@ let openSettingCategory = () => {};
  * 현재 작업 영역·패널·설정 탭을 주소의 fragment에 기록해, 새로고침하거나 링크를
  * 공유해도 같은 화면이 그대로 열리게 합니다.
  * ------------------------------------------------------------------------- */
-const viewState = { workspace: "personal", personal: "account", panel: "", category: "" };
+const viewState = { workspace: "personal", personal: "home", panel: "", category: "" };
 let restoringView = false;
 
 function rememberView(patch) {
@@ -1206,7 +1426,7 @@ function rememberView(patch) {
   const hash =
     viewState.workspace === "admin"
       ? `#/admin/${viewState.panel || "settings-admin"}${viewState.panel === "settings-admin" && viewState.category ? `/${viewState.category}` : ""}`
-      : `#/personal/${viewState.personal || "account"}`;
+      : `#/personal/${viewState.personal || "home"}`;
   if (location.hash !== hash) history.replaceState(null, "", location.pathname + location.search + hash);
 }
 
@@ -1214,8 +1434,8 @@ function rememberView(patch) {
 // 한 번만 캡처해 두고 복원에 사용합니다.
 const initialViewHash = location.hash;
 
-function parseViewHash() {
-  const parts = initialViewHash.replace(/^#\/?/, "").split("/").filter(Boolean);
+function parseViewHash(hash = initialViewHash) {
+  const parts = hash.replace(/^#\/?/, "").split("/").filter(Boolean);
   // 이전 버전이 사용하던 #admin/keycloak 형식도 계속 인식합니다.
   if (parts[0] === "admin" && parts[1] === "keycloak" && parts.length === 2) {
     return { workspace: "admin", panel: "settings-admin", category: "keycloak" };
@@ -1227,18 +1447,37 @@ function parseViewHash() {
 function setupWorkspaceNavigation(hasAdmin) {
   $("#app-sidebar").hidden = false;
   $("#sidebar-toggle").hidden = false;
-  $("#sidebar-toggle").onclick = () => {
+  const media = matchMedia("(max-width: 860px)");
+  const setCollapsed = (collapsed) => {
     const sidebar = $("#app-sidebar");
-    const collapsed = sidebar.dataset.collapsed !== "true";
     sidebar.dataset.collapsed = String(collapsed);
     $("#sidebar-toggle").setAttribute("aria-expanded", String(!collapsed));
+    $("#sidebar-toggle").setAttribute("aria-label", collapsed ? "메뉴 열기" : "메뉴 닫기");
+    $("#sidebar-backdrop").hidden = collapsed || !media.matches;
   };
+  const closeMobileSidebar = () => {
+    if (media.matches) setCollapsed(true);
+  };
+  setCollapsed(media.matches);
+  $("#sidebar-toggle").onclick = () => {
+    const sidebar = $("#app-sidebar");
+    setCollapsed(sidebar.dataset.collapsed !== "true");
+  };
+  $("#sidebar-backdrop").onclick = closeMobileSidebar;
+  media.addEventListener?.("change", (event) => setCollapsed(event.matches));
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && media.matches && $("#app-sidebar").dataset.collapsed !== "true") {
+      setCollapsed(true);
+      $("#sidebar-toggle").focus();
+    }
+  });
   $("#workspace-menu").hidden = false;
   $("#admin-workspace-button").hidden = !hasAdmin;
   $("#profile-acl").onclick = () => openGuide("acl");
   setupPersonalNavigation();
   openWorkspaceView = (workspace) => {
     const admin = workspace === "admin" && hasAdmin;
+    if (admin) clearOneTimeSecret();
     $("#personal-workspace").hidden = admin;
     $("#admin").hidden = !admin;
     $("#personal-menu").hidden = admin;
@@ -1254,6 +1493,7 @@ function setupWorkspaceNavigation(hasAdmin) {
     (button) =>
       (button.onclick = () => {
         openWorkspaceView(button.dataset.workspace);
+        closeMobileSidebar();
         revealPanel(
           document.getElementById(
             button.dataset.workspace === "admin" ? "admin" : "personal-workspace",
@@ -1293,6 +1533,7 @@ function applyInitialNavigation(hasAdmin) {
 }
 function setupPersonalNavigation() {
   openPersonalView = (target) => {
+    if (target !== "keys") clearOneTimeSecret();
     document.querySelectorAll(".personal-panel").forEach(
       (panel) => (panel.hidden = panel.id !== target),
     );
@@ -1308,14 +1549,21 @@ function setupPersonalNavigation() {
       (button.onclick = () => {
         const target = button.dataset.personalTarget;
         openPersonalView(target);
+        if (matchMedia("(max-width: 860px)").matches) {
+          $("#app-sidebar").dataset.collapsed = "true";
+          $("#sidebar-toggle").setAttribute("aria-expanded", "false");
+          $("#sidebar-toggle").setAttribute("aria-label", "메뉴 열기");
+          $("#sidebar-backdrop").hidden = true;
+        }
         revealPanel(document.getElementById(target));
       }),
   );
-  openPersonalView("account");
+  openPersonalView("home");
 }
 function navigatePersonal(target) {
   openWorkspaceView("personal");
   openPersonalView(target);
+  revealPanel(document.getElementById(target));
   window.scrollTo({ top: 0, behavior: scrollBehavior() });
 }
 function setupProfileMenu() {
@@ -1325,17 +1573,36 @@ function setupProfileMenu() {
     dropdown.hidden = true;
     toggle.setAttribute("aria-expanded", "false");
   };
+  const items = () => [...dropdown.querySelectorAll('[role="menuitem"]')];
   toggle.onclick = (event) => {
     event.stopPropagation();
     dropdown.hidden = !dropdown.hidden;
     toggle.setAttribute("aria-expanded", String(!dropdown.hidden));
+    if (!dropdown.hidden) items()[0]?.focus();
   };
   document.querySelectorAll("[data-profile-target]").forEach((button) => {
     button.onclick = () => {
       navigatePersonal(button.dataset.profileTarget);
       close();
+      document.getElementById(button.dataset.profileTarget)?.focus({ preventScroll: true });
     };
   });
+  dropdown.onkeydown = (event) => {
+    const menuItems = items();
+    const current = menuItems.indexOf(document.activeElement);
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close();
+      toggle.focus();
+    } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const next = (Math.max(0, current) + (event.key === "ArrowDown" ? 1 : -1) + menuItems.length) % menuItems.length;
+      menuItems[next]?.focus();
+    } else if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      menuItems[event.key === "Home" ? 0 : menuItems.length - 1]?.focus();
+    }
+  };
   document.addEventListener("click", (event) => {
     if (!$("#profile-menu").contains(event.target)) close();
   });
@@ -1344,6 +1611,7 @@ function setupQuickNavigation(capabilities, roles) {
   const dialog = $("#quick-nav-dialog");
   const query = $("#quick-nav-query");
   const personal = [
+    ["내 홈", "내 공간 · 요약과 시작 체크리스트", () => navigatePersonal("home")],
     ["프로필", "내 공간", () => navigatePersonal("account")],
     ["MCP 연결", "내 공간", () => navigatePersonal("connections")],
     ["API 키 관리", "내 공간", () => navigatePersonal("keys")],
@@ -1392,7 +1660,8 @@ function setupQuickNavigation(capabilities, roles) {
     const needle = query.value.trim().toLowerCase();
     const filtered = entries.filter(([label, group]) => `${label} ${group}`.toLowerCase().includes(needle));
     selected = 0;
-    $("#quick-nav-results").innerHTML = filtered.map(([label, group], index) => `<button type="button" class="${index === 0 ? "active" : ""}" data-quick-index="${entries.indexOf(filtered[index])}"><span>${esc(label)}</span><small>${esc(group)}</small></button>`).join("") || '<div class="empty">일치하는 메뉴가 없습니다.</div>';
+    $("#quick-nav-results").innerHTML = filtered.map(([label, group], index) => `<button id="quick-option-${index}" type="button" role="option" aria-selected="${index === 0}" class="${index === 0 ? "active" : ""}" data-quick-index="${entries.indexOf(filtered[index])}"><span>${esc(label)}</span><small>${esc(group)}</small></button>`).join("") || '<div class="empty">일치하는 메뉴가 없습니다.</div>';
+    query.setAttribute("aria-activedescendant", filtered.length ? "quick-option-0" : "");
     document.querySelectorAll("[data-quick-index]").forEach((button) => {
       button.onclick = () => {
         entries[Number(button.dataset.quickIndex)][2]();
@@ -1404,10 +1673,17 @@ function setupQuickNavigation(capabilities, roles) {
     query.value = "";
     render();
     dialog.showModal();
+    query.setAttribute("aria-expanded", "true");
     query.focus();
   };
   $("#quick-nav-button").onclick = open;
-  $("#quick-nav-close").onclick = () => dialog.close();
+  const closeQuickNav = () => {
+    dialog.close();
+    query.setAttribute("aria-expanded", "false");
+    $("#quick-nav-button").focus();
+  };
+  $("#quick-nav-close").onclick = closeQuickNav;
+  dialog.addEventListener("close", () => query.setAttribute("aria-expanded", "false"));
   query.oninput = render;
   query.onkeydown = (event) => {
     const buttons = [...document.querySelectorAll("[data-quick-index]")];
@@ -1415,7 +1691,12 @@ function setupQuickNavigation(capabilities, roles) {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       selected = (selected + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
-      buttons.forEach((button, index) => button.classList.toggle("active", index === selected));
+      buttons.forEach((button, index) => {
+        const active = index === selected;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-selected", String(active));
+      });
+      query.setAttribute("aria-activedescendant", buttons[selected].id);
       buttons[selected].scrollIntoView({ block: "nearest" });
     } else if (event.key === "Enter") {
       event.preventDefault();
@@ -1425,55 +1706,162 @@ function setupQuickNavigation(capabilities, roles) {
   document.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
-      dialog.open ? dialog.close() : open();
+      dialog.open ? closeQuickNav() : open();
     }
   });
 }
+
+function renderPersonalDashboard() {
+  if (!currentUser) return;
+  const repositories = rows(personalSnapshot.repositories);
+  const keys = rows(personalSnapshot.keys);
+  const calls = rows(personalSnapshot.calls);
+  const notifications = rows(personalSnapshot.notifications);
+  const activeKeys = keys.filter((key) => key.status === "active");
+  const unread = notifications.filter((item) => !item.read);
+  const username = currentUser.Username || "개발자";
+  $("#dashboard-greeting").textContent = `${username}님의 개발 지식 작업 공간`;
+  $("#dashboard-summary").textContent = repositories.length
+    ? `${repositories.length}개 저장소의 문서와 코드를 권한 범위 안에서 검색할 수 있습니다.`
+    : "소스 계정 매핑과 저장소 권한을 확인한 뒤 검색을 시작하세요.";
+  $("#personal-stats").innerHTML = [
+    [personalSnapshot.repositories === null ? "–" : repositories.length, "접근 가능한 저장소"],
+    [personalSnapshot.keys === null ? "–" : activeKeys.length, "활성 API 키"],
+    [personalSnapshot.calls === null ? "–" : calls.length, "최근 MCP 호출"],
+    [personalSnapshot.notifications === null ? "–" : unread.length, "읽지 않은 알림"],
+  ]
+    .map(([value, label]) => `<article><strong>${esc(value)}</strong><span>${esc(label)}</span></article>`)
+    .join("");
+
+  const checklist = [
+    {
+      done: Boolean(currentUser.Username),
+      title: "Keycloak 계정 연결",
+      detail: "로그인과 플랫폼 역할 확인",
+      target: "account",
+    },
+    {
+      done: repositories.length > 0,
+      title: "저장소 접근 권한",
+      detail: repositories.length ? `${repositories.length}개 저장소 사용 가능` : "Bitbucket·GitLab 사용자 매핑 필요",
+      target: "account",
+    },
+    {
+      done: activeKeys.length > 0,
+      title: "MCP API 키 발급",
+      detail: activeKeys.length ? `활성 키 ${activeKeys.length}개` : "Context7 기본 Scope로 키 만들기",
+      target: "keys",
+    },
+    {
+      done: calls.length > 0,
+      title: "MCP 연결 확인",
+      detail: calls.length ? `최근 호출 ${calls.length}건 확인됨` : "클라이언트 설정을 복사해 첫 호출 실행",
+      target: calls.length ? "activity" : "connections",
+    },
+  ];
+  const completed = checklist.filter((item) => item.done).length;
+  const progress = Math.round((completed / checklist.length) * 100);
+  $("#onboarding-progress").textContent = `${completed}/${checklist.length} 완료`;
+  $("#onboarding-progress-bar").style.width = `${progress}%`;
+  $("#personal-checklist").innerHTML = checklist
+    .map(
+      (item) =>
+        `<button type="button" class="checklist-item ${item.done ? "done" : ""}" data-dashboard-target="${item.target}"><span class="check-icon">${item.done ? "✓" : "→"}</span><div><strong>${esc(item.title)}</strong><small>${esc(item.detail)}</small></div></button>`,
+    )
+    .join("");
+
+  $("#dashboard-repositories").innerHTML = repositories.length
+    ? repositories
+        .slice(0, 5)
+        .map(
+          (repository) =>
+            `<button type="button" class="dashboard-list-item" data-dashboard-library="${esc(repository.libraryId)}"><div><strong>${esc(repository.name || repository.libraryId)}</strong><small>${esc(repository.libraryId)} · ${esc(repository.defaultBranch || "기본 브랜치")}</small></div><span>검색 →</span></button>`,
+        )
+        .join("")
+    : '<div class="empty">접근 가능한 저장소가 없습니다. 프로필에서 ACL 매핑을 확인하세요.</div>';
+  $("#dashboard-calls").innerHTML = calls.length
+    ? calls
+        .slice(0, 5)
+        .map(
+          (call) =>
+            `<div class="dashboard-list-item"><div><strong>${esc(call.tool || "MCP 호출")}</strong><small>${date(call.occurredAt)} · ${esc(call.outcome || "-")} · ${Number(call.durationMs || 0)}ms</small></div><span class="chip ${call.outcome === "success" ? "ok" : ""}">${Number(call.resultCount || 0)}건</span></div>`,
+        )
+        .join("")
+    : '<div class="empty">아직 MCP 호출 기록이 없습니다.</div>';
+
+  $$('[data-dashboard-target]').forEach((button) => {
+    button.onclick = () => navigatePersonal(button.dataset.dashboardTarget);
+  });
+  $$('[data-dashboard-library]').forEach((button) => {
+    button.onclick = () => {
+      navigatePersonal("knowledge");
+      $$('[name="libraryId"]').forEach((input) => (input.value = button.dataset.dashboardLibrary));
+      $("#knowledge-tool-query").value = "";
+      document.querySelector('#search-code-form [name="query"]')?.focus();
+    };
+  });
+}
+
 async function loadActivity() {
-  try {
-    const [notifications, repos, usage, calls] = (
-      await Promise.all([
-        api("/api/v1/me/notifications"),
-        api("/api/v1/me/repositories"),
-        api("/api/v1/me/usage"),
-        api("/api/v1/me/calls"),
-      ])
-    ).map(rows);
+  const resources = [
+    ["notifications", "/api/v1/me/notifications", "#my-notifications"],
+    ["repositories", "/api/v1/me/repositories", "#my-repositories"],
+    ["usage", "/api/v1/me/usage", "#my-usage"],
+    ["calls", "/api/v1/me/calls", "#my-calls"],
+  ];
+  const settled = await Promise.allSettled(resources.map(([, url]) => api(url)));
+  settled.forEach((result, index) => {
+    const [name, , selector] = resources[index];
+    if (result.status === "fulfilled") {
+      personalSnapshot[name] = rows(result.value);
+      return;
+    }
+    $(selector).innerHTML = `<div class="notice error">불러오지 못했습니다: ${esc(result.reason?.message || "서비스 오류")} <button type="button" class="secondary" data-retry-activity>다시 시도</button></div>`;
+  });
+  const notifications = rows(personalSnapshot.notifications);
+  const repos = rows(personalSnapshot.repositories);
+  const usage = rows(personalSnapshot.usage);
+  const calls = rows(personalSnapshot.calls);
+  if (settled[0].status === "fulfilled") {
     $("#my-notifications").innerHTML = notifications.length
       ? `<table><tbody>${notifications.map((n) => `<tr><td>${n.read ? "" : "● "}${esc(n.title)}<br><small>${esc(n.message)}</small></td><td>${date(n.createdAt)}</td><td>${n.read ? "" : `<button data-read="${esc(n.id)}">읽음</button>`}</td></tr>`).join("")}</tbody></table>`
-      : "새 알림이 없습니다.";
-    document.querySelectorAll("[data-read]").forEach(
-      (b) =>
-        (b.onclick = async () => {
-          await api(
-            `/api/v1/me/notifications/${encodeURIComponent(b.dataset.read)}/read`,
-            { method: "POST" },
-          );
-          loadActivity();
-        }),
-    );
-    $("#my-repositories").innerHTML =
-      `<table><thead><tr><th>Library ID</th><th>이름</th><th>기본 브랜치</th><th>최근 색인</th></tr></thead><tbody>${repos.map((r) => `<tr><td>${esc(r.libraryId)}</td><td>${esc(r.name)}</td><td>${esc(r.defaultBranch)}</td><td>${date(r.indexedAt)}</td></tr>`).join("")}</tbody></table>`;
-    $("#my-usage").innerHTML =
-      `<table><thead><tr><th>도구</th><th>결과</th><th>호출</th><th>평균/최대 지연</th><th>평균/최대 응답</th><th>예산 초과</th></tr></thead><tbody>${usage.map((x) => `<tr><td>${esc(x.tool)}</td><td>${esc(x.outcome)}</td><td>${x.calls}</td><td>${Math.round(x.averageLatencyMs)}/${Math.round(x.maximumLatencyMs)} ms</td><td>${Math.round((x.averageResponseBytes || 0) / 1024)}/${Math.round((x.maximumResponseBytes || 0) / 1024)} KB</td><td>${x.truncatedCalls ? `<strong>${x.truncatedCalls}회 잘림</strong>${x.producedBytes ? ` · 생성분의 ${Math.round((100 * x.discardedBytes) / x.producedBytes)}% 버려짐` : ""}` : "-"}</td></tr>`).join("")}</tbody></table>`;
-    $("#my-calls").innerHTML =
-      `<table><thead><tr><th>시간</th><th>키</th><th>도구</th><th>Library</th><th>결과/지연</th><th></th></tr></thead><tbody>${calls
-        .slice(0, 100)
-        .map(
-          (x) =>
-            `<tr><td>${date(x.occurredAt)}</td><td>${esc(x.apiKeyPrefix)}</td><td>${esc(x.tool)}</td><td>${esc(x.libraryId)}</td><td>${esc(x.outcome)} ${x.resultCount ?? 0}건 / ${x.durationMs}ms${x.traceSummary ? `<br><small>${esc(x.traceSummary)}</small>` : ""}</td><td><button class="secondary" data-my-trace="${esc(x.id)}">X-ray</button></td></tr>`,
-        )
-        .join("")}</tbody></table>`;
-    $$("[data-my-trace]").forEach((button) => (button.onclick = () => openCallTrace(button.dataset.myTrace, true)));
-    markEmptyTables();
-  } catch (e) {
-    console.warn(e);
+      : '<div class="empty">새 알림이 없습니다.</div>';
   }
+  if (settled[1].status === "fulfilled") {
+    $("#my-repositories").innerHTML = `<table><thead><tr><th>Library ID</th><th>이름</th><th>기본 브랜치</th><th>최근 색인</th></tr></thead><tbody>${repos.map((r) => `<tr><td>${esc(r.libraryId)}</td><td>${esc(r.name)}</td><td>${esc(r.defaultBranch)}</td><td>${date(r.indexedAt)}</td></tr>`).join("")}</tbody></table>`;
+  }
+  if (settled[2].status === "fulfilled") {
+    $("#my-usage").innerHTML = `<table><thead><tr><th>도구</th><th>결과</th><th>호출</th><th>평균/최대 지연</th><th>평균/최대 응답</th><th>예산 초과</th></tr></thead><tbody>${usage.map((x) => `<tr><td>${esc(x.tool)}</td><td>${esc(x.outcome)}</td><td>${x.calls}</td><td>${Math.round(x.averageLatencyMs)}/${Math.round(x.maximumLatencyMs)} ms</td><td>${Math.round((x.averageResponseBytes || 0) / 1024)}/${Math.round((x.maximumResponseBytes || 0) / 1024)} KB</td><td>${x.truncatedCalls ? `<strong>${x.truncatedCalls}회 잘림</strong>${x.producedBytes ? ` · 생성분의 ${Math.round((100 * x.discardedBytes) / x.producedBytes)}% 버려짐` : ""}` : "-"}</td></tr>`).join("")}</tbody></table>`;
+  }
+  if (settled[3].status === "fulfilled") {
+    $("#my-calls").innerHTML = `<table><thead><tr><th>시간</th><th>키</th><th>도구</th><th>Library</th><th>결과/지연</th><th></th></tr></thead><tbody>${calls.slice(0, 100).map((x) => `<tr><td>${date(x.occurredAt)}</td><td>${esc(x.apiKeyPrefix)}</td><td>${esc(x.tool)}</td><td>${esc(x.libraryId)}</td><td>${esc(x.outcome)} ${x.resultCount ?? 0}건 / ${x.durationMs}ms${x.traceSummary ? `<br><small>${esc(x.traceSummary)}</small>` : ""}</td><td><button class="secondary" data-my-trace="${esc(x.id)}">X-ray</button></td></tr>`).join("")}</tbody></table>`;
+  }
+  $$('[data-read]').forEach((button) => {
+    button.onclick = () => withBusy(button, "처리 중…", async () => {
+      await api(`/api/v1/me/notifications/${encodeURIComponent(button.dataset.read)}/read`, { method: "POST" });
+      await loadActivity();
+    });
+  });
+  $$('[data-my-trace]').forEach((button) => (button.onclick = () => openCallTrace(button.dataset.myTrace, true)));
+  $$('[data-retry-activity]').forEach((button) => (button.onclick = loadActivity));
+  $("#activity-updated-at").textContent = `마지막 갱신 ${new Date().toLocaleTimeString()}`;
+  renderPersonalDashboard();
+  markEmptyTables();
 }
 async function loadKeys() {
-  const keys = rows(await api("/api/v1/me/api-keys"));
+  let keys;
+  try {
+    keys = rows(await api("/api/v1/me/api-keys"));
+  } catch (error) {
+    $("#key-list").innerHTML = `<div class="notice error">키 목록을 불러오지 못했습니다: ${esc(error.message)} <button type="button" class="secondary" id="retry-keys">다시 시도</button></div>`;
+    document.getElementById("retry-keys").onclick = loadKeys;
+    reportError(error, "API 키 조회");
+    return;
+  }
+  personalSnapshot.keys = keys;
+  renderPersonalDashboard();
   $("#key-list").innerHTML =
-    `<table><thead><tr><th>이름</th><th>Prefix / 제한</th><th>상태</th><th>만료</th><th>마지막 사용</th><th></th></tr></thead><tbody>${keys.map((k) => `<tr><td>${esc(k.name)}</td><td>${esc(k.prefix)}<br><small>${esc((k.scopes || []).join(", "))}<br>${esc((k.restrictions?.allowedCidrs || []).join(", "))} ${esc((k.restrictions?.allowedRepositories || []).join(", "))}<br>분/시/일 ${k.restrictions?.ratePerMinute || 0}/${k.restrictions?.ratePerHour || 0}/${k.restrictions?.ratePerDay || 0}</small></td><td>${esc(k.status)}</td><td>${date(k.expiresAt)}</td><td>${date(k.lastUsedAt)}</td><td>${k.status === "active" || k.status === "disabled" ? `<button class="secondary" data-scopes="${k.id}">Scope 편집</button> ` : ""}${k.status === "active" ? `<button class="secondary" data-disable="${k.id}">중지</button> <button data-rotate="${k.id}">회전</button> <button class="danger" data-revoke="${k.id}">폐기</button>` : k.status === "disabled" ? `<button data-enable="${k.id}">재활성화</button> <button class="danger" data-revoke="${k.id}">폐기</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
+    `<table><thead><tr><th>이름</th><th>Prefix / 제한</th><th>상태</th><th>만료</th><th>마지막 사용</th><th></th></tr></thead><tbody>${keys.map((k) => `<tr><td>${esc(k.name)}</td><td>${esc(k.prefix)}<br><small>${esc((k.scopes || []).join(", "))}<br>${esc((k.restrictions?.allowedCidrs || []).join(", "))} ${esc((k.restrictions?.allowedRepositories || []).join(", "))}<br>분/시/일 ${k.restrictions?.ratePerMinute || 0}/${k.restrictions?.ratePerHour || 0}/${k.restrictions?.ratePerDay || 0}</small></td><td>${esc(k.status)}</td><td>${date(k.expiresAt)}</td><td>${date(k.lastUsedAt)}</td><td>${k.status === "active" || k.status === "disabled" ? `<button class="secondary" data-scopes="${esc(k.id)}">Scope 편집</button> ` : ""}${k.status === "active" ? `<button class="secondary" data-disable="${esc(k.id)}">중지</button> <button data-rotate="${esc(k.id)}">회전</button> <button class="danger" data-revoke="${esc(k.id)}">폐기</button>` : k.status === "disabled" ? `<button data-enable="${esc(k.id)}">재활성화</button> <button class="danger" data-revoke="${esc(k.id)}">폐기</button>` : ""}</td></tr>`).join("")}</tbody></table>`;
   // Without this the table keeps its header and shows nothing underneath,
   // which reads as broken rather than as "nothing here yet".
   markEmptyTables();
@@ -1486,55 +1874,116 @@ async function loadKeys() {
   );
   document.querySelectorAll("[data-revoke]").forEach(
     (b) =>
-      (b.onclick = async () => {
+      (b.onclick = () => withBusy(b, "폐기 중…", async () => {
         if (confirm("이 키를 즉시 폐기할까요?")) {
-          await api(`/api/v1/me/api-keys/${b.dataset.revoke}`, {
-            method: "DELETE",
-          });
-          loadKeys();
+          try {
+            await api(`/api/v1/me/api-keys/${encodeURIComponent(b.dataset.revoke)}`, { method: "DELETE" });
+            toast("API 키를 폐기했습니다.", "ok");
+            await loadKeys();
+          } catch (error) {
+            reportError(error, "키 폐기");
+          }
         }
-      }),
+      })),
   );
   document.querySelectorAll("[data-disable]").forEach(
     (b) =>
-      (b.onclick = async () => {
-        await api(`/api/v1/me/api-keys/${b.dataset.disable}/disable`, {
-          method: "POST",
-        });
-        loadKeys();
-      }),
+      (b.onclick = () => withBusy(b, "중지 중…", async () => {
+        try {
+          await api(`/api/v1/me/api-keys/${encodeURIComponent(b.dataset.disable)}/disable`, { method: "POST" });
+          toast("API 키를 중지했습니다.", "ok");
+          await loadKeys();
+        } catch (error) {
+          reportError(error, "키 중지");
+        }
+      })),
   );
   document.querySelectorAll("[data-enable]").forEach(
     (b) =>
-      (b.onclick = async () => {
-        await api(`/api/v1/me/api-keys/${b.dataset.enable}/enable`, {
-          method: "POST",
-        });
-        loadKeys();
-      }),
+      (b.onclick = () => withBusy(b, "활성화 중…", async () => {
+        try {
+          await api(`/api/v1/me/api-keys/${encodeURIComponent(b.dataset.enable)}/enable`, { method: "POST" });
+          toast("API 키를 다시 활성화했습니다.", "ok");
+          await loadKeys();
+        } catch (error) {
+          reportError(error, "키 활성화");
+        }
+      })),
   );
   document.querySelectorAll("[data-rotate]").forEach(
     (b) =>
-      (b.onclick = async () => {
+      (b.onclick = () => withBusy(b, "회전 중…", async () => {
         const overlap = prompt(
           "기존 키와 신규 키의 중복 유효 시간(분, 최대 1440)",
           "10",
         );
         if (overlap === null) return;
-        const result = await api(
-          `/api/v1/me/api-keys/${b.dataset.rotate}/rotate`,
-          {
-            method: "POST",
-            body: JSON.stringify({ overlapMinutes: Number(overlap) }),
-          },
-        );
-        showSecret(result.secret);
-        loadKeys();
-      }),
+        const minutes = Number(overlap);
+        if (!Number.isInteger(minutes) || minutes < 0 || minutes > 1440) {
+          toast("중복 유효 시간은 0~1440 사이의 정수로 입력하세요.", "error");
+          return;
+        }
+        try {
+          const result = await api(
+            `/api/v1/me/api-keys/${encodeURIComponent(b.dataset.rotate)}/rotate`,
+            { method: "POST", body: JSON.stringify({ overlapMinutes: minutes }) },
+          );
+          showSecret(result.secret);
+          await loadKeys();
+        } catch (error) {
+          reportError(error, "키 회전");
+        }
+      })),
   );
   markEmptyTables();
 }
-$("#new-key").onclick = () => ($("#key-form").hidden = !$("#key-form").hidden);
+const keyScopePresets = {
+  context7: ["resolve-library-id", "query-docs"],
+  code: [
+    "resolve-library-id", "query-docs", "search-repositories", "search-source",
+    "search-code", "find-file", "read-file", "list-directory", "get-file-history",
+    "search-merge-requests", "find-dependents", "get-repository-map", "find-symbol",
+    "get-symbol-context", "trace-dependencies", "compare-refs", "get-change-impact",
+    "find-code-owner", "find-tests", "get-architecture-map", "assess-change-risk",
+    "get-repository-health",
+  ],
+};
+function updateKeyScopeCount() {
+  const selected = $("#key-form").querySelectorAll('[name="scope"]:checked').length;
+  $("#scope-selection-count").textContent = `${selected}개 도구 허용`;
+}
+function applyKeyScopePreset(name) {
+  const allowed = name === "all" ? new Set(grantableMCPScopes()) : new Set(keyScopePresets[name] || []);
+  $("#key-form").querySelectorAll('[name="scope"]').forEach((input) => {
+    input.checked = !input.disabled && allowed.has(input.value);
+  });
+  $$("[data-scope-preset]").forEach((button) => {
+    const active = button.dataset.scopePreset === name;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  updateKeyScopeCount();
+}
+$$("[data-scope-preset]").forEach((button) => {
+  button.onclick = () => applyKeyScopePreset(button.dataset.scopePreset);
+});
+$("#key-form").querySelectorAll('[name="scope"]').forEach((input) => {
+  input.onchange = () => {
+    $$("[data-scope-preset]").forEach((button) => {
+      button.classList.remove("active");
+      button.setAttribute("aria-pressed", "false");
+    });
+    updateKeyScopeCount();
+  };
+});
+$("#new-key").onclick = () => {
+  const form = $("#key-form");
+  form.hidden = !form.hidden;
+  if (!form.hidden) {
+    applyKeyScopePreset("context7");
+    form.querySelector('[name="name"]')?.focus();
+  }
+};
 $("#key-form").onsubmit = async (e) => {
   e.preventDefault();
   const form = new FormData(e.target),
@@ -1549,7 +1998,7 @@ $("#key-form").onsubmit = async (e) => {
     body: JSON.stringify({
       name: form.get("name"),
       scopes: form.getAll("scope"),
-      expiresAt: expiry ? new Date(expiry + "T23:59:59Z").toISOString() : null,
+      expiresAt: expiry ? new Date(`${expiry}T23:59:59.999`).toISOString() : null,
       restrictions: {
         allowedCidrs: list("cidrs"),
         allowedRepositories: list("repositories"),
@@ -1561,13 +2010,40 @@ $("#key-form").onsubmit = async (e) => {
   });
   showSecret(result.secret);
   e.target.reset();
+  applyKeyScopePreset("context7");
   e.target.hidden = true;
-  loadKeys();
+  await loadKeys();
 };
+let visibleOneTimeSecret = null;
+function clearOneTimeSecret() {
+  visibleOneTimeSecret = null;
+  const panel = $("#secret");
+  panel.replaceChildren();
+  panel.hidden = true;
+}
+function currentOneTimeSecret() {
+  if (visibleOneTimeSecret) return visibleOneTimeSecret;
+  toast("일회성 API 키 표시가 종료되었습니다. 필요한 경우 키를 회전하세요.", "error");
+  return null;
+}
 function showSecret(secret) {
+  clearOneTimeSecret();
+  visibleOneTimeSecret = String(secret || "");
   $("#secret").hidden = false;
   $("#secret").innerHTML =
-    `<strong>지금 복사하세요. 다시 표시되지 않습니다.</strong><br><code>${esc(secret)}</code>`;
+    `<strong>지금 안전한 곳에 복사하세요. 이 화면을 벗어나면 앱 상태와 화면에서 제거되어 다시 표시할 수 없습니다.</strong><code>${esc(visibleOneTimeSecret)}</code><div class="button-row"><button id="copy-secret-key" type="button">키 복사</button><button id="copy-secret-env" type="button" class="secondary">환경변수 명령 복사</button><button id="go-secret-connections" type="button" class="secondary">MCP 연결 설정 열기</button></div>`;
+  document.getElementById("copy-secret-key").onclick = () => {
+    const value = currentOneTimeSecret();
+    if (value) copyText(value, "API 키를 복사했습니다.");
+  };
+  document.getElementById("copy-secret-env").onclick = () => {
+    const value = currentOneTimeSecret();
+    if (value) {
+      copyText(`export GIT_CTX_API_KEY='${value.replaceAll("'", "'\\''")}'`, "환경변수 명령을 복사했습니다.");
+    }
+  };
+  document.getElementById("go-secret-connections").onclick = () => navigatePersonal("connections");
+  $("#secret").focus();
 }
 // 외부 연결 테스트가 있는 카테고리. 나머지는 [설정 검증]만 노출합니다.
 const connectionTestCategories = [
@@ -1666,7 +2142,16 @@ function renderSettingFields(category, value) {
                 "hybrid-fallback": "하이브리드 + 자동 폴백 (권장)",
                 "hybrid-required": "하이브리드 필수 (장애 시 오류)",
               }
-            : {};
+            : category === "model" && key === "provider"
+              ? {
+                  local: "내장 Feature Hash (신경망 임베딩 아님)",
+                  "openai-compatible": "OpenAI 호환 임베딩 API",
+                }
+              : category === "vector" && key === "provider"
+                ? { none: "별도 벡터 DB 사용 안 함", pgvector: "pgvector", milvus: "Milvus" }
+                : key === "authType"
+                  ? { bearer: "Bearer Token", basic: "Basic Auth" }
+                  : {};
         return `<label data-field-key="${key}">${esc(label)}<select data-setting-key="${key}" data-setting-type="string">${choices.map((choice) => `<option value="${esc(choice)}" ${choice === current ? "selected" : ""}>${esc(labels[choice] || choice)}</option>`).join("")}</select>${key === "retrievalMode" ? '<small class="field-help">색인 Worker와 query-docs, search-code, search-semantic을 포함한 모든 MCP 검색 도구에 즉시 적용됩니다.</small>' : ""}</label>`;
       }
       if (type === "password") {
@@ -1735,6 +2220,9 @@ function renderSettingFields(category, value) {
             applyVectorFieldState();
           if (category === "search" && field.dataset.settingKey === "retrievalMode")
             applySearchRetrievalFieldState();
+          if (category === "model" && ["provider", "rerankerEnabled"].includes(field.dataset.settingKey))
+            applyModelFieldState();
+          refreshSettingDirty();
         } catch {
           field.setCustomValidity("올바른 JSON을 입력하세요.");
         }
@@ -1763,24 +2251,129 @@ function renderSettingFields(category, value) {
   applyTLSFieldState();
   if (category === "vector") applyVectorFieldState();
   if (category === "search") applySearchRetrievalFieldState();
+  if (category === "model") applyModelFieldState();
 }
 
 function applySearchRetrievalFieldState() {
   const mode = document.querySelector('[data-setting-key="retrievalMode"]')?.value;
-  const vector = document.querySelector('[data-setting-key="vectorWeight"]');
-  if (!vector) return;
   const disabled = mode === "keyword-only";
-  vector.disabled = disabled;
-  vector.closest("label")?.classList.toggle("field-disabled", disabled);
-  vector.title = disabled
-    ? "키워드 전용 모드에서는 벡터 DB와 임베딩 점수를 사용하지 않습니다."
-    : "";
+  const embeddingOnly = new Set([
+    "vectorWeight",
+    "minimumEmbeddingCoveragePercent",
+    "embeddingFailureThreshold",
+    "embeddingCooldownSeconds",
+    "embeddingCacheSeconds",
+  ]);
+  for (const field of document.querySelectorAll("#setting-fields [data-field-key]")) {
+    if (!embeddingOnly.has(field.dataset.fieldKey)) continue;
+    field.hidden = disabled;
+    field.querySelectorAll("input,select,textarea").forEach((control) => (control.disabled = disabled));
+    field.classList.toggle("field-disabled", disabled);
+    field.title = disabled
+      ? "키워드 전용 모드에서는 임베딩 데이터, 모델과 벡터 DB를 사용하지 않습니다."
+      : "";
+  }
+}
+
+function applyModelFieldState() {
+  if ($("#category")?.value !== "model") return;
+  const provider = document.querySelector('[data-setting-key="provider"]')?.value || "local";
+  const rerankerEnabled = document.querySelector('[data-setting-key="rerankerEnabled"]')?.checked === true;
+  const remoteEmbedding = new Set(["baseUrl", "apiKey", "model", "timeoutSeconds"]);
+  const reranker = new Set([
+    "rerankerProvider", "rerankerBaseUrl", "rerankerApiKey", "rerankerModel", "rerankerTimeoutSeconds",
+  ]);
+  const transport = new Set(["tlsVerify", "caCertificate", "proxyUrl"]);
+  for (const label of document.querySelectorAll("#setting-fields [data-field-key]")) {
+    const key = label.dataset.fieldKey;
+    const hidden =
+      (remoteEmbedding.has(key) && provider !== "openai-compatible") ||
+      (reranker.has(key) && !rerankerEnabled) ||
+      (transport.has(key) && provider !== "openai-compatible" && !rerankerEnabled);
+    label.hidden = hidden;
+    label.querySelectorAll("input,select,textarea").forEach((control) => (control.disabled = hidden));
+  }
+  applyTLSFieldState();
 }
 
 // 저장 중인 설정의 버전. 다른 관리자가 먼저 저장했으면 서버가 409 로 막고,
 // 화면은 그 사실과 함께 다시 불러올지 묻습니다. 마지막 저장이 이기는 조용한
 // 덮어쓰기가 설정 화면에서 가장 흔한 사고입니다.
 let loadedSettingVersion = 0;
+let loadedSettingBaseline = "";
+let settingDirty = false;
+let settingEditorReady = false;
+let settingLoadGeneration = 0;
+let loadCurrentSetting = async () => {};
+
+function canonicalSetting(value) {
+  if (Array.isArray(value)) return value.map(canonicalSetting);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, canonicalSetting(value[key])]),
+    );
+  }
+  return value;
+}
+
+function updateSettingActionState() {
+  const save = $("#save-setting");
+  if (!save) return;
+  save.disabled = !settingEditorReady || !settingDirty;
+  $("#validate-setting").disabled = !settingEditorReady;
+  if (!$("#test-connection").hidden) $("#test-connection").disabled = !settingEditorReady;
+  $("#delete-setting").disabled = !settingEditorReady;
+  const state = $("#setting-dirty-state");
+  state.textContent = settingDirty ? "저장하지 않은 변경 있음" : "저장된 상태";
+  state.classList.toggle("dirty", settingDirty);
+}
+
+function setSettingDirty(dirty) {
+  settingDirty = Boolean(dirty);
+  updateSettingActionState();
+  if (settingDirty && !$("#setting-test-result").hidden) {
+    renderSettingResult(false, "설정이 변경되었습니다", ["이전 검증 결과는 현재 입력값을 보장하지 않습니다. 다시 검증하거나 연결 시험을 실행하세요."]);
+  }
+}
+
+function refreshSettingDirty() {
+  try {
+    const current = JSON.stringify(canonicalSetting(JSON.parse($("#setting-json").value || "{}")));
+    setSettingDirty(settingEditorReady && current !== loadedSettingBaseline);
+  } catch {
+    setSettingDirty(settingEditorReady);
+  }
+}
+
+function beginSettingLoad(category) {
+  settingEditorReady = false;
+  loadedSettingVersion = 0;
+  loadedSettingBaseline = "";
+  settingDirty = false;
+  clearSettingFieldErrors();
+  $("#setting-fields").innerHTML = '<div class="wide empty">설정을 불러오는 중…</div>';
+  $("#setting-json").value = "{}";
+  $("#setting-load-status").className = "wide notice";
+  $("#setting-load-status").textContent = `${settingCategoryMeta[category]?.[0] || category} 설정을 불러오는 중…`;
+  $("#delete-setting").hidden = true;
+  $("#setting-test-result").hidden = true;
+  updateSettingActionState();
+}
+
+function finishSettingLoad(value) {
+  loadedSettingBaseline = JSON.stringify(canonicalSetting(value));
+  settingEditorReady = true;
+  settingDirty = false;
+  updateSettingActionState();
+}
+
+window.addEventListener("beforeunload", (event) => {
+  if (!settingDirty) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
 
 async function saveSettingValue(category, json, force = false) {
   const body = JSON.parse(json);
@@ -1797,7 +2390,7 @@ async function saveSettingValue(category, json, force = false) {
       }
       return null;
     }
-    if (error.status === 400 && /setting_validation_failed|검증|unreachable|refused|dial|timeout/i.test(`${error.title || ""} ${error.message}`)) {
+    if (!force && error.code === "external_setting_unreachable") {
       // 대상 서버 점검 중에도 설정을 준비할 수 있어야 합니다. 다만 건너뛴
       // 사실을 저장 결과와 감사 로그에 남깁니다.
       if (confirm(`연결 검증에 실패했습니다.\n\n${error.message}\n\n검증을 건너뛰고 그대로 저장할까요?`)) {
@@ -1836,7 +2429,7 @@ function setupSettingTransfer(capabilities) {
 <table><thead><tr><th>영역</th><th>상태</th><th>변경 항목</th></tr></thead><tbody>${items
       .map(
         (item) =>
-          `<tr><td>${esc(item.category)}</td><td>${esc(label[item.status] || item.status)}<br><small>${esc(item.detail || "")}</small></td>
+          `<tr><td>${esc(item.category)}</td><td>${esc(label[item.status] || item.status)}${item.code === "external_setting_unreachable" ? ' <span class="chip">강제 적용 가능</span>' : ""}<br><small>${esc(item.detail || "")}</small>${item.validationSkippedCode ? '<br><small class="error-text">외부 연결 검증을 건너뜀</small>' : ""}</td>
 <td>${rows(item.changes).map((change) => `${esc(change.field)}: <code>${esc(change.before)}</code> → <code>${esc(change.after)}</code>`).join("<br>") || "-"}
 ${item.missingSecrets ? `<br><small>입력 필요: ${esc(item.missingSecrets.join(", "))}</small>` : ""}</td></tr>`,
       )
@@ -1857,9 +2450,11 @@ ${item.missingSecrets ? `<br><small>입력 필요: ${esc(item.missingSecrets.joi
   };
   $("#apply-import-settings").onclick = async (event) => {
     if (!importDocument || !confirm("미리본 변경 내용을 지금 적용합니다. 각 영역은 새 버전으로 기록되어 되돌릴 수 있습니다.")) return;
+    const forceExternal = $("#force-import-external").checked;
+    if (forceExternal && !confirm("외부 시스템에 연결할 수 없는 설정만 검증을 건너뜁니다. 형식·CIDR·범위 등 로컬 검증 오류는 계속 차단됩니다. 진행할까요?")) return;
     await withBusy(event.currentTarget, "적용 중…", async () => {
     try {
-      render(await api("/api/v1/admin/settings-import?apply=true", { method: "POST", body: importDocument }));
+      render(await api(`/api/v1/admin/settings-import?apply=true${forceExternal ? "&force=true" : ""}`, { method: "POST", body: importDocument }));
       $("#apply-import-settings").hidden = true;
       await loadCurrentSetting($("#category").value);
     } catch (error) {
@@ -1929,16 +2524,15 @@ async function openSettingVersion(category, version) {
 
 // refreshVectorStatus 는 벡터 DB 연결 상태와 저장된 벡터 수를 비교해 보여 줍니다.
 // 미설정도 정상 상태이므로 오류처럼 표시하지 않습니다.
-async function refreshVectorStatus() {
+async function refreshVectorStatus(probe = false) {
   const panel = $("#vector-status");
   panel.hidden = false;
   panel.className = "result-panel";
   panel.textContent = "벡터 DB 상태를 확인하는 중…";
   try {
-    // probe=true reaches the embedding endpoint live. Without it the panel can
-    // only show past traffic, which cannot tell a dead model from a dead vector
-    // database -- the two failures degrade a semantic search differently.
-    const status = await api("/api/v1/admin/vector/status?probe=true");
+    // 일반 상태 조회는 외부 모델을 호출하지 않습니다. 모델 시험은 관리자가
+    // 명시적으로 눌렀을 때만 수행해 느린/유료 endpoint의 예상치 못한 호출을 막습니다.
+    const status = await api(`/api/v1/admin/vector/status${probe ? "?probe=true" : ""}`);
     const circuit = status.circuit || {};
     const retryAt =
       circuit.retryAt && !String(circuit.retryAt).startsWith("0001-")
@@ -1949,14 +2543,17 @@ async function refreshVectorStatus() {
       .filter(([, count]) => count > 0)
       .map(([reason, count]) => `${reason} ${count}회`)
       .join(" · ");
-    const probe = status.embeddingProbe || {};
-    const probeLine = probe.ok
-      ? `임베딩 모델: 응답함${probe.dimensions ? ` · ${probe.dimensions}차원` : ""}${
-          probe.latencyMs != null ? ` · ${probe.latencyMs}ms` : ""
-        }${probe.detail ? ` · ${probe.detail}` : ""}`
-      : `임베딩 모델: 응답 없음 (${probe.stage || "unknown"}) · ${probe.error || "원인 미상"}`;
+    const probed = Object.prototype.hasOwnProperty.call(status, "embeddingProbe");
+    const probeResult = status.embeddingProbe || {};
+    const probeLine = !probed
+      ? "임베딩 모델: 이번 조회에서는 시험하지 않음 · ‘임베딩 모델 시험’으로 실제 endpoint를 확인하세요."
+      : probeResult.ok
+      ? `임베딩 모델: 응답함${probeResult.dimensions ? ` · ${probeResult.dimensions}차원` : ""}${
+          probeResult.latencyMs != null ? ` · ${probeResult.latencyMs}ms` : ""
+        }${probeResult.detail ? ` · ${probeResult.detail}` : ""}`
+      : `임베딩 모델: 응답 없음 (${probeResult.stage || "unknown"}) · ${probeResult.error || "원인 미상"}`;
     const runtimeDetails =
-      `<li class="${probe.ok ? "" : "probe-failed"}">${esc(probeLine)}</li>` +
+      `<li class="${probed && !probeResult.ok ? "probe-failed" : ""}">${esc(probeLine)}</li>` +
       `<li>${esc(circuitLine)}</li>` +
       (fallbackSummary ? `<li>프로세스 자동 폴백: ${esc(fallbackSummary)}</li>` : "") +
       (circuit.lastError ? `<li>마지막 모델 오류: ${esc(circuit.lastError)}</li>` : "");
@@ -1966,10 +2563,10 @@ async function refreshVectorStatus() {
       return;
     }
     const ready = status.ready && !status.error;
-    const modelReady = probe.ok !== false;
+    const modelReady = !probed || probeResult.ok === true;
     panel.className = `result-panel ${ready && modelReady ? "ok" : "error"}`;
     const headline = `${esc(status.provider)} · 벡터 DB ${ready ? "연결됨" : "연결 실패"} · 임베딩 모델 ${
-      modelReady ? "응답함" : "응답 없음"
+      !probed ? "미시험" : modelReady ? "응답함" : "응답 없음"
     }`;
     panel.innerHTML =
       `<h4>${headline}</h4><ul class="result-list">` +
@@ -2025,8 +2622,9 @@ function currentSettingValue() {
     return {};
   }
 }
-function writeSettingValue(value) {
+function writeSettingValue(value, markDirty = true) {
   $("#setting-json").value = JSON.stringify(value, null, 2);
+  if (markDirty) refreshSettingDirty();
 }
 
 function renderKeycloakMappings() {
@@ -2097,7 +2695,7 @@ function setupKeycloakMappingEditor() {
 function applyTLSFieldState() {
   const toggle = document.querySelector('[data-setting-key="tlsVerify"]');
   if (!toggle) return;
-  const enabled = toggle.checked;
+  const enabled = toggle.checked && !toggle.disabled;
   const state = document.querySelector('[data-toggle-state="tlsVerify"]');
   if (state) state.textContent = enabled ? "사용함" : "사용 안 함";
   const caField = document.querySelector('[data-field-key="caCertificate"]');
@@ -2176,7 +2774,7 @@ function setupAdmin(roles, capabilities) {
   $("#setting-tabs").innerHTML = allowedCategories
     .map(
       (category) =>
-        `<button type="button" role="tab" data-setting-tab="${category}" title="${esc(settingCategoryMeta[category]?.[1] || "")}">${esc(settingCategoryMeta[category]?.[0] || category)}</button>`,
+        `<button type="button" role="tab" tabindex="-1" data-setting-tab="${category}" title="${esc(settingCategoryMeta[category]?.[1] || "")}">${esc(settingCategoryMeta[category]?.[0] || category)}</button>`,
     )
     .join("");
   // 설정 탭이 19개까지 늘어나므로 이름·설명·카테고리 키로 즉시 필터링합니다.
@@ -2188,12 +2786,35 @@ function setupAdmin(roles, capabilities) {
       tab.hidden = needle !== "" && !haystack.includes(needle);
     });
   };
+  $("#setting-tabs").onkeydown = (event) => {
+    if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+    const tabs = $$("[data-setting-tab]").filter((tab) => !tab.hidden);
+    if (!tabs.length) return;
+    event.preventDefault();
+    const current = tabs.indexOf(document.activeElement);
+    const next = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? tabs.length - 1
+        : (Math.max(0, current) + (["ArrowRight", "ArrowDown"].includes(event.key) ? 1 : -1) + tabs.length) % tabs.length;
+    tabs[next].click();
+    tabs[next].focus();
+  };
+  let selectedCategory = "";
   const selectCategory = async (category) => {
+    if (!allowedCategories.includes(category)) return false;
+    if (selectedCategory === category && settingEditorReady) return true;
+    if (selectedCategory && settingDirty && !confirm("저장하지 않은 변경이 있습니다. 변경을 버리고 다른 설정으로 이동할까요?")) {
+      $("#category").value = selectedCategory;
+      return false;
+    }
+    selectedCategory = category;
     $("#category").value = category;
     document.querySelectorAll("[data-setting-tab]").forEach((tab) => {
       const active = tab.dataset.settingTab === category;
       tab.classList.toggle("active", active);
       tab.setAttribute("aria-selected", String(active));
+      tab.tabIndex = active ? 0 : -1;
     });
     const meta = settingCategoryMeta[category] || [category, "동적 운영 설정"];
     $("#setting-context").innerHTML = `<strong>${esc(meta[0])}</strong><span>${esc(meta[1])}</span>`;
@@ -2203,12 +2824,13 @@ function setupAdmin(roles, capabilities) {
     $("#keycloak-mapping-card").hidden = category !== "keycloak";
     $("#source-test-card").hidden = !["bitbucket", "gitlab"].includes(category);
     $("#vector-card").hidden = !["search", "vector"].includes(category);
-    if (["search", "vector"].includes(category)) refreshVectorStatus();
+    if (["search", "vector"].includes(category)) refreshVectorStatus(false);
     $("#setting-test-result").hidden = true;
     $("#setting-guide-button").hidden = !GitCtxGuides.has(category);
     $("#setting-guide-button").dataset.guide = category;
     rememberView({ category });
     await loadCurrentSetting(category);
+    return true;
   };
   openSettingCategory = (category) => {
     if (document.querySelector(`[data-setting-tab="${category}"]`)) selectCategory(category);
@@ -2217,10 +2839,12 @@ function setupAdmin(roles, capabilities) {
     (tab) => (tab.onclick = () => selectCategory(tab.dataset.settingTab)),
   );
   $("#category").onchange = () => selectCategory($("#category").value);
-  const loadCurrentSetting = async (category = $("#category").value) => {
+  loadCurrentSetting = async (category = $("#category").value) => {
+    const generation = ++settingLoadGeneration;
+    beginSettingLoad(category);
     try {
       const x = await api(`/api/v1/admin/settings/${category}`);
-      if ($("#category").value !== category) return;
+      if ($("#category").value !== category || generation !== settingLoadGeneration) return;
       loadedSettingVersion = x.version || 0;
       $("#setting-json").value = JSON.stringify(x.value, null, 2);
       renderSettingFields(category, x.value);
@@ -2229,15 +2853,23 @@ function setupAdmin(roles, capabilities) {
       $("#setting-load-status").textContent =
         `저장된 설정 v${x.version}을 불러왔습니다 · ${date(x.updatedAt)} · ${x.updatedBy || "알 수 없는 관리자"}${maskedCount ? ` · 비밀값 ${maskedCount}개 마스킹됨` : ""}`;
       $("#delete-setting").hidden = false;
+      finishSettingLoad(x.value);
       loadSettingHistory(category);
       if (category === "keycloak") {
         renderKeycloakMappings();
         refreshKeycloakStatus();
       }
     } catch (e) {
-      if ($("#category").value !== category) return;
+      if ($("#category").value !== category || generation !== settingLoadGeneration) return;
       if (e.status !== 404) {
-        showAdmin(`설정을 불러오지 못했습니다: ${e.message}`, false);
+        settingEditorReady = false;
+        $("#setting-fields").innerHTML = `<div class="wide notice error">${esc(category)} 설정을 불러오지 못했습니다. 이전 탭의 값은 모두 지웠습니다.<br><small>${esc(e.message)}</small><br><button type="button" class="secondary" id="retry-setting-load">다시 시도</button></div>`;
+        $("#setting-json").value = "{}";
+        $("#setting-load-status").className = "wide notice error";
+        $("#setting-load-status").textContent = "불러오기 실패 · 저장과 검증을 사용할 수 없습니다.";
+        document.getElementById("retry-setting-load").onclick = () => loadCurrentSetting(category);
+        updateSettingActionState();
+        reportError(e, "설정 조회");
         return;
       }
       loadedSettingVersion = 0;
@@ -2248,6 +2880,7 @@ function setupAdmin(roles, capabilities) {
       $("#setting-load-status").textContent =
         "저장된 설정이 없습니다. 기본값을 표시합니다.";
       $("#delete-setting").hidden = true;
+      finishSettingLoad(defaults);
       loadSettingHistory(category);
       if (category === "keycloak") {
         renderKeycloakMappings();
@@ -2301,6 +2934,11 @@ function setupAdmin(roles, capabilities) {
     const category = $("#category").value;
     const panel = $("#source-test-result");
     panel.hidden = false;
+    if (settingDirty) {
+      panel.className = "result-panel error";
+      panel.textContent = "저장하지 않은 변경이 있습니다. 먼저 저장한 뒤 실제 연동 검색을 시험하세요.";
+      return;
+    }
     panel.className = "result-panel";
     panel.textContent = "원격 검색을 실행하고 있습니다…";
     try {
@@ -2334,7 +2972,9 @@ function setupAdmin(roles, capabilities) {
     }
   };
   setupKeycloakMappingEditor();
-  $("#refresh-vector-status").onclick = refreshVectorStatus;
+  $("#refresh-vector-status").onclick = () => refreshVectorStatus(false);
+  $("#test-embedding-model").onclick = (event) =>
+    withBusy(event.currentTarget, "모델 시험 중…", () => refreshVectorStatus(true));
   $("#rebuild-vectors").onclick = async () => {
     if (!confirm("메타 DB의 모든 임베딩을 벡터 DB로 다시 적재합니다. 대상이 많으면 시간이 걸릴 수 있습니다. 진행할까요?")) return;
     const button = $("#rebuild-vectors");
@@ -2343,7 +2983,7 @@ function setupAdmin(roles, capabilities) {
     try {
       const result = await api("/api/v1/admin/vector/rebuild", { method: "POST", body: "{}" });
       showAdmin(`${result.provider}에 벡터 ${result.projected}개를 적재했습니다.`, true);
-      refreshVectorStatus();
+      refreshVectorStatus(false);
     } catch (error) {
       reportError(error, "벡터 재적재");
     } finally {
@@ -2359,6 +2999,7 @@ function setupAdmin(roles, capabilities) {
       );
       if ($("#category").value === "keycloak") renderKeycloakMappings();
     } catch {}
+    refreshSettingDirty();
   };
   if (allowedCategories.length) selectCategory(allowedCategories[0]);
   $("#preview-keycloak").onclick = async (event) => {
@@ -2437,7 +3078,7 @@ function setupAdmin(roles, capabilities) {
       );
       reportError(e, "저장 실패");
     } finally {
-      button.disabled = false;
+      button.disabled = !settingEditorReady || !settingDirty;
       button.textContent = "저장";
     }
   };
@@ -2571,6 +3212,12 @@ function setupOps(capabilities) {
   if (capabilities.platform) {
     $("#test-database").onclick = () => runDatabaseAction("test");
     $("#migrate-database").onclick = () => runDatabaseAction("migrate");
+    $("#database-dsn").oninput = () => {
+      if ($("#database-dsn").value.trim() !== testedDatabaseDSN) testedDatabaseDSN = "";
+      updateDatabaseMigrationGate();
+    };
+    $("#database-confirm").oninput = updateDatabaseMigrationGate;
+    updateDatabaseMigrationGate();
   }
   if (capabilities.security) {
     $("#secret-form").onsubmit = async (event) => {
@@ -2690,6 +3337,12 @@ function setupAdminNavigation(capabilities) {
       (button.onclick = () => {
         const target = button.dataset.adminTarget;
         open(target, button.dataset.adminCategory || "");
+        if (matchMedia("(max-width: 860px)").matches) {
+          $("#app-sidebar").dataset.collapsed = "true";
+          $("#sidebar-toggle").setAttribute("aria-expanded", "false");
+          $("#sidebar-toggle").setAttribute("aria-label", "메뉴 열기");
+          $("#sidebar-backdrop").hidden = true;
+        }
         revealPanel(document.getElementById(target));
       }),
   );
@@ -2751,10 +3404,26 @@ async function refreshDatabase() {
       $("#database-action-result").hidden = false;
       $("#database-action-result").className = "notice error";
       $("#database-action-result").textContent = status.warning;
+    } else if (!testedDatabaseDSN) {
+      $("#database-action-result").hidden = true;
+      $("#database-action-result").className = "notice";
+      $("#database-action-result").textContent = "";
     }
   } catch (error) {
     $("#admin-database-status").innerHTML = `<div class="notice error">${esc(error.message)}</div>`;
   }
+}
+let testedDatabaseDSN = "";
+function updateDatabaseMigrationGate() {
+  const dsn = $("#database-dsn")?.value.trim() || "";
+  const confirmed = $("#database-confirm")?.value.trim() === "MIGRATE TO POSTGRES";
+  const allowed = dsn !== "" && dsn === testedDatabaseDSN && confirmed;
+  const button = $("#migrate-database");
+  if (!button) return;
+  button.disabled = !allowed;
+  button.title = allowed
+    ? "시험을 통과한 PostgreSQL로 데이터를 이전합니다."
+    : "현재 DSN의 연결 시험을 통과하고 확인 문구를 정확히 입력해야 합니다.";
 }
 async function runDatabaseAction(action) {
   const result = $("#database-action-result");
@@ -2781,16 +3450,23 @@ async function runDatabaseAction(action) {
     result.textContent = action === "test"
       ? `연결 성공: PostgreSQL ${response.serverVersion || ""} · ${response.database || ""} · ${Number(response.latencyMs || 0).toFixed(1)}ms`
       : "데이터 이전이 완료되었습니다. PostgreSQL 적용을 위해 서비스를 재시작하세요.";
+    if (action === "test") {
+      testedDatabaseDSN = dsn;
+      toast("현재 PostgreSQL DSN의 연결 시험을 통과했습니다.", "ok");
+    }
     if (action === "migrate") {
+      testedDatabaseDSN = "";
       $("#database-dsn").value = "";
       $("#database-confirm").value = "";
     }
   } catch (error) {
+    if (action === "test") testedDatabaseDSN = "";
     result.hidden = false;
     result.className = "notice error";
     result.textContent = error.message;
   } finally {
-    button.disabled = false;
+    if (action === "test") button.disabled = false;
+    updateDatabaseMigrationGate();
   }
 }
 const qualityCSV = (selector) =>

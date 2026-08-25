@@ -34,6 +34,25 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-25 v0.51.0 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./...                 PASS
+go vet ./... && go build ./...               PASS
+PostgreSQL 16 + pgvector + Vault Integration PASS
+사용자·관리자 UI JavaScript parse·계약 시험    PASS
+설정 강제 저장 경계·오류 코드 회귀 시험         PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.51.0 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.51.0 빌드      PASS
+```
+
+이번 검증에는 개인 홈·빠른 이동, MCP 클라이언트별 설정 생성, 최소 권한 키 Preset,
+일회성 키의 화면 이탈 즉시 DOM·메모리 제거, 도구 필터와 결과 내보내기,
+설정 dirty/stale-load 보호, 명시적 임베딩 probe, PostgreSQL 동일 DSN migration
+gate, 외부 연결 실패·502/503/504만 허용하고 인증·TLS 오류는 거부하는 typed
+force-save, 상세 릴리스 본문 자동 반영 계약 시험이 포함된다.
+
 2026-08-25 v0.50.1 릴리스 전 검증 결과:
 
 ```text
