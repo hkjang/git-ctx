@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"git-ctx/internal/toolcatalog"
@@ -154,5 +155,90 @@ func TestFullTextIndexTracksTheChunkTable(t *testing.T) {
 		if matches(FullTextQuery([]string{term})) != 1 {
 			t.Fatalf("%q was not indexed by the rebuild", term)
 		}
+	}
+}
+
+// Every on-premises installation eventually does the one thing no test covered:
+// stop an older binary and start a newer one on the database it left behind.
+// Verified by hand against a v0.50.0 database, this keeps it: the migrations
+// that came later apply, the rows survive, and the search index — which did not
+// exist in that release — is filled with the content that was already there.
+// Without that backfill an upgrade leaves the estate silently unsearchable.
+func TestUpgradingAnOlderDatabaseKeepsItSearchable(t *testing.T) {
+	ctx := context.Background()
+	dsn := "file:" + filepath.Join(t.TempDir(), "upgrade.db") + "?_foreign_keys=on"
+	older, err := Open(ctx, "sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rewind to the schema an older release left behind: forget the migrations
+	// added since, and drop what they created.
+	later := []string{"043_dependency_inventory.sql", "044_resolved_versions.sql",
+		"045_webhook_visibility.sql", "046_policy_revision.sql"}
+	for _, name := range later {
+		if _, err = older.DB.Exec(`DELETE FROM schema_migrations WHERE version=?`, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, statement := range []string{
+		`DROP TABLE IF EXISTS repository_packages`,
+		`DROP TABLE IF EXISTS repository_packages_staging`,
+		`DROP TRIGGER IF EXISTS document_chunks_fts_insert`,
+		`DROP TRIGGER IF EXISTS document_chunks_fts_update`,
+		`DROP TRIGGER IF EXISTS document_chunks_fts_delete`,
+		`DROP TABLE IF EXISTS document_chunks_fts`,
+		`DROP INDEX IF EXISTS idx_webhook_events_received`,
+		`ALTER TABLE webhook_events DROP COLUMN detail`,
+		`ALTER TABLE repository_ref_states DROP COLUMN policy_revision`,
+	} {
+		if _, err = older.DB.Exec(statement); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+	// Content indexed by that older release.
+	if _, err = older.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,enabled) VALUES('gitlab:1','core','api','api','payment api','gitlab','1','/core/api','main',1)`); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 5; index++ {
+		if _, err = older.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES(?,'gitlab:1','main','old',?,1,20,'Payment','code',?,?)`,
+			"c"+strconv.Itoa(index), "internal/payment_"+strconv.Itoa(index)+".go",
+			"func settleInvoice"+strconv.Itoa(index)+"() error { return nil }", "h"+strconv.Itoa(index)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = older.DB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The newer binary opens the same file.
+	upgraded, err := Open(ctx, "sqlite", dsn)
+	if err != nil {
+		t.Fatalf("the upgrade refused to start: %v", err)
+	}
+	defer upgraded.DB.Close()
+	for _, name := range later {
+		var applied int
+		if err = upgraded.DB.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version=?`, name).Scan(&applied); err != nil || applied != 1 {
+			t.Fatalf("%s was not applied: %d err=%v", name, applied, err)
+		}
+	}
+	var chunks int
+	if err = upgraded.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks`).Scan(&chunks); err != nil || chunks != 5 {
+		t.Fatalf("the upgrade lost content: %d err=%v", chunks, err)
+	}
+	var policyColumn int
+	if err = upgraded.DB.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('repository_ref_states') WHERE name='policy_revision'`).Scan(&policyColumn); err != nil || policyColumn != 1 {
+		t.Fatalf("the new column is missing: %d err=%v", policyColumn, err)
+	}
+	if !upgraded.FullTextAvailable() {
+		t.Skip("this build has no full-text index")
+	}
+	// The rows predate the index, so the index has to be filled from them.
+	var indexed int
+	if err = upgraded.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks_fts WHERE document_chunks_fts MATCH ?`, FullTextQuery([]string{"settleinvoice"})).Scan(&indexed); err != nil {
+		t.Fatal(err)
+	}
+	if indexed != 5 {
+		t.Fatalf("an upgrade left %d of 5 chunks unsearchable", indexed)
 	}
 }
