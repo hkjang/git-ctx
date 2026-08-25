@@ -39,7 +39,7 @@ func NewOpenAI(cfg OpenAIConfig) (Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &OpenAI{endpoint: strings.TrimSuffix(base.String(), "/") + "/v1/rerank", model: cfg.Model, key: cfg.APIKey, client: client}, nil
+	return &OpenAI{endpoint: netclient.JoinAPIPath(base.String(), "/v1/rerank"), model: cfg.Model, key: cfg.APIKey, client: client}, nil
 }
 
 func (o *OpenAI) Rerank(ctx context.Context, query string, documents []string) ([]float64, error) {

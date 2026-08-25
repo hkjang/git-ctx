@@ -35,6 +35,24 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.57.0 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./... (FTS5/태그 없음)  PASS
+모델 서버 연동 실인스턴스 확인                 PASS(결함 2건 수정)
+모델 변경 시 자동 재임베딩(7/7)                PASS
+임베딩 중단 시 키워드 경로·오류 문구           PASS
+엔드포인트 URL 조합 시험                       PASS
+go vet ./... && go build ./...               PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.57.0 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.57.0 빌드      PASS
+```
+
+이번 검증은 임베딩·리랭커 경로를 실제 모델 서버와 함께 처음으로 끝까지 돌렸다.
+운영자가 공급자 문서대로 넣은 `/v1` 이 중복되어 404 가 나고 장애처럼 보이던 것과,
+임베딩 불가 상황의 오류가 마지막 실패만 전달하던 것을 고쳤다.
+
 2026-08-26 v0.56.5 릴리스 전 검증 결과:
 
 ```text

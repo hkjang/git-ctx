@@ -1,0 +1,1 @@
+{"time":"2026-08-26T02:23:03.74788167+09:00","level":"ERROR","msg":"invalid bootstrap configuration","error":"GIT_CTX_RECOVERY_KEY is required and must contain at least 32 characters"}

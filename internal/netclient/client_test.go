@@ -135,3 +135,25 @@ func TestDecodeFailureNamesTheServerNotTheGoType(t *testing.T) {
 		t.Fatalf("a non-JSON body must be described as one: %q", plain)
 	}
 }
+
+// Every OpenAI-compatible provider documents its base URL as ending in /v1, so
+// that is what an operator pastes in. Appending the version again produced a
+// 404 that reached the operations screen as "the endpoint is unavailable" —
+// indistinguishable from an outage, with the doubled path never shown.
+func TestJoinAPIPathDoesNotRepeatWhatTheOperatorTyped(t *testing.T) {
+	cases := []struct{ base, path, want string }{
+		{"https://ai.internal", "/v1/embeddings", "https://ai.internal/v1/embeddings"},
+		{"https://ai.internal/", "/v1/embeddings", "https://ai.internal/v1/embeddings"},
+		{"https://ai.internal/v1", "/v1/embeddings", "https://ai.internal/v1/embeddings"},
+		{"https://ai.internal/v1/", "/v1/embeddings", "https://ai.internal/v1/embeddings"},
+		{"https://ai.internal/v1/embeddings", "/v1/embeddings", "https://ai.internal/v1/embeddings"},
+		{"https://ai.internal/openai/v1", "/v1/rerank", "https://ai.internal/openai/v1/rerank"},
+		// A path that merely contains the segment elsewhere is left alone.
+		{"https://v1.ai.internal/models", "/v1/embeddings", "https://v1.ai.internal/models/v1/embeddings"},
+	}
+	for _, item := range cases {
+		if got := JoinAPIPath(item.base, item.path); got != item.want {
+			t.Errorf("JoinAPIPath(%q, %q) = %q, want %q", item.base, item.path, got, item.want)
+		}
+	}
+}

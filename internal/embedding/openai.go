@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"git-ctx/internal/netclient"
@@ -39,7 +38,7 @@ func NewOpenAI(cfg OpenAIConfig) (Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &OpenAI{endpoint: strings.TrimSuffix(base.String(), "/") + "/v1/embeddings", model: cfg.Model, key: cfg.APIKey, client: client}, nil
+	return &OpenAI{endpoint: netclient.JoinAPIPath(base.String(), "/v1/embeddings"), model: cfg.Model, key: cfg.APIKey, client: client}, nil
 }
 func (o *OpenAI) Embed(ctx context.Context, text string) ([]float32, error) {
 	vectors, err := o.EmbedBatch(ctx, []string{text})

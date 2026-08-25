@@ -2342,3 +2342,68 @@ func TestRunbookLookupKeepsBothWaysOfMatchingAMarker(t *testing.T) {
 		t.Fatalf("runbook lookup leaked past the ACL: %#v err=%v", denied, err)
 	}
 }
+
+// When embeddings cannot be used and the index has nothing, the caller is given
+// an error — that is right, because "we could not look" must never be reported
+// as "nothing exists". What the error says matters: naming only the last
+// failure hands an agent a message about the source server while hiding that
+// the embeddings were unavailable and that the index was already searched.
+func TestSemanticFailureNamesEveryPathThatWasTried(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:semantic-failure?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.DB.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,enabled) VALUES('gitlab:1','core','api','api','','gitlab','1','/core/api','main',1)`)
+	exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('gitlab:1','alice','read')`)
+	exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('c1','gitlab:1','main','abc','internal/payment.go',1,20,'Payment','code','func retryPayment() error { return nil }','h1')`)
+
+	service := New(db)
+	service.SetConfigLoader(func(context.Context) Config {
+		// Embeddings are configured but the provider is unreachable, which is
+		// what an outage looks like from here.
+		return Config{KeywordWeight: 1, VectorWeight: 0.35, FinalK: 8, CandidateLimit: 100,
+			RetrievalMode: RetrievalHybridFallback, MinimumEmbeddingCoverage: 80}
+	})
+	service.SetEmbeddingLoader(func(context.Context) (embedding.Provider, error) {
+		return nil, errors.New("embedding endpoint refused the connection")
+	})
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) {
+		return nil, errors.New("gitlab returned an unreadable response")
+	})
+
+	// A term the index does not hold, so every path comes back empty.
+	_, err = service.SemanticSearch(ctx, []string{"alice"}, "kubernetes operator scheduling", "", "", 10)
+	if err == nil {
+		t.Fatal("an answer that could not be produced must not be reported as an empty one")
+	}
+	message := err.Error()
+	for _, expected := range []string{"embeddings were not used", "indexed content had no match", "live source query then failed"} {
+		if !strings.Contains(message, expected) {
+			t.Fatalf("the error hides a path that was tried: %q", message)
+		}
+	}
+	if !strings.Contains(message, "gitlab returned an unreadable response") {
+		t.Fatalf("the underlying source failure must still be readable: %q", message)
+	}
+
+	// With something in the index, the same outage returns the indexed answer
+	// rather than an error, and says why the live path did not run.
+	found, err := service.SemanticSearch(ctx, []string{"alice"}, "retryPayment", "", "", 10)
+	if err != nil {
+		t.Fatalf("the index could answer this: %v", err)
+	}
+	if len(found.Hits) == 0 {
+		t.Fatalf("indexed hits were discarded: %#v", found.Diagnostics)
+	}
+	if !strings.Contains(strings.Join(found.Diagnostics, " "), "source search:") {
+		t.Fatalf("the failed live path must be reported: %v", found.Diagnostics)
+	}
+}

@@ -2431,7 +2431,13 @@ WHERE r.enabled=1 AND ` + predicate
 			result.Diagnostics = append(result.Diagnostics, "source search: "+err.Error())
 			return result, nil
 		}
-		return SemanticSearch{}, err
+		// Returning only the last failure tells the caller about the source
+		// server and nothing about the two things that actually explain the
+		// empty answer: the embeddings could not be used, and the index was
+		// searched and had no match. An agent reading a GitLab decoding error
+		// has no way to know either.
+		return SemanticSearch{}, fmt.Errorf("no result could be produced: embeddings were not used (%s); the indexed content had no match for these terms; the live source query then failed: %w",
+			strings.TrimSuffix(reason, "."), err)
 	}
 	code := CodeSearchResult{Hits: remote}
 	merged := map[string]bool{}
