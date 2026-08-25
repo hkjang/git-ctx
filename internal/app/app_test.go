@@ -2865,3 +2865,78 @@ func TestSavingAnIndexPolicyQueuesTheRebuild(t *testing.T) {
 		t.Fatalf("refs marked=%d err=%v", marked, err)
 	}
 }
+
+// SQLite is opened with a single connection, so any operation that holds it for
+// long freezes the whole platform — the shape of the two stalls fixed in
+// v0.56.3. A backup reads every table, which makes it the longest read this
+// platform performs, and it must not stop agents from searching while it runs.
+func TestABackupDoesNotFreezeSearches(t *testing.T) {
+	directory := t.TempDir()
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(directory, "concurrent.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
+		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if _, err = a.store.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,enabled) VALUES('gitlab:1','core','api','api','','gitlab','1','/core/api','main',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.store.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('gitlab:1','alice','read')`); err != nil {
+		t.Fatal(err)
+	}
+	// Enough rows that the backup takes long enough to overlap the reads.
+	transaction, err := a.store.DB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 4000; index++ {
+		if _, err = transaction.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES(?,'gitlab:1','main','abc',?,1,20,'Payments','code','settlement retry ledger quota payment',?)`,
+			fmt.Sprintf("c%d", index), fmt.Sprintf("internal/payment_%d.go", index), fmt.Sprintf("h%d", index)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = transaction.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	backupDone := make(chan int, 1)
+	go func() {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/backups", nil)
+		request.Header.Set("Authorization", "Bearer bootstrap")
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		backupDone <- recorder.Code
+	}()
+
+	// Reads issued while that runs must all finish; a frozen connection shows up
+	// as a search that never returns rather than as a slow one.
+	searches := make(chan error, 20)
+	go func() {
+		for index := 0; index < 20; index++ {
+			_, err := a.search.SearchRepositories(context.Background(), []string{"alice"}, "api", "", 5)
+			searches <- err
+		}
+	}()
+	deadline := time.After(20 * time.Second)
+	for completed := 0; completed < 20; completed++ {
+		select {
+		case err := <-searches:
+			if err != nil {
+				t.Fatalf("search %d failed while the backup ran: %v", completed, err)
+			}
+		case <-deadline:
+			t.Fatalf("only %d of 20 searches finished; the backup is holding the connection", completed)
+		}
+	}
+	select {
+	case code := <-backupDone:
+		if code != http.StatusCreated {
+			t.Fatalf("backup status=%d", code)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("the backup never finished")
+	}
+}

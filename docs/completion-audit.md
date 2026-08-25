@@ -35,6 +35,23 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.56.5 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./... (FTS5/태그 없음)  PASS
+동시 8 호출 부하(청크 200,000)                 PASS(p95 117ms, 오류 0건)
+백업 진행 중 동시 호출                         PASS(p95 159ms, 오류 0건)
+백업·복원 왕복과 전문 인덱스 복구              PASS
+백업 중 검색 완료 회귀 시험                    PASS
+go vet ./... && go build ./...               PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.56.5 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.56.5 빌드      PASS
+```
+
+이번 검증은 단일 연결 SQLite 에서 동시 부하와 장시간 읽기(백업)가 서로를 막지
+않는지를 실측했다. 수정할 결함은 없었고, 같은 유형의 회귀를 잡는 시험을 남겼다.
+
 2026-08-26 v0.56.4 릴리스 전 검증 결과:
 
 ```text
