@@ -35,6 +35,23 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-25 v0.55.1 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./...                 PASS
+go vet ./... && go build ./...               PASS
+규모 시험(저장소 400·청크 200,000)             PASS
+ACL 제한 질의 계획 점검                        PASS(전체 스캔 없음)
+부분 훑기 진단 회귀 시험                       PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.55.1 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.55.1 빌드      PASS
+```
+
+이번 검증은 규모를 키워 성능과 정확도를 함께 봤다. 지연은 모든 도구에서 60ms 이하였고
+질의 계획에도 문제가 없었으나, 색인 훑기가 2,000건에서 멈춘다는 사실이 답에 드러나지
+않아 표본이 전수처럼 읽히고 있었다.
+
 2026-08-25 v0.55.0 릴리스 전 검증 결과:
 
 ```text

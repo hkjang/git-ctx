@@ -1267,10 +1267,17 @@ WHERE r.enabled=1 AND ` + predicate
 // empty even though every file was sitting in this platform's own index. An
 // agent then reads "no file contents matched" and concludes the code does not
 // exist, which is the one conclusion this product exists to prevent.
-func (s *Service) indexedSourceHits(ctx context.Context, principals []string, query, sourceType, project, repository, ref string, limit int) ([]SourceResult, error) {
+// indexedScanLimit bounds one lexical pass over the indexed chunks. It is a cap,
+// not a measurement: a common term matches most of a large corpus, and the rows
+// beyond the cap are never looked at. Whenever it is reached the caller says so,
+// because a partial scan that reads as a complete answer is how an agent
+// concludes that code lives in eight repositories when it lives in four hundred.
+const indexedScanLimit = 2000
+
+func (s *Service) indexedSourceHits(ctx context.Context, principals []string, query, sourceType, project, repository, ref string, limit int) ([]SourceResult, bool, error) {
 	terms := unique(embedding.Tokens(query))
 	if len(terms) == 0 {
-		return nil, nil
+		return nil, false, nil
 	}
 	join, predicate, args := repositoryACL(principals)
 	statement := `SELECT r.library_id,r.source_type,r.project_key,r.slug,c.ref_name,c.commit_id,c.file_path,c.content,c.line_start,c.line_end
@@ -1300,10 +1307,11 @@ WHERE r.enabled=1 AND ` + predicate
 		statement += `LOWER(c.file_path || ' ' || c.heading || ' ' || c.content) LIKE ?`
 		args = append(args, "%"+term+"%")
 	}
-	statement += `) LIMIT 2000`
+	statement += `) LIMIT ?`
+	args = append(args, indexedScanLimit)
 	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	type scored struct {
@@ -1311,13 +1319,15 @@ WHERE r.enabled=1 AND ` + predicate
 		score  int
 	}
 	var candidates []scored
+	scanned := 0
 	for rows.Next() {
+		scanned++
 		var item SourceResult
 		var content string
 		if err = rows.Scan(&item.LibraryID, &item.SourceType, &item.ProjectKey, &item.RepositorySlug,
 			&item.Ref, &item.QueryResult.CommitID, &item.QueryResult.Path, &content,
 			&item.QueryResult.LineStart, &item.QueryResult.LineEnd); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		haystack := strings.ToLower(item.QueryResult.Path + " " + content)
 		score := 0
@@ -1332,7 +1342,7 @@ WHERE r.enabled=1 AND ` + predicate
 		candidates = append(candidates, scored{result: item, score: score})
 	}
 	if err = rows.Err(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
 	out := make([]SourceResult, 0, min(limit, len(candidates)))
@@ -1348,7 +1358,7 @@ WHERE r.enabled=1 AND ` + predicate
 			break
 		}
 	}
-	return out, nil
+	return out, scanned >= indexedScanLimit, nil
 }
 
 // FileResult is one path returned by filename search.
@@ -2204,10 +2214,13 @@ WHERE r.enabled=1 AND ` + predicate
 		}
 		statement += `)`
 	}
-	statement += ` LIMIT 2000`
+	statement += ` LIMIT ?`
+	args = append(args, indexedScanLimit)
 	rows, localErr := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
+	scanned := 0
 	if localErr == nil {
 		for rows.Next() {
+			scanned++
 			var hit SemanticHit
 			if rows.Scan(&hit.LibraryID, &hit.SourceType, &hit.Ref, &hit.CommitID, &hit.FilePath, &hit.Heading, &hit.Content, &hit.LineStart, &hit.LineEnd) != nil {
 				continue
@@ -2226,6 +2239,13 @@ WHERE r.enabled=1 AND ` + predicate
 			result.Hits = result.Hits[:limit]
 		}
 		result.Diagnostics = append(result.Diagnostics, fmt.Sprintf("lexical index: %d accessible chunk(s) matched.", len(result.Hits)))
+		if scanned >= indexedScanLimit {
+			// "N chunks matched" reads as the total. It is the total among the
+			// rows that were read, and on a large corpus a common term matches
+			// far more than were read.
+			result.Diagnostics = append(result.Diagnostics,
+				fmt.Sprintf("lexical index: 색인 청크 %d건까지만 훑고 멈췄습니다. 전체 일치는 더 많을 수 있으니 libraryId 나 저장소로 범위를 좁히세요.", indexedScanLimit))
+		}
 	} else {
 		result.Diagnostics = append(result.Diagnostics, "lexical index: "+localErr.Error())
 	}
@@ -2778,7 +2798,7 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 	indexedFallback, answeredFromIndex := "", false
 	if len(hits) == 0 {
 		indexSpan := calltrace.Start(ctx, "indexed-content", sourceType)
-		indexed, indexErr := s.indexedSourceHits(ctx, principals, normalized, sourceType, project, repository, ref, limit)
+		indexed, capped, indexErr := s.indexedSourceHits(ctx, principals, normalized, sourceType, project, repository, ref, limit)
 		if indexErr != nil {
 			indexSpan.Fail(indexErr)
 		} else {
@@ -2786,6 +2806,12 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 			if len(indexed) > 0 {
 				hits = indexed
 				indexedFallback = fmt.Sprintf("index: the source query returned nothing, so %d match(es) come from the indexed content. They are as recent as the last index run.", len(indexed))
+				if capped {
+					// The rows past the cap were never read, so the repositories
+					// in this answer are the ones the scan reached first — not
+					// the only ones that match.
+					indexedFallback += fmt.Sprintf(" Only the first %d indexed chunks were scanned, so this is a sample rather than every match: narrow with libraryId, repository or path.", indexedScanLimit)
+				}
 				// The live path's failure is still reported below — it explains
 				// why the answer is index-aged — but it no longer decides the
 				// call, because the call now has an answer.

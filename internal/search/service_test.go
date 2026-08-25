@@ -2051,3 +2051,75 @@ func TestSearchCodeAnswersFromTheIndexWhenTheSourceQueryCannot(t *testing.T) {
 		t.Fatalf("the index fallback leaked past the ACL: %#v", denied.Hits)
 	}
 }
+
+// A lexical scan over the index stops at a fixed number of rows. On a corpus
+// where a common term matches most chunks, the answer is then a sample of
+// whatever was read first — and an agent that is not told this concludes the
+// code lives in the handful of repositories it can see.
+func TestAPartialIndexScanSaysThatItIsPartial(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:scan-cap?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	if _, err = db.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,enabled) VALUES('gitlab:1','core','api','api','','gitlab','1','/core/api','main',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.DB.Exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('gitlab:1','alice','read')`); err != nil {
+		t.Fatal(err)
+	}
+	transaction, err := db.DB.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < indexedScanLimit+50; index++ {
+		if _, err = transaction.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES(?,'gitlab:1','main','abc',?,1,4,'handler','code','payment handling code',?)`,
+			fmt.Sprintf("c%d", index), fmt.Sprintf("internal/payment_%d.go", index), fmt.Sprintf("h%d", index)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err = transaction.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	service := New(db)
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) {
+		return nil, errors.New("gitlab search API is unavailable")
+	})
+	result, err := service.SearchCode(ctx, []string{"alice"}, "payment", "gitlab", "", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Hits) == 0 {
+		t.Fatalf("the index must still answer: %v", result.Diagnostics)
+	}
+	joined := strings.Join(result.Diagnostics, " ")
+	if !strings.Contains(joined, "sample rather than every match") {
+		t.Fatalf("a capped scan must say so: %v", result.Diagnostics)
+	}
+
+	// A query whose matches fit inside the cap must not carry the warning: a
+	// caveat on every answer is a caveat nobody reads.
+	small, err := store.Open(ctx, "sqlite", "file:scan-cap-small?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer small.DB.Close()
+	if _, err = small.DB.Exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,enabled) VALUES('gitlab:1','core','api','api','','gitlab','1','/core/api','main',1);
+INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('gitlab:1','alice','read');
+INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('c1','gitlab:1','main','abc','internal/payment.go',1,4,'handler','code','payment handling code','h1')`); err != nil {
+		t.Fatal(err)
+	}
+	smallService := New(small)
+	smallService.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) {
+		return nil, errors.New("gitlab search API is unavailable")
+	})
+	complete, err := smallService.SearchCode(ctx, []string{"alice"}, "payment", "gitlab", "", "", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(complete.Diagnostics, " "), "sample rather than every match") {
+		t.Fatalf("a complete scan must not claim to be partial: %v", complete.Diagnostics)
+	}
+}
