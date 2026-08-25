@@ -2407,3 +2407,87 @@ func TestSemanticFailureNamesEveryPathThatWasTried(t *testing.T) {
 		t.Fatalf("the failed live path must be reported: %v", found.Diagnostics)
 	}
 }
+
+// The order of an answer is part of the answer. A configured reranker that
+// silently failed left the caller reading vector order while believing it had
+// been reranked — and nothing in the answer, the diagnostics or the platform
+// status said otherwise.
+func TestRerankingSaysWhetherItRan(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:rerank-visibility?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.DB.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,enabled) VALUES('gitlab:1','core','api','api','','gitlab','1','/core/api','main',1)`)
+	exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('gitlab:1','alice','read')`)
+	exec(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id) VALUES('gitlab:1','main','abc')`)
+	exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES
+('c1','gitlab:1','main','abc','docs/payment.md',1,20,'Payment','document','결제 재시도 배치','h1'),
+('c2','gitlab:1','main','abc','docs/cache.md',1,20,'Cache','document','결제 캐시 워머 재시작','h2')`)
+
+	service := New(db)
+	service.SetConfigLoader(func(context.Context) Config {
+		return Config{KeywordWeight: 1, VectorWeight: 0, FinalK: 8, CandidateLimit: 100, RerankLimit: 5,
+			RetrievalMode: RetrievalKeywordOnly}
+	})
+
+	// A reranker that fails must not fail the search, and must not be silent.
+	service.SetRerankerLoader(func(context.Context) rerank.Provider {
+		return rerankFunc(func(context.Context, string, []string) ([]float64, error) {
+			return nil, errors.New("reranker endpoint refused the connection")
+		})
+	})
+	failed, err := service.Query(ctx, []string{"alice"}, "/core/api", "결제")
+	if err != nil {
+		t.Fatalf("a failing reranker must not fail the search: %v", err)
+	}
+	if !strings.Contains(failed, "재순위 모델을 호출하지 못해") || !strings.Contains(failed, "refused the connection") {
+		t.Fatalf("a failed reranking must be reported:\n%s", failed)
+	}
+
+	// One that answers must say that the order is its own.
+	service.SetRerankerLoader(func(context.Context) rerank.Provider {
+		return rerankFunc(func(_ context.Context, _ string, documents []string) ([]float64, error) {
+			scores := make([]float64, len(documents))
+			for index := range documents {
+				scores[index] = float64(len(documents) - index)
+			}
+			return scores, nil
+		})
+	})
+	ranked, err := service.Query(ctx, []string{"alice"}, "/core/api", "결제")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ranked, "재순위 모델 점수로 정렬") {
+		t.Fatalf("a successful reranking must be reported:\n%s", ranked)
+	}
+
+	// A provider that answers with the wrong number of scores is a silent
+	// corruption of the order if it is trusted; it must be refused and said.
+	service.SetRerankerLoader(func(context.Context) rerank.Provider {
+		return rerankFunc(func(context.Context, string, []string) ([]float64, error) {
+			return []float64{1}, nil
+		})
+	})
+	mismatched, err := service.Query(ctx, []string{"alice"}, "/core/api", "결제")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mismatched, "점수를 돌려줘 순서를 바꾸지 않았습니다") {
+		t.Fatalf("a mismatched reranking must be reported:\n%s", mismatched)
+	}
+}
+
+type rerankFunc func(context.Context, string, []string) ([]float64, error)
+
+func (f rerankFunc) Rerank(ctx context.Context, query string, documents []string) ([]float64, error) {
+	return f(ctx, query, documents)
+}

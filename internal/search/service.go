@@ -1501,6 +1501,19 @@ WHERE r.enabled=1 AND ` + predicate + ` AND ` + lookup
 	return statement, args, true
 }
 
+// clipText shortens a message for a diagnostic line without splitting a rune —
+// every Korean character is three bytes, and a byte slice leaves broken text.
+func clipText(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	cut := limit
+	for cut > 0 && value[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return value[:cut] + "…"
+}
+
 // FileResult is one path returned by filename search.
 type FileResult struct {
 	LibraryID, SourceType, ProjectKey, RepositorySlug, Ref, Path, BaseName string
@@ -4099,6 +4112,11 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 	}
 	hits = filtered
 	sort.Slice(hits, func(i, j int) bool { return hits[i].score > hits[j].score })
+	// rerankNote records what happened to the reranking, because the order of
+	// an answer is part of the answer. A configured reranker that quietly failed
+	// left the caller reading vector order while believing it had been reranked,
+	// and nothing anywhere said otherwise.
+	rerankNote := ""
 	if s.reranker != nil && len(hits) > 0 {
 		limit := min(len(hits), cfg.RerankLimit)
 		documents := make([]string, limit)
@@ -4106,11 +4124,18 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 			documents[i] = hits[i].heading + "\n" + hits[i].content
 		}
 		if provider := s.reranker(ctx); provider != nil {
-			if scores, rerankErr := provider.Rerank(ctx, query, documents); rerankErr == nil && len(scores) == limit {
+			scores, rerankErr := provider.Rerank(ctx, query, documents)
+			switch {
+			case rerankErr != nil:
+				rerankNote = "재순위 모델을 호출하지 못해 검색 점수 순서 그대로입니다: " + clipText(rerankErr.Error(), 160)
+			case len(scores) != limit:
+				rerankNote = fmt.Sprintf("재순위 모델이 %d개 문서에 %d개 점수를 돌려줘 순서를 바꾸지 않았습니다.", limit, len(scores))
+			default:
 				for i := 0; i < limit; i++ {
 					hits[i].score = scores[i]
 				}
 				sort.SliceStable(hits[:limit], func(i, j int) bool { return hits[i].score > hits[j].score })
+				rerankNote = fmt.Sprintf("상위 %d건은 재순위 모델 점수로 정렬했습니다.", limit)
 			}
 		}
 	}
@@ -4145,6 +4170,9 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 			}
 		}
 		span.SetAttributes(attribute.Bool("git_ctx.search.remote_degraded", true))
+	}
+	if rerankNote != "" {
+		fmt.Fprintf(&b, "> %s\n\n", rerankNote)
 	}
 	if embeddingFallback != "" {
 		fmt.Fprintf(&b, "> %s\n\n", embeddingFallback)

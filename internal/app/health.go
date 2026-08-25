@@ -402,6 +402,24 @@ func (a *App) embeddingHealthMarkdown(ctx context.Context) string {
 	if !view.Circuit.RetryAt.IsZero() && view.Circuit.RetryAt.After(time.Now()) {
 		fmt.Fprintf(&b, "- Next Model Probe: %s\n", view.Circuit.RetryAt.UTC().Format(time.RFC3339))
 	}
+	// Whether results are reranked is an operational fact of the same kind: a
+	// reranker that is configured but failing changes the order of every answer
+	// and reports itself nowhere else.
+	settings, err := a.loadSettingMap(ctx, "model")
+	if err != nil {
+		fmt.Fprintf(&b, "- Reranker: unknown (model settings unreadable)\n")
+		return b.String()
+	}
+	if enabled, _ := settings["rerankerEnabled"].(bool); !enabled {
+		fmt.Fprintf(&b, "- Reranker: disabled\n")
+		return b.String()
+	}
+	model, _ := settings["rerankerModel"].(string)
+	if _, rerankErr := rerankerProviderFromMap(settings); rerankErr != nil {
+		fmt.Fprintf(&b, "- Reranker: enabled but unusable (%s): %s\n", model, rerankErr.Error())
+		return b.String()
+	}
+	fmt.Fprintf(&b, "- Reranker: enabled (%s) · a call that fails is reported in the answer itself\n", model)
 	return b.String()
 }
 
