@@ -59,6 +59,27 @@ GIT_CTX_RECOVERY_KEY='<Secret Store의 기존 장기 복구 키>' \
 생성은 금지된다. Keycloak 설정을 시험·저장하고 정상 SSO 로그인을 확인한 뒤
 복구 세션에서 로그아웃한다. `recovery.login` 성공·실패는 감사 로그에 기록된다.
 
+## 검증된 릴리스
+
+정식 릴리스는 GitHub 화면에서 먼저 만들지 않는다. 소스의
+`internal/version/version.go`와 배포·OpenAPI 문서 버전을 함께 올리고 `main` CI가
+성공한 커밋에 `vX.Y.Z` 태그를 푸시한다. `Verified offline release` 워크플로가 다음
+순서로 릴리스를 만든다.
+
+1. 태그·소스 버전·대상 커밋 일치 확인
+2. Go build/vet/unit/race, PostgreSQL·pgvector·Vault 통합, 관리자 UI, 취약점 시험
+3. 고정된 커밋과 커밋 시각으로 Linux AMD64 이미지 생성
+4. `git-ctx-vX.Y.Z.tar.gz`와 `.sha256`을 draft 릴리스에 업로드
+5. 두 자산을 GitHub에서 다시 내려받아 checksum, Docker load, 버전, revision,
+   플랫폼과 UID 10001 확인
+6. 로컬·원격 파일이 byte-for-byte 같을 때만 릴리스 공개
+
+단계 중 하나라도 실패하면 공개 릴리스가 아니라 draft로 남는다. 이미 정상 공개된
+릴리스를 다시 실행하면 원격 자산을 검증하고 바꾸지 않는다. 과거 태그의 자산을
+복구할 때는 Actions의 수동 실행에서 태그를 지정하며, 이 경우 해당 과거 릴리스를
+Latest로 바꾸지 않는다. 저장소의 Release 쓰기 권한은 이 워크플로 운영자에게만
+제한하고 수동 공개를 운영 절차에서 금지한다.
+
 ## 장애 확인
 
 - `/healthz`와 DB 연결 상태를 먼저 확인한다.

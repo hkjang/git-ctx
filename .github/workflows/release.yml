@@ -1,0 +1,381 @@
+name: Verified offline release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing vX.Y.Z tag to publish or repair
+        required: true
+        type: string
+
+# The build job cannot mutate the repository. Only the publish job receives a
+# write-capable token, after all tests and local artifact checks have passed.
+permissions: {}
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and verify offline image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      target_sha: ${{ steps.release.outputs.target_sha }}
+      archive: ${{ steps.release.outputs.archive }}
+      checksum: ${{ steps.release.outputs.checksum }}
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.1-pg16@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337
+        env:
+          POSTGRES_USER: gitctx
+          POSTGRES_PASSWORD: gitctx
+          POSTGRES_DB: gitctx
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U gitctx"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      vault:
+        image: hashicorp/vault:2.0.3@sha256:a296a888b118615dc01d5f1a6846e6d4a7277946caaed5b447008fff5fe06b54
+        env:
+          VAULT_DEV_ROOT_TOKEN_ID: release-root
+          VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+        ports: ["8200:8200"]
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # workflow_dispatch can repair a tag created before these scripts existed.
+      # Take the tooling from the exact commit that supplied this workflow, while
+      # the application and Dockerfile continue to come from the release tag.
+      - name: Check out trusted release tooling
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tooling
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: Validate tag and source version
+        id: release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tag=$RELEASE_TAG
+          if [[ ! $tag =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            echo "release tag must be a semantic version such as v1.2.3: $tag" >&2
+            exit 1
+          fi
+          git show-ref --verify --quiet "refs/tags/$tag" || {
+            echo "the release tag does not exist: $tag" >&2
+            exit 1
+          }
+          target_sha=$(git rev-list -n 1 "$tag")
+          checked_out_sha=$(git rev-parse HEAD)
+          if [[ $target_sha != "$checked_out_sha" ]]; then
+            echo "checked-out commit $checked_out_sha does not match $tag target $target_sha" >&2
+            exit 1
+          fi
+          version=${tag#v}
+          source_version=$(sed -n 's/.*Version = "\(.*\)".*/\1/p' internal/version/version.go)
+          if [[ $source_version != "$version" ]]; then
+            echo "tag $tag does not match source version $source_version" >&2
+            exit 1
+          fi
+          # A repair/rerun of the same tag must carry the same metadata rather
+          # than changing merely because the workflow ran on another day.
+          build_time=$(git show -s --format=%cI "$target_sha")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "target_sha=$target_sha" >> "$GITHUB_OUTPUT"
+          echo "build_time=$build_time" >> "$GITHUB_OUTPUT"
+          echo "archive=git-ctx-v${version}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "checksum=git-ctx-v${version}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Verify formatting, build and tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          unformatted=$(gofmt -l ./cmd ./internal)
+          if [[ -n $unformatted ]]; then
+            echo "These files are not gofmt'd:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+          go build ./...
+          go vet ./...
+          go test ./...
+          go test -race ./...
+          for file in web/app.js web/guides.js web/roles.js; do
+            node --check "$file"
+          done
+          for file in test/web/*.test.js; do
+            node "$file"
+          done
+
+      - name: Verify PostgreSQL, pgvector and Vault integrations
+        env:
+          GIT_CTX_TEST_POSTGRES_DSN: postgres://gitctx:gitctx@127.0.0.1:5432/gitctx?sslmode=disable
+          GIT_CTX_TEST_PGVECTOR_DSN: postgres://gitctx:gitctx@127.0.0.1:5432/gitctx?sslmode=disable
+          GIT_CTX_TEST_VAULT_URL: http://127.0.0.1:8200
+          GIT_CTX_TEST_VAULT_TOKEN: release-root
+        run: go test -count=1 ./... -run Integration
+
+      - name: Verify reachable dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+          govulncheck ./...
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the exact linux/amd64 release image
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker buildx build \
+            --platform linux/amd64 \
+            --load \
+            --build-arg "VERSION=${{ steps.release.outputs.tag }}" \
+            --build-arg "COMMIT=${{ steps.release.outputs.target_sha }}" \
+            --build-arg "BUILD_TIME=${{ steps.release.outputs.build_time }}" \
+            --tag "git-ctx:${{ steps.release.outputs.tag }}" .
+
+      - name: Package and reload the offline archive
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sh .release-tooling/scripts/package-offline-image.sh \
+            "${{ steps.release.outputs.version }}" \
+            "git-ctx:${{ steps.release.outputs.tag }}"
+          sh .release-tooling/scripts/verify-offline-image.sh \
+            "${{ steps.release.outputs.version }}" \
+            "dist/${{ steps.release.outputs.archive }}" \
+            "${{ steps.release.outputs.target_sha }}"
+
+      - name: Stage the verified release artifact
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir release-artifact
+          install -m 0644 "dist/${{ steps.release.outputs.archive }}" release-artifact/
+          install -m 0644 "dist/${{ steps.release.outputs.checksum }}" release-artifact/
+          test "$(find release-artifact -maxdepth 1 -type f | wc -l)" -eq 2
+
+      - name: Transfer verified files to the publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-release-${{ steps.release.outputs.version }}
+          path: release-artifact/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    name: Publish verified offline assets
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Download the verified build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: offline-release-${{ needs.build.outputs.version }}
+          path: release-artifact
+
+      # Do not trust executable files transported with a build artifact. Fetch
+      # the verifier from the immutable commit that supplied this workflow.
+      - name: Check out trusted release tooling
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .release-tooling
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      # This executes the packaged binary, so it deliberately has no GH_TOKEN.
+      - name: Verify the transferred build artifact
+        shell: bash
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          TARGET_SHA: ${{ needs.build.outputs.target_sha }}
+          ARCHIVE_NAME: ${{ needs.build.outputs.archive }}
+          CHECKSUM_NAME: ${{ needs.build.outputs.checksum }}
+        run: |
+          set -Eeuo pipefail
+          local_dir=$GITHUB_WORKSPACE/release-artifact
+          verifier=$GITHUB_WORKSPACE/.release-tooling/scripts/verify-offline-image.sh
+          test -s "$local_dir/$ARCHIVE_NAME"
+          test -s "$local_dir/$CHECKSUM_NAME"
+          test -s "$verifier"
+          sh "$verifier" "$VERSION" "$local_dir/$ARCHIVE_NAME" "$TARGET_SHA"
+
+      # This step has the write token but never evaluates release-controlled
+      # code or executes the packaged image. It only mutates GitHub release
+      # metadata, uploads bytes already verified above, and downloads candidates
+      # for the following tokenless verification step.
+      - name: Prepare draft and download release assets
+        id: prepare
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASH_ENV: /dev/null
+          ENV: /dev/null
+          PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          TAG: ${{ needs.build.outputs.tag }}
+          ARCHIVE_NAME: ${{ needs.build.outputs.archive }}
+          CHECKSUM_NAME: ${{ needs.build.outputs.checksum }}
+        run: |
+          set -Eeuo pipefail
+          local_dir=$GITHUB_WORKSPACE/release-artifact
+          verify_dir=$RUNNER_TEMP/release-assets
+          release_exists=false
+          release_is_draft=false
+          if release_json=$(/usr/bin/gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" 2>/dev/null); then
+            release_exists=true
+            release_is_draft=$(/usr/bin/jq -r '.draft' <<<"$release_json")
+          fi
+
+          if [[ $release_exists == false ]]; then
+            prerelease=()
+            if [[ $TAG == *-* ]]; then
+              prerelease=(--prerelease)
+            fi
+            /usr/bin/gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --draft \
+              --generate-notes \
+              "${prerelease[@]}"
+            release_is_draft=true
+            release_json=$(/usr/bin/gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")
+          fi
+
+          required_assets_present() {
+            /usr/bin/jq -e \
+              --arg archive "$ARCHIVE_NAME" \
+              --arg checksum "$CHECKSUM_NAME" \
+              '([.assets[] | select(.name == $archive and .state == "uploaded" and .size > 0)] | length) == 1
+               and ([.assets[] | select(.name == $checksum and .state == "uploaded" and .size > 0)] | length) == 1' \
+              <<<"$1" >/dev/null
+          }
+
+          uploaded=false
+          requires_publish=$release_is_draft
+          was_published=false
+          if [[ $release_is_draft == false ]]; then
+            was_published=true
+          fi
+          if [[ $release_is_draft == true ]] || ! required_assets_present "$release_json"; then
+            if [[ $release_is_draft == false ]]; then
+              /usr/bin/gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft
+              requires_publish=true
+            fi
+            /usr/bin/gh release upload "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber \
+              "$local_dir/$ARCHIVE_NAME#Offline Docker image (linux/amd64)" \
+              "$local_dir/$CHECKSUM_NAME#SHA-256 checksum"
+            uploaded=true
+          fi
+
+          release_json=$(/usr/bin/gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")
+          required_assets_present "$release_json"
+          rm -rf "$verify_dir"
+          mkdir -p "$verify_dir"
+          /usr/bin/gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$verify_dir" \
+            --pattern "$ARCHIVE_NAME" \
+            --pattern "$CHECKSUM_NAME"
+          echo "uploaded=$uploaded" >> "$GITHUB_OUTPUT"
+          echo "requires_publish=$requires_publish" >> "$GITHUB_OUTPUT"
+          echo "was_published=$was_published" >> "$GITHUB_OUTPUT"
+
+      # The write token is absent while the downloaded image is loaded and run.
+      - name: Verify downloaded release assets
+        shell: bash
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          TARGET_SHA: ${{ needs.build.outputs.target_sha }}
+          ARCHIVE_NAME: ${{ needs.build.outputs.archive }}
+          CHECKSUM_NAME: ${{ needs.build.outputs.checksum }}
+          UPLOADED: ${{ steps.prepare.outputs.uploaded }}
+        run: |
+          set -Eeuo pipefail
+          local_dir=$GITHUB_WORKSPACE/release-artifact
+          verify_dir=$RUNNER_TEMP/release-assets
+          verifier=$GITHUB_WORKSPACE/.release-tooling/scripts/verify-offline-image.sh
+          sh "$verifier" "$VERSION" "$verify_dir/$ARCHIVE_NAME" "$TARGET_SHA"
+          if [[ $UPLOADED == true ]]; then
+            cmp "$local_dir/$ARCHIVE_NAME" "$verify_dir/$ARCHIVE_NAME"
+            cmp "$local_dir/$CHECKSUM_NAME" "$verify_dir/$CHECKSUM_NAME"
+          fi
+
+      # If an existing published release carried corrupt required assets, hide
+      # it after verification fails. A rerun will replace its now-draft assets.
+      - name: Quarantine a failed previously published release
+        if: ${{ failure() && steps.prepare.outputs.was_published == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASH_ENV: /dev/null
+          ENV: /dev/null
+          PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          TAG: ${{ needs.build.outputs.tag }}
+        run: /usr/bin/gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft
+
+      - name: Publish the verified draft
+        if: ${{ success() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASH_ENV: /dev/null
+          ENV: /dev/null
+          PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          TAG: ${{ needs.build.outputs.tag }}
+          MARK_LATEST: ${{ github.event_name == 'push' }}
+          REQUIRES_PUBLISH: ${{ steps.prepare.outputs.requires_publish }}
+        run: |
+          set -Eeuo pipefail
+          publish_flags=()
+          if [[ $REQUIRES_PUBLISH == true ]]; then
+            publish_flags+=(--draft=false)
+          fi
+          if [[ $TAG != *-* && $MARK_LATEST == true ]]; then
+            publish_flags+=(--latest)
+          fi
+          if [[ ${#publish_flags[@]} -gt 0 ]]; then
+            /usr/bin/gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" "${publish_flags[@]}"
+          fi
+          /usr/bin/gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+            --jq 'select(.draft == false) | [.tag_name, (.assets | length)] | @tsv'

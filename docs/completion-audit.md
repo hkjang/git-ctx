@@ -19,8 +19,8 @@
 | 모델 미설정 검색 | 완료 | ACL 검증 뒤 Bitbucket/GitLab source query API, Context7 출력 조립과 안전한 BM25 fallback 계약 시험 |
 | 사용자 기능 | 완료 | 우측 상단 프로필 메뉴와 Ctrl/Cmd+K 빠른 이동, 관리자와 분리된 내 공간, 저장소·키·제한·사용량·호출·알림·MCP 설정 UI/API |
 | 관리자 기능 | 완료(구현 범위) | 설정 자동 조회·시험·저장·삭제 CRUD, 저장소·정책·작업, MCP 도구, 키·감사·보안·상태 UI/API와 역할별 메뉴·쓰기 통제 |
-| 데이터베이스 | 완료 | SQLite 회귀 시험 및 빈 PostgreSQL 16에서 001~017 migration/readiness와 암호화 백업·복원 실검증 |
-| 배포 | 완료 | 비루트 Docker 이미지 실행, Compose, Kubernetes Kustomize와 기본 NetworkPolicy 렌더링 |
+| 데이터베이스 | 완료 | SQLite 회귀 시험 및 빈 PostgreSQL 16에서 001~042 migration/readiness와 암호화 백업·복원 실검증 |
+| 배포 | 완료 | 비루트 Docker 이미지 실행, Compose, Kubernetes Kustomize와 기본 NetworkPolicy 렌더링. 태그·소스·커밋 고정, 원자적 패키징, checksum과 원격 재다운로드 검증 후 공개하는 릴리스 게이트 |
 | 관측성 | 완료 | JSON 요청 로그, 동적 로그 레벨, request ID, health/readiness, Prometheus와 동적 OTLP HTTP tracing |
 | 백업·복구 | 완료(애플리케이션 범위) | SQLite/PostgreSQL 공통 암호화 아카이브, 주기·보존, 무결성 검증, 트랜잭션 복원, 세션 무효화와 관리자 UI/API |
 | 검색 품질 평가 | 완료 | ACL 적용 정답 사례, Recall@K·MRR·nDCG@K, 임계값 회귀 판정, 이력·상세 UI/API |
@@ -33,6 +33,24 @@
 | Keycloak 설정 안정성 | 완료 | 4개 필드 UI, 자동 Issuer·Redirect·표준 Scope/Claim·동일 이름 역할/그룹, 저장값 자동 재조회, Discovery/JWKS/token exchange, PKCE callback·세션 E2E, Access Token 역할 병합, 실제 platform-admin 로그인 뒤 Bootstrap 폐기 |
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
+
+2026-08-25 v0.50.0 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./...                 PASS
+go vet ./... && go build ./...               PASS
+PostgreSQL 16 + pgvector + Vault Integration PASS
+관리자 UI JavaScript parse·계약 시험 전체       PASS
+GitHub Actions actionlint·shell syntax         PASS
+govulncheck reachable symbols                  PASS (0)
+Kubernetes Kustomize·:4747·v0.50.0 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.50.0 빌드      PASS
+공개 설정·상단·로그인·프로필 버전 표시 계약       PASS
+```
+
+이번 검증에는 MCP registry·API 키 Scope·생성/편집 UI·OpenAPI와 관리자 도구 정책
+테이블의 전수 정합성 시험, 캐시 10,000개 hard cap 동시성 시험, 저장소 건강도에서
+동명이인 심볼과 ACL 비공개 consumer를 구분하는 회귀 시험이 포함된다.
 
 2026-07-30 로컬 검증 결과:
 

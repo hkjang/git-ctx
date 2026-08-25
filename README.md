@@ -24,6 +24,9 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - 운영 문서 전용 `find-runbook`, 비신뢰 데이터 경계·크기 제한을 적용한 `export-context`
 - PostgreSQL `tsvector` 후보 선별, 원격 line 기반 인접 청크 hydration
 - 검색어 일치 근거·retrieval 모드·embedding 버전을 보여주는 `explain-search-result`
+- 질문 하나에서 코드·심볼·의존성·관련 파일을 응답 예산에 맞춰 조립하는 `build-context`
+- 파일 기여자를 근거와 함께 찾는 `find-code-owner`, 실제 참조와 이름 후보를 구분하는 `find-tests`
+- 저장소 간 구조·변경 위험·색인 건강도를 근거 중심으로 설명하는 `get-architecture-map`, `assess-change-risk`, `get-repository-health`
 - 검색 후보 단계의 저장소 ACL 적용과 브랜치·태그별 조회
 - 카탈로그 운영 역할(platform-admin·source-admin·search-admin)의 ACL 무관 전체 검색
 - 사용자 API 키 생성·목록·중지·폐기 및 HMAC 기반 비가역 저장
@@ -49,6 +52,7 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - 저장소별 색인 상태·원인·조치를 설명하는 색인 진단 화면과 API
 - 다른 사용자의 ACL로 검색을 재현하는 감사 기록형 검색 진단(코드·경로 비노출)
 - 키 회전·중지·재활성화와 CIDR·저장소·도구·분/시/일 호출 제한
+- MCP 도구 카탈로그를 API 키 Scope, 생성·편집 UI와 OpenAPI가 공유하고 계약 시험으로 드리프트 차단
 - 동적 소스 설정 기반 Worker, 재시도·지수 백오프와 polling 무결성 보정
 - 저장소 발견·등록·재색인 및 작업 운영 화면
 - Readiness, Prometheus 지표와 hardened Kubernetes Kustomize 배포
@@ -73,6 +77,7 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - ACL 적용 정답 데이터셋 기반 Recall@K·MRR·nDCG@K 검색 품질 회귀 게이트
 - 버전형 DB migration 및 PostgreSQL 다중 Worker `SKIP LOCKED`
 - Docker 및 PostgreSQL Compose 배포
+- 태그·소스 버전과 커밋을 고정하고 원격 재다운로드까지 검증한 GitHub 오프라인 이미지 릴리스
 
 ## 로컬 실행
 

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.39.0
+  version: 0.50.0
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -773,6 +773,14 @@ components:
                 - query-docs
                 - search-repositories
                 - search-source
+                - search-code
+                - find-file
+                - read-file
+                - search-semantic
+                - find-dependents
+                - search-merge-requests
+                - get-file-history
+                - list-directory
                 - get-repository-map
                 - find-symbol
                 - get-symbol-context
@@ -783,6 +791,12 @@ components:
                 - find-runbook
                 - export-context
                 - explain-search-result
+                - build-context
+                - find-code-owner
+                - find-tests
+                - get-architecture-map
+                - assess-change-risk
+                - get-repository-health
                 - get-platform-status
                 - list-index-jobs
                 - reindex-repository

@@ -22,6 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -56,6 +58,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -64,7 +68,7 @@ jobs:
       # including a SQL injection in the PostgreSQL driver.
       - name: govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
           govulncheck ./...
 
   integration:
@@ -74,7 +78,7 @@ jobs:
       postgres:
         # Carries the vector extension, so the pgvector test runs against a real
         # one rather than being skipped.
-        image: pgvector/pgvector:pg16
+        image: pgvector/pgvector:0.8.1-pg16@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337
         env:
           POSTGRES_USER: gitctx
           POSTGRES_PASSWORD: gitctx
@@ -86,13 +90,15 @@ jobs:
           --health-timeout 5s
           --health-retries 20
       vault:
-        image: hashicorp/vault:latest
+        image: hashicorp/vault:2.0.3@sha256:a296a888b118615dc01d5f1a6846e6d4a7277946caaed5b447008fff5fe06b54
         env:
           VAULT_DEV_ROOT_TOKEN_ID: ci-root
           VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
         ports: ["8200:8200"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -114,6 +120,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -122,14 +130,31 @@ jobs:
           for file in web/app.js web/guides.js web/roles.js; do
             node --check "$file"
           done
+      - name: Console contract tests
+        run: |
+          for file in test/web/*.test.js; do
+            node "$file"
+          done
 
   docker:
     name: Docker image
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       # The Dockerfile runs the test suite itself and refuses to build when the
       # image tag disagrees with internal/version, so a broken release build is
       # caught here rather than at publish time.
-      - name: Build the image
-        run: docker build .
+      - name: Build and verify the offline image path
+        run: |
+          set -eu
+          version=$(sed -n 's/.*Version = "\(.*\)".*/\1/p' internal/version/version.go)
+          build_time=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          docker build \
+            --build-arg "VERSION=v${version}" \
+            --build-arg "COMMIT=${GITHUB_SHA}" \
+            --build-arg "BUILD_TIME=${build_time}" \
+            --tag "git-ctx:v${version}" .
+          sh scripts/package-offline-image.sh "$version" "git-ctx:v${version}"
+          sh scripts/verify-offline-image.sh "$version" "dist/git-ctx-v${version}.tar.gz" "$GITHUB_SHA"
