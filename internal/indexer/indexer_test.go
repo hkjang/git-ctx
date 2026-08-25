@@ -850,3 +850,65 @@ func TestSyncBuildsDependencyInventoryIncludingExcludedManifests(t *testing.T) {
 		t.Fatalf("staging must be cleaned up: %d err=%v", staging, err)
 	}
 }
+
+// incrementalManifestSource reports a single changed file that is not a
+// manifest, which is the common case: most commits touch source code.
+type incrementalManifestSource struct {
+	manifestSource
+	changed string
+}
+
+func (s incrementalManifestSource) Changes(_ context.Context, _ source.RepositoryRef, _, _ string) ([]source.Change, error) {
+	return []source.Change{{Path: s.changed, Type: "modify"}}, nil
+}
+
+// An incremental sync sees only the changed files. Replacing the whole ref's
+// inventory from that set would delete every manifest the commit did not touch,
+// leaving the estate looking dependency-free until someone ran a full re-index —
+// and an advisory search would then answer "nobody uses it".
+func TestIncrementalSyncKeepsUntouchedManifestsInTheInventory(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file:manifest-incremental?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+	idx := New(s, DefaultPolicy())
+	repo := source.Repository{ID: 12, ProjectKey: "core", Slug: "svc", Name: "svc", DefaultBranch: "main"}
+	if err = idx.SyncRepository(ctx, manifestSource{}, "gitlab", repo, []source.Reference{{Name: "main", LatestCommit: "abc123"}}); err != nil {
+		t.Fatal(err)
+	}
+	count := func() int {
+		t.Helper()
+		var total int
+		if err := s.DB.QueryRow(`SELECT COUNT(*) FROM repository_packages WHERE repository_id='gitlab:12' AND ref_name='main'`).Scan(&total); err != nil {
+			t.Fatal(err)
+		}
+		return total
+	}
+	if before := count(); before != 5 {
+		t.Fatalf("full sync inventory=%d", before)
+	}
+
+	// A commit that touches only a source file must leave the inventory intact.
+	if err = idx.SyncRepository(ctx, incrementalManifestSource{changed: "README.md"}, "gitlab", repo,
+		[]source.Reference{{Name: "main", LatestCommit: "def456"}}); err != nil {
+		t.Fatal(err)
+	}
+	if after := count(); after != 5 {
+		t.Fatalf("an incremental sync erased the inventory: %d rows remain", after)
+	}
+
+	// A commit that touches one manifest replaces only that manifest's rows.
+	if err = idx.SyncRepository(ctx, incrementalManifestSource{changed: "go.mod"}, "gitlab", repo,
+		[]source.Reference{{Name: "main", LatestCommit: "ghi789"}}); err != nil {
+		t.Fatal(err)
+	}
+	if after := count(); after != 5 {
+		t.Fatalf("re-reading one manifest changed the inventory size: %d", after)
+	}
+	var goRows int
+	if err = s.DB.QueryRow(`SELECT COUNT(*) FROM repository_packages WHERE repository_id='gitlab:12' AND manifest_path='go.mod'`).Scan(&goRows); err != nil || goRows != 2 {
+		t.Fatalf("go.mod rows=%d err=%v", goRows, err)
+	}
+}

@@ -644,11 +644,29 @@ FROM code_dependencies_staging WHERE generation_id=?`), generationID); err != ni
 		_ = tx.Rollback()
 		return fail(err)
 	}
-	// The inventory is replaced for the whole ref even on an incremental run: a
-	// manifest that stopped declaring a package must stop reporting it, and the
-	// manifest set is small enough that a full replace is cheaper than tracking
-	// which files changed.
-	if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM repository_packages WHERE repository_id=? AND ref_name=?`), repoID, ref.Name); err != nil {
+	// A manifest that stopped declaring a package must stop reporting it, so the
+	// stored rows are replaced rather than merged. What may be replaced depends on
+	// what this run actually saw: an incremental sync is given only the changed
+	// files, so replacing the whole ref from that set would delete every manifest
+	// the commit did not touch and leave the repository looking dependency-free.
+	if incremental {
+		for path := range manifests {
+			if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM repository_packages WHERE repository_id=? AND ref_name=? AND manifest_path=?`), repoID, ref.Name, path); err != nil {
+				_ = tx.Rollback()
+				return fail(err)
+			}
+		}
+		// A manifest deleted by this commit leaves the inventory with it.
+		for path := range removedPaths {
+			if _, isManifest := manifest.Recognize(path); !isManifest {
+				continue
+			}
+			if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM repository_packages WHERE repository_id=? AND ref_name=? AND manifest_path=?`), repoID, ref.Name, path); err != nil {
+				_ = tx.Rollback()
+				return fail(err)
+			}
+		}
+	} else if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM repository_packages WHERE repository_id=? AND ref_name=?`), repoID, ref.Name); err != nil {
 		_ = tx.Rollback()
 		return fail(err)
 	}

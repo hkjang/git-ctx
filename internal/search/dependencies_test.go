@@ -264,3 +264,28 @@ func TestDependencyInventorySummaryRanksDriftAndStatesCoverage(t *testing.T) {
 		t.Fatalf("ecosystems=%#v", npm.Ecosystems)
 	}
 }
+
+// A package name is an identifier, not a pattern. A wildcard in it must match
+// literally: during an advisory, "%" reporting the whole catalogue as affected
+// would be a confident wrong answer.
+func TestFindDependencyUsageTreatsWildcardsLiterally(t *testing.T) {
+	db := inventoryFixture(t, "dependency-wildcard")
+	service := New(db)
+	for _, term := range []string{"%", "_", "%log4j%"} {
+		result, err := service.FindDependencyUsage(context.Background(), []string{"alice"}, term, "", "", "", 50)
+		if err != nil {
+			t.Fatalf("%q: %v", term, err)
+		}
+		if len(result.Users) != 0 {
+			t.Fatalf("%q matched %d declarations; wildcards must be literal", term, len(result.Users))
+		}
+	}
+	// The escaping must not break ordinary names, including the ones with dots
+	// and colons that ecosystems use.
+	for _, term := range []string{"log4j-core", "org.apache.logging.log4j:log4j-core", "lodash"} {
+		result, err := service.FindDependencyUsage(context.Background(), []string{"alice"}, term, "", "", "", 50)
+		if err != nil || len(result.Users) == 0 {
+			t.Fatalf("%q found %d declarations err=%v", term, len(result.Users), err)
+		}
+	}
+}

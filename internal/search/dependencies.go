@@ -53,6 +53,19 @@ type DependencyUsage struct {
 	Diagnostics  []string
 }
 
+// likePattern renders a user term as a contains-pattern with the SQL wildcards
+// escaped.
+//
+// Without this, searching "%" reports that every repository declares the
+// package and "_" quietly widens any name by one character. For a catalogue
+// search that only over-matches what the caller may already read it is a
+// nuisance; for an advisory it produces a confident, wrong answer about which
+// repositories are affected.
+func likePattern(term string) string {
+	replacer := strings.NewReplacer(`\`, `\`, "%", `\%`, "_", `\_`)
+	return "%" + replacer.Replace(term) + "%"
+}
+
 // dependencyScanLimit bounds one inventory query. A very common package in a
 // large catalogue would otherwise return every repository twice over.
 const dependencyScanLimit = 2000
@@ -84,8 +97,8 @@ func (s *Service) FindDependencyUsage(ctx context.Context, principals []string, 
 	// inventory table takes its own.
 	statement := `SELECT r.library_id,r.source_type,pkg.ref_name,pkg.ecosystem,pkg.name,pkg.version,pkg.scope,pkg.manifest_path
 FROM repository_packages pkg JOIN repositories r ON r.id=pkg.repository_id ` + join + `
-WHERE r.enabled=1 AND ` + predicate + ` AND (pkg.name_lower=LOWER(?) OR pkg.name_lower LIKE LOWER(?))`
-	args = append(args, name, "%"+name+"%")
+WHERE r.enabled=1 AND ` + predicate + ` AND (pkg.name_lower=LOWER(?) OR pkg.name_lower LIKE LOWER(?) ESCAPE '\')`
+	args = append(args, name, likePattern(name))
 	if ecosystem != "" {
 		statement += ` AND pkg.ecosystem=?`
 		args = append(args, ecosystem)
