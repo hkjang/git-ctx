@@ -42,6 +42,7 @@ go test -race -count=1 ./...                 PASS
 go vet ./... && go build ./...               PASS
 실제 인스턴스 기동·로그인·엔드포인트 실호출     PASS(라우팅 누락 2건 수정)
 문서화된 엔드포인트 라우팅 시험                PASS
+오프라인 이미지 빌드 내 전체 시험              PASS
 락파일 우선 집계 시험                          PASS
 사용자·관리자 UI JavaScript parse·계약 시험    PASS
 버전 메타데이터·GitHub Actions 정합성          PASS

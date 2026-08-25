@@ -10,6 +10,10 @@ RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 COPY web ./web
+# 이미지 안에서도 전체 시험이 돌기 때문에, 공개 API 계약을 읽는 시험이 읽을 수
+# 있도록 명세 파일 하나를 함께 가져옵니다. 문서 전체를 넣으면 빌드 컨텍스트만
+# 커지고 시험에는 쓰이지 않습니다.
+COPY docs/openapi.yaml ./docs/openapi.yaml
 RUN set -eu; \
     source_version=$(sed -n 's/.*Version = "\(.*\)".*/\1/p' internal/version/version.go); \
     if [ -n "$VERSION" ] && [ "${VERSION#v}" != "$source_version" ]; then \
