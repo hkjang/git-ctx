@@ -420,7 +420,32 @@ func (a *App) embeddingHealthMarkdown(ctx context.Context) string {
 		return b.String()
 	}
 	fmt.Fprintf(&b, "- Reranker: enabled (%s) · a call that fails is reported in the answer itself\n", model)
+	a.appendVectorStoreStatus(ctx, &b)
 	return b.String()
+}
+
+// appendVectorStoreStatus reports the external vector database. It is the third
+// component whose failure an answer would otherwise absorb: the candidates it
+// contributes are the ones no keyword would have found, so losing it narrows
+// answers without changing how they look.
+func (a *App) appendVectorStoreStatus(ctx context.Context, b *strings.Builder) {
+	settings, err := a.loadSettingMap(ctx, "vector")
+	if err != nil {
+		fmt.Fprintf(b, "- Vector Database: unknown (settings unreadable)\n")
+		return
+	}
+	cfg := vectorstore.FromMap(settings)
+	if !cfg.Enabled() {
+		fmt.Fprintf(b, "- Vector Database: not configured (embeddings are scored in this database)\n")
+		return
+	}
+	status, statusErr := vectorstore.TestConnection(ctx, cfg, a.postgresDSN(ctx))
+	if statusErr != nil {
+		fmt.Fprintf(b, "- Vector Database: %s configured but unreachable: %s\n", cfg.Provider, statusErr.Error())
+		return
+	}
+	fmt.Fprintf(b, "- Vector Database: %s · collection %s · %d vectors · %d dimensions\n",
+		cfg.Provider, status.Collection, status.Vectors, status.Dimensions)
 }
 
 func (a *App) adminHealth(w http.ResponseWriter, r *http.Request) {

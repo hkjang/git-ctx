@@ -35,6 +35,23 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.57.2 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./... (FTS5/태그 없음)  PASS
+pgvector 연동 실인스턴스 확인                  PASS(결함 1건 수정)
+벡터 투영 경로(페이지 단위) 실동작             PASS
+조회 실패·기여·미설정 문구 시험                PASS
+go vet ./... && go build ./...               PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.57.2 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.57.2 빌드      PASS
+```
+
+이번 검증은 외부 벡터 데이터베이스를 실제 pgvector 위에서 처음 끝까지 돌렸다. 투영과
+조회는 정상이었으나 조회 실패가 조용히 삼켜져, 키워드로 나오지 않는 후보가 빠진 답을
+완전한 답과 구분할 수 없었다. 답과 상태 화면 모두에 드러내도록 고쳤다.
+
 2026-08-26 v0.57.1 릴리스 전 검증 결과:
 
 ```text

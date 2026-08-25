@@ -2491,3 +2491,74 @@ type rerankFunc func(context.Context, string, []string) ([]float64, error)
 func (f rerankFunc) Rerank(ctx context.Context, query string, documents []string) ([]float64, error) {
 	return f(ctx, query, documents)
 }
+
+// An external vector database is configured to surface the chunks that share no
+// keyword with the query. Skipping it in silence loses exactly that, and the
+// narrower answer looks identical to a complete one.
+func TestVectorDatabaseParticipationIsReported(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:vector-visibility?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.DB.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,enabled) VALUES('gitlab:1','core','api','api','','gitlab','1','/core/api','main',1)`)
+	exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('gitlab:1','alice','read')`)
+	exec(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id) VALUES('gitlab:1','main','abc')`)
+	exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,embedding,embedding_revision) VALUES
+('c1','gitlab:1','main','abc','docs/payment.md',1,20,'Payment','document','결제 재시도 배치','h1',?,'rev1'),
+('c2','gitlab:1','main','abc','docs/queue.md',1,20,'Queue','document','컨슈머 지연 처리','h2',?,'rev1')`,
+		embedding.Encode([]float32{1, 0, 0}), embedding.Encode([]float32{0, 1, 0}))
+
+	service := New(db)
+	service.SetConfigLoader(func(context.Context) Config {
+		return Config{KeywordWeight: 1, VectorWeight: 0.35, FinalK: 8, CandidateLimit: 100, RerankLimit: 5,
+			RetrievalMode: RetrievalHybridFallback, EmbeddingRevision: "rev1", MinimumEmbeddingCoverage: 0}
+	})
+	service.SetEmbeddingLoader(func(context.Context) (embedding.Provider, error) { return embedding.Local{}, nil })
+
+	// A store that cannot be reached must say so: the answer is narrower than it
+	// would have been, and nothing else in it shows that.
+	service.SetVectorLoader(func(context.Context, string, string, string, int) ([]VectorCandidate, error) {
+		return nil, errors.New("pgvector refused the connection")
+	})
+	degraded, err := service.Query(ctx, []string{"alice"}, "/core/api", "결제")
+	if err != nil {
+		t.Fatalf("a failing vector database must not fail the search: %v", err)
+	}
+	if !strings.Contains(degraded, "외부 벡터 데이터베이스를 조회하지 못해") || !strings.Contains(degraded, "refused the connection") {
+		t.Fatalf("a skipped vector database must be reported:\n%s", degraded)
+	}
+
+	// A store that answers reports what it added — the candidates that keywords
+	// would not have found are the reason it exists.
+	service.SetVectorLoader(func(context.Context, string, string, string, int) ([]VectorCandidate, error) {
+		return []VectorCandidate{{ID: "c2", Score: 0.9}}, nil
+	})
+	contributed, err := service.Query(ctx, []string{"alice"}, "/core/api", "결제")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(contributed, "외부 벡터 데이터베이스에서 후보") {
+		t.Fatalf("a contributing vector database must be reported:\n%s", contributed)
+	}
+	if !strings.Contains(contributed, "1건은 키워드로는 나오지 않던 것") {
+		t.Fatalf("the answer must say how many candidates were new:\n%s", contributed)
+	}
+
+	// A platform with no vector database configured says nothing extra.
+	service.SetVectorLoader(nil)
+	plain, err := service.Query(ctx, []string{"alice"}, "/core/api", "결제")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain, "외부 벡터 데이터베이스") {
+		t.Fatalf("an unconfigured store must not be mentioned:\n%s", plain)
+	}
+}

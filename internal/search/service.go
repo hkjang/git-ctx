@@ -21,6 +21,7 @@ import (
 	"git-ctx/internal/rerank"
 	"git-ctx/internal/source"
 	"git-ctx/internal/store"
+	"git-ctx/internal/vectorstore"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -3957,13 +3958,23 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 	// are not used directly: the stored embeddings are still scored below, so
 	// ranking stays identical whether or not a vector database is configured.
 	vectorMode := ""
+	// vectorNote records what the vector database contributed. Skipping it in
+	// silence loses exactly what it was configured for — the chunks that share
+	// no keyword with the query — and an answer that is quietly narrower than it
+	// should be looks the same as one that is complete.
+	vectorNote := ""
 	vectorScores := map[string]float64{}
 	if s.vector != nil && cfg.VectorWeight > 0 {
-		if candidates, vectorErr := s.vector(ctx, repoID, ref, query, cfg.RerankLimit*2); vectorErr == nil && len(candidates) > 0 {
+		candidates, vectorErr := s.vector(ctx, repoID, ref, query, cfg.RerankLimit*2)
+		switch {
+		case vectorErr != nil && !errors.Is(vectorErr, vectorstore.ErrNotConfigured):
+			vectorNote = "외부 벡터 데이터베이스를 조회하지 못해 색인된 임베딩만 사용했습니다. 키워드가 겹치지 않는 후보는 이 답에 없습니다: " + clipText(vectorErr.Error(), 160)
+		case len(candidates) > 0:
 			known := map[string]bool{}
 			for _, id := range keywordIDs {
 				known[id] = true
 			}
+			added := 0
 			for _, candidate := range candidates {
 				if candidate.ID == "" {
 					continue
@@ -3974,9 +3985,11 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 				if !known[candidate.ID] {
 					known[candidate.ID] = true
 					keywordIDs = append(keywordIDs, candidate.ID)
+					added++
 				}
 			}
 			vectorMode = " + vector database ANN"
+			vectorNote = fmt.Sprintf("외부 벡터 데이터베이스에서 후보 %d건을 조회했고, 그 중 %d건은 키워드로는 나오지 않던 것입니다.", len(candidates), added)
 		}
 	}
 	candidateSQL := `SELECT id,content,file_path,line_start,line_end,commit_id,heading,embedding,embedding_revision FROM document_chunks WHERE repository_id=? AND ref_name=?`
@@ -4170,6 +4183,9 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 			}
 		}
 		span.SetAttributes(attribute.Bool("git_ctx.search.remote_degraded", true))
+	}
+	if vectorNote != "" {
+		fmt.Fprintf(&b, "> %s\n\n", vectorNote)
 	}
 	if rerankNote != "" {
 		fmt.Fprintf(&b, "> %s\n\n", rerankNote)
