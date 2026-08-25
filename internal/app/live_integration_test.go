@@ -604,3 +604,154 @@ func newFailingReceiver() *httptest.Server {
 		http.Error(w, `{"error":"unavailable"}`, http.StatusServiceUnavailable)
 	}))
 }
+
+// The platform's headline is Bitbucket Server and GitLab, and until now the
+// whole chain had only ever been proven on GitLab. The two adapters share the
+// indexer and the search layer but nothing else: their pagination, their path
+// escaping, their permission model and their raw-file endpoints are all
+// different, and a wiring defect on this side would empty a whole source
+// without a single unit test noticing.
+func TestBitbucketChainIntegration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("the platform chain waits on the background worker")
+	}
+	ctx := context.Background()
+
+	files := map[string]string{
+		"pom.xml": `<project><dependencies>
+  <dependency><groupId>org.apache.logging.log4j</groupId><artifactId>log4j-core</artifactId><version>2.14.1</version></dependency>
+</dependencies></project>`,
+		"README.md":       "# Ledger\n\n원장 정산 서비스. reconciliation 배치를 운영한다.\n",
+		"config/app.yaml": "database:\n  password: super-secret-value-1234567890\n",
+	}
+	source := newFakeBitbucket(files)
+	defer source.Close()
+
+	directory := t.TempDir()
+	a, err := New(ctx, config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(directory, "bitbucket.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
+		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer bootstrap")
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+	if saved := call(http.MethodPut, "/api/v1/admin/settings/bitbucket",
+		fmt.Sprintf(`{"baseUrl":%q,"apiPrefix":"/rest/api/1.0","pat":"token","webhookSecret":"s3cret"}`, source.URL)); saved.Code != http.StatusOK {
+		t.Fatalf("bitbucket settings status=%d body=%s", saved.Code, saved.Body.String())
+	}
+
+	// Discovery is how an operator finds repositories on a Bitbucket server.
+	discovered := call(http.MethodPost, "/api/v1/admin/sources/bitbucket/discover", `{"projectKey":"CORE"}`)
+	if discovered.Code != http.StatusOK {
+		t.Fatalf("discover status=%d body=%s", discovered.Code, discovered.Body.String())
+	}
+	if !strings.Contains(discovered.Body.String(), "ledger") {
+		t.Fatalf("discovery did not list the repository: %s", discovered.Body.String())
+	}
+
+	registered := call(http.MethodPost, "/api/v1/admin/repositories",
+		`{"sourceType":"bitbucket","repository":{"id":7,"projectKey":"CORE","slug":"ledger","name":"Ledger","description":"원장","defaultBranch":"main"}}`)
+	if registered.Code != http.StatusCreated {
+		t.Fatalf("register status=%d body=%s", registered.Code, registered.Body.String())
+	}
+	var repository struct{ ID, LibraryID string }
+	if err = json.Unmarshal(registered.Body.Bytes(), &repository); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 60*time.Second, "the Bitbucket repository to finish indexing", func() bool {
+		var completed int
+		_ = a.store.DB.QueryRow(`SELECT COUNT(*) FROM index_jobs WHERE repository_id=? AND status='completed' AND files_processed>0`, repository.ID).Scan(&completed)
+		return completed > 0
+	})
+
+	// The same guarantees as the GitLab chain: content indexed through the raw
+	// endpoint, secrets masked, manifests inventoried, permissions imported.
+	var masked string
+	if err = a.store.DB.QueryRow(`SELECT content FROM document_chunks WHERE repository_id=? AND file_path='config/app.yaml'`, repository.ID).Scan(&masked); err != nil {
+		t.Fatalf("the configuration file was not indexed: %v", err)
+	}
+	if strings.Contains(masked, "super-secret-value") {
+		t.Fatalf("a secret reached the index: %q", masked)
+	}
+	var packages int
+	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM repository_packages WHERE repository_id=?`, repository.ID).Scan(&packages); err != nil || packages == 0 {
+		t.Fatalf("the manifest was not inventoried: %d err=%v", packages, err)
+	}
+	var principals int
+	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM repository_permissions WHERE repository_id=?`, repository.ID).Scan(&principals); err != nil || principals == 0 {
+		t.Fatalf("no permission was imported: %d err=%v", principals, err)
+	}
+
+	answer := mcpCall(t, a, "search-code", `{"query":"reconciliation 배치"}`)
+	if !strings.Contains(answer, "README.md") {
+		t.Fatalf("search-code did not find the Bitbucket content:\n%s", answer)
+	}
+	advisory := mcpCall(t, a, "find-dependency-usage", `{"name":"org.apache.logging.log4j:log4j-core","fixedIn":"2.17.1"}`)
+	if !strings.Contains(advisory, "AFFECTED") {
+		t.Fatalf("the advisory judgement is missing for Bitbucket:\n%s", advisory)
+	}
+}
+
+// newFakeBitbucket serves the Bitbucket Server REST 1.0 endpoints the platform
+// reads, including its page envelope and its raw-file endpoint.
+func newFakeBitbucket(files map[string]string) *httptest.Server {
+	repository := map[string]any{"id": 7, "slug": "ledger", "name": "Ledger", "description": "원장",
+		"project": map[string]string{"key": "CORE"}, "defaultBranch": "refs/heads/main", "archived": false}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimSuffix(r.URL.EscapedPath(), "/")
+		write := func(values any) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"values": values, "isLastPage": true, "size": 1})
+		}
+		switch {
+		case r.Method == http.MethodPost || r.Method == http.MethodPut:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"id":77}`)
+		case strings.HasSuffix(path, "/rest/api/1.0/projects"):
+			write([]map[string]any{{"key": "CORE", "name": "Core", "description": "core"}})
+		case strings.HasSuffix(path, "/repos"):
+			write([]map[string]any{repository})
+		case strings.HasSuffix(path, "/branches"):
+			write([]map[string]any{{"id": "refs/heads/main", "displayId": "main", "latestCommit": "abc123", "isDefault": true}})
+		case strings.HasSuffix(path, "/tags"):
+			write([]map[string]any{})
+		case strings.HasSuffix(path, "/files"):
+			paths := make([]string, 0, len(files))
+			for name := range files {
+				paths = append(paths, name)
+			}
+			write(paths)
+		case strings.Contains(path, "/raw/"):
+			name := strings.SplitN(path, "/raw/", 2)[1]
+			if decoded, err := url.PathUnescape(name); err == nil {
+				name = decoded
+			}
+			content, ok := files[name]
+			if !ok {
+				http.Error(w, `{"errors":[{"message":"not found"}]}`, http.StatusNotFound)
+				return
+			}
+			_, _ = io.WriteString(w, content)
+		case strings.HasSuffix(path, "/permissions/users"):
+			write([]map[string]any{{"user": map[string]any{"name": "alice", "slug": "alice", "active": true}, "permission": "REPO_READ"}})
+		case strings.HasSuffix(path, "/permissions/groups"):
+			write([]map[string]any{{"group": map[string]any{"name": "engineering"}, "permission": "REPO_READ"}})
+		case strings.HasSuffix(path, "/commits"):
+			write([]map[string]any{})
+		default:
+			write([]any{})
+		}
+	}))
+}
