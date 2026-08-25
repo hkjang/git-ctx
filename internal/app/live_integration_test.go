@@ -265,19 +265,62 @@ func newFakeGitLab(files map[string]string) *httptest.Server {
 }
 
 func newFakeGitLabWithSearch(files map[string]string, breakSearch *bool) *httptest.Server {
+	return newFakeGitLabRepository(&fakeRepository{files: files, commit: "c0ffee"}, breakSearch)
+}
+
+// fakeRepository is a source repository that can change between index runs, so
+// the incremental path can be driven the way a push drives it.
+type fakeRepository struct {
+	mu      sync.Mutex
+	files   map[string]string
+	commit  string
+	changes []map[string]any
+}
+
+func (f *fakeRepository) snapshot() (map[string]string, string, []map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	copied := make(map[string]string, len(f.files))
+	for name, content := range f.files {
+		copied[name] = content
+	}
+	return copied, f.commit, append([]map[string]any(nil), f.changes...)
+}
+
+// push replaces the content of one path and moves the commit, reporting the
+// change the way GitLab's compare endpoint does.
+func (f *fakeRepository) push(commit string, changed map[string]string, removed []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.commit = commit
+	f.changes = nil
+	for name, content := range changed {
+		f.files[name] = content
+		f.changes = append(f.changes, map[string]any{"new_path": name, "old_path": name, "new_file": false})
+	}
+	for _, name := range removed {
+		delete(f.files, name)
+		f.changes = append(f.changes, map[string]any{"new_path": name, "old_path": name, "deleted_file": true})
+	}
+}
+
+func newFakeGitLabRepository(repository *fakeRepository, breakSearch *bool) *httptest.Server {
 	project := map[string]any{"id": 4242, "path_with_namespace": "core/api", "default_branch": "main",
 		"name": "api", "description": "payment api", "visibility": "internal", "repository_access_level": "enabled"}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		path := strings.TrimSuffix(r.URL.EscapedPath(), "/")
 		write := func(value any) { _ = json.NewEncoder(w).Encode(value) }
+		files, commit, changes := repository.snapshot()
 		switch {
+		case strings.HasSuffix(path, "/repository/compare"):
+			write(map[string]any{"compare_timeout": false, "diffs": changes})
 		case breakSearch != nil && *breakSearch && strings.HasSuffix(path, "/search"):
 			http.Error(w, `{"message":"search is not enabled"}`, http.StatusForbidden)
 		case r.Method == http.MethodPost || r.Method == http.MethodPut:
 			write(map[string]any{"id": 77})
 		case strings.HasSuffix(path, "/repository/branches"):
-			write([]map[string]any{{"name": "main", "commit": map[string]string{"id": "c0ffee"}, "default": true}})
+			write([]map[string]any{{"name": "main", "commit": map[string]string{"id": commit}, "default": true}})
 		case strings.HasSuffix(path, "/repository/tags"), strings.HasSuffix(path, "/repository/commits"):
 			write([]map[string]any{})
 		case strings.HasSuffix(path, "/repository/tree"):
@@ -754,4 +797,136 @@ func newFakeBitbucket(files map[string]string) *httptest.Server {
 			write([]any{})
 		}
 	}))
+}
+
+// The incremental path is where this platform did its worst damage: a sync that
+// only touched one file used to replace the whole ref's dependency inventory
+// with nothing, so an advisory search answered "no repository uses it" for
+// repositories that did. A push arrives through a webhook, and everything after
+// that — signature, deduplication, the diff, the partial rewrite — has to leave
+// the parts that did not change alone.
+func TestIncrementalPushChainIntegration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("the platform chain waits on the background worker")
+	}
+	ctx := context.Background()
+
+	repository := &fakeRepository{commit: "commit-one", files: map[string]string{
+		"pom.xml": `<project><dependencies>
+  <dependency><groupId>org.apache.logging.log4j</groupId><artifactId>log4j-core</artifactId><version>2.14.1</version></dependency>
+</dependencies></project>`,
+		"README.md":  "# Payment API\n\n결제 처리 서비스.\n",
+		"service.go": "package main\n\nfunc settleInvoice() error { return nil }\n",
+		"legacy.go":  "package main\n\nfunc removedLater() {}\n",
+	}}
+	source := newFakeGitLabRepository(repository, nil)
+	defer source.Close()
+
+	directory := t.TempDir()
+	a, err := New(ctx, config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(directory, "incremental.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
+		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer bootstrap")
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+	if saved := call(http.MethodPut, "/api/v1/admin/settings/gitlab",
+		fmt.Sprintf(`{"baseUrl":%q,"token":"t","webhookSecret":"s3cret"}`, source.URL)); saved.Code != http.StatusOK {
+		t.Fatalf("gitlab settings status=%d body=%s", saved.Code, saved.Body.String())
+	}
+	registered := call(http.MethodPost, "/api/v1/admin/repositories",
+		`{"sourceType":"gitlab","repository":{"id":4242,"projectKey":"core","slug":"api","name":"api","description":"payment api","defaultBranch":"main"}}`)
+	if registered.Code != http.StatusCreated {
+		t.Fatalf("register status=%d body=%s", registered.Code, registered.Body.String())
+	}
+	var target struct{ ID, LibraryID string }
+	if err = json.Unmarshal(registered.Body.Bytes(), &target); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 60*time.Second, "the first index", func() bool {
+		var chunks int
+		_ = a.store.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id=?`, target.ID).Scan(&chunks)
+		return chunks >= 4
+	})
+	var inventoryBefore int
+	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM repository_packages WHERE repository_id=?`, target.ID).Scan(&inventoryBefore); err != nil || inventoryBefore == 0 {
+		t.Fatalf("the manifest was not inventoried: %d err=%v", inventoryBefore, err)
+	}
+
+	// A push that touches one file and deletes another. The manifest is not in
+	// the diff, which is exactly the case that used to wipe the inventory.
+	repository.push("commit-two", map[string]string{
+		"service.go": "package main\n\nfunc settleRefund() error { return nil }\n",
+	}, []string{"legacy.go"})
+
+	hook := httptest.NewRequest(http.MethodPost, "/webhooks/gitlab",
+		strings.NewReader(`{"project":{"id":4242},"ref":"refs/heads/main"}`))
+	hook.Header.Set("Content-Type", "application/json")
+	hook.Header.Set("X-Gitlab-Token", "s3cret")
+	hook.Header.Set("X-Gitlab-Event", "Push Hook")
+	hook.Header.Set("X-Gitlab-Event-UUID", "push-1")
+	accepted := httptest.NewRecorder()
+	a.Handler().ServeHTTP(accepted, hook)
+	if accepted.Code != http.StatusAccepted {
+		t.Fatalf("webhook status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+	// The same event delivered twice must not queue the work twice.
+	duplicate := httptest.NewRecorder()
+	replay := hook.Clone(ctx)
+	replay.Body = io.NopCloser(strings.NewReader(`{"project":{"id":4242},"ref":"refs/heads/main"}`))
+	a.Handler().ServeHTTP(duplicate, replay)
+	if duplicate.Code != http.StatusOK || !strings.Contains(duplicate.Body.String(), `"duplicate":true`) {
+		t.Fatalf("a replayed event must be recognised: status=%d body=%s", duplicate.Code, duplicate.Body.String())
+	}
+
+	waitFor(t, 60*time.Second, "the pushed change to be indexed", func() bool {
+		var updated int
+		_ = a.store.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id=? AND file_path='service.go' AND content LIKE '%settleRefund%'`, target.ID).Scan(&updated)
+		return updated > 0
+	})
+
+	// The file that was deleted is gone, the file nobody touched is intact, and
+	// the inventory the diff never mentioned survived.
+	var removed int
+	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id=? AND file_path='legacy.go'`, target.ID).Scan(&removed); err != nil || removed != 0 {
+		t.Fatalf("a deleted file stayed in the index: %d err=%v", removed, err)
+	}
+	var untouched int
+	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id=? AND file_path='README.md'`, target.ID).Scan(&untouched); err != nil || untouched == 0 {
+		t.Fatalf("an untouched file was dropped: %d err=%v", untouched, err)
+	}
+	var inventoryAfter int
+	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM repository_packages WHERE repository_id=?`, target.ID).Scan(&inventoryAfter); err != nil {
+		t.Fatal(err)
+	}
+	if inventoryAfter != inventoryBefore {
+		t.Fatalf("the incremental sync changed the inventory from %d to %d rows", inventoryBefore, inventoryAfter)
+	}
+
+	// The tools answer over the new content, and the advisory still finds the
+	// manifest that was never in the diff.
+	answer := mcpCall(t, a, "search-code", `{"query":"settleRefund"}`)
+	if !strings.Contains(answer, "service.go") {
+		t.Fatalf("the pushed change is not searchable:\n%s", answer)
+	}
+	stale := mcpCall(t, a, "search-code", `{"query":"settleInvoice"}`)
+	if strings.Contains(stale, "service.go") {
+		t.Fatalf("the replaced content is still searchable:\n%s", stale)
+	}
+	advisory := mcpCall(t, a, "find-dependency-usage", `{"name":"org.apache.logging.log4j:log4j-core","fixedIn":"2.17.1"}`)
+	if !strings.Contains(advisory, "AFFECTED") {
+		t.Fatalf("the inventory did not survive the push:\n%s", advisory)
+	}
 }

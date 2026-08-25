@@ -35,6 +35,21 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.58.3 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./... (FTS5/태그 없음)  PASS
+push→웹훅→증분 색인 체인 시험 신규(4.3초)      PASS
+매니페스트 보존 로직 제거 시 실패 확인         PASS
+go vet ./... && go build ./...               PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.58.3 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.58.3 빌드      PASS
+```
+
+이번 릴리스는 v0.52.0 에서 인벤토리를 비웠던 증분 경로를 시험으로 고정했다. 보존
+로직을 되돌리면 인벤토리 1건이 0건이 되는 것을 이 시험이 그대로 잡아낸다.
+
 2026-08-26 v0.58.2 릴리스 전 검증 결과:
 
 ```text
