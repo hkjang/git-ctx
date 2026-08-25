@@ -217,7 +217,10 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, target 
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 		return fmt.Errorf("Confluence HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
 	}
-	return json.NewDecoder(io.LimitReader(response.Body, 16<<20)).Decode(target)
+	if err := json.NewDecoder(io.LimitReader(response.Body, 16<<20)).Decode(target); err != nil {
+		return netclient.DecodeFailure("Confluence", "Confluence REST API", endpointOf(req), err)
+	}
+	return nil
 }
 
 var tagRE = regexp.MustCompile(`<[^>]+>`)
@@ -242,4 +245,13 @@ func stableID(value string) int64 {
 		result = -result
 	}
 	return result
+}
+
+// endpointOf names the path a failed response came from, without the query
+// string: a token or search term in a diagnostic is a leak, not a detail.
+func endpointOf(req *http.Request) string {
+	if req == nil || req.URL == nil {
+		return "the requested endpoint"
+	}
+	return req.URL.EscapedPath()
 }

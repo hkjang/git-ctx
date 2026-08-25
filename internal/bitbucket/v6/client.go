@@ -542,7 +542,7 @@ func (c *Client) searchCode(ctx context.Context, query string, limit int) ([]sou
 		decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&payload)
 		resp.Body.Close()
 		if decodeErr != nil {
-			return nil, decodeErr
+			return nil, decodeFailure("code search", decodeErr)
 		}
 		if len(payload.Errors) > 0 {
 			messages := make([]string, 0, len(payload.Errors))
@@ -925,7 +925,19 @@ func (c *Client) json(ctx context.Context, method, endpoint string, q url.Values
 		_, e = io.Copy(io.Discard, resp.Body)
 		return e
 	}
-	return json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(output)
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(output); err != nil {
+		return decodeFailure(endpoint, err)
+	}
+	return nil
+}
+
+// decodeFailure explains a body this client could not read. The standard
+// library names the Go type it was decoding into, which reaches an MCP client
+// as a struct definition and helps nobody: the causes worth checking are a base
+// URL pointing at a proxy or login page, an unsupported server version, or a
+// gateway that wrapped the response.
+func decodeFailure(endpoint string, err error) error {
+	return netclient.DecodeFailure("Bitbucket", "Bitbucket REST API", endpoint, err)
 }
 func (c *Client) bytes(ctx context.Context, endpoint string, q url.Values) ([]byte, error) {
 	resp, e := c.request(ctx, http.MethodGet, endpoint, q, nil)

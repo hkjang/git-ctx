@@ -680,6 +680,16 @@ func (c *Client) request(ctx context.Context, method, p string, q url.Values, in
 	}
 	return nil, lastErr
 }
+
+// decodeFailure turns a JSON decoding error into something the reader can act
+// on. The standard library names the Go type it was decoding into, which
+// reaches an MCP client as a struct definition and tells nobody anything: the
+// real causes are an instance that answers a different shape, a proxy or login
+// portal returning HTML, or an API gateway wrapping the body in an envelope.
+func decodeFailure(endpoint string, err error) error {
+	return netclient.DecodeFailure("GitLab", "GitLab API", endpoint, err)
+}
+
 func (c *Client) json(ctx context.Context, method, p string, q url.Values, input, output any) error {
 	resp, e := c.request(ctx, method, p, q, input)
 	if e != nil {
@@ -690,7 +700,10 @@ func (c *Client) json(ctx context.Context, method, p string, q url.Values, input
 		_, e = io.Copy(io.Discard, resp.Body)
 		return e
 	}
-	return json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(output)
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(output); err != nil {
+		return decodeFailure(p, err)
+	}
+	return nil
 }
 
 // maxPages bounds one paginated read at 100 items per page. Hitting the bound
@@ -718,7 +731,7 @@ func (c *Client) searchBlobs(ctx context.Context, p string, q url.Values, perPag
 		decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&current)
 		resp.Body.Close()
 		if decodeErr != nil {
-			return decodeErr
+			return decodeFailure(p, decodeErr)
 		}
 		for _, item := range current {
 			if !visit(item) {
@@ -756,7 +769,7 @@ func (c *Client) pages(ctx context.Context, p string, q url.Values, output any) 
 		e = json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(&current)
 		resp.Body.Close()
 		if e != nil {
-			return e
+			return decodeFailure(p, e)
 		}
 		all = append(all, current...)
 		next, nextErr := nextPage(resp, page)
@@ -765,7 +778,10 @@ func (c *Client) pages(ctx context.Context, p string, q url.Values, output any) 
 		}
 		if next == 0 {
 			raw, _ := json.Marshal(all)
-			return json.Unmarshal(raw, output)
+			if err := json.Unmarshal(raw, output); err != nil {
+				return decodeFailure(p, err)
+			}
+			return nil
 		}
 		page = next
 	}

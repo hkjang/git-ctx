@@ -1,12 +1,14 @@
 package netclient
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -103,5 +105,33 @@ func TestClientReusesConnectionsAcrossFanOut(t *testing.T) {
 	if limit := int64(perWave * 2); opened.Load() > limit {
 		t.Errorf("%d connections opened for %d requests, want at most %d",
 			opened.Load(), waves*perWave, limit)
+	}
+}
+
+// The Go type a decoder was working with is meaningless to the person reading
+// an MCP answer or an operations screen, and it is what encoding/json puts in
+// its error. Every integration reports the failure in terms of the server.
+func TestDecodeFailureNamesTheServerNotTheGoType(t *testing.T) {
+	var list []struct{ ID string }
+	err := json.Unmarshal([]byte(`{"message":"sign in"}`), &list)
+	if err == nil {
+		t.Fatal("the fixture must fail to decode")
+	}
+	message := DecodeFailure("GitLab", "GitLab API", "/projects/1/repository/commits", err).Error()
+	for _, expected := range []string{"GitLab", "/projects/1/repository/commits", "object where a list was expected", "proxy or login page"} {
+		if !strings.Contains(message, expected) {
+			t.Fatalf("missing %q in %q", expected, message)
+		}
+	}
+	if strings.Contains(message, "Go value of type") || strings.Contains(message, "struct {") {
+		t.Fatalf("the Go type leaked: %q", message)
+	}
+
+	// A body that is not JSON at all — a login page, a gateway error — is
+	// reported as such rather than as a type mismatch.
+	syntax := json.Unmarshal([]byte(`<html>sign in</html>`), &list)
+	plain := DecodeFailure("Bitbucket", "Bitbucket REST API", "/rest/api/1.0/projects", syntax).Error()
+	if !strings.Contains(plain, "not valid JSON") {
+		t.Fatalf("a non-JSON body must be described as one: %q", plain)
 	}
 }

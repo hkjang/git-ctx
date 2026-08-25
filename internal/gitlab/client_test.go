@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 
 	"git-ctx/internal/source"
@@ -575,5 +576,37 @@ func TestGlobalSearchUnsupportedRequiresFeatureSpecificError(t *testing.T) {
 				t.Fatalf("globalSearchUnsupported()=%v, want %v for %v", got, tc.want, tc.err)
 			}
 		})
+	}
+}
+
+// A response this client cannot read has to be explained in terms of the
+// server. The standard library names the Go type it was decoding into, and that
+// string travels all the way to an MCP client, where a struct definition tells
+// the reader nothing about the login page or gateway that actually answered.
+func TestUnreadableResponsesAreExplainedNotDumped(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// A proxy or login portal answering with an object where the API
+		// returns a list is the common shape of this failure.
+		_, _ = w.Write([]byte(`{"message":"redirected to sign-in"}`))
+	}))
+	defer server.Close()
+	client, err := New(Config{BaseURL: server.URL, Token: "pat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = client.ListFiles(context.Background(), source.RepositoryRef{ProjectKey: "core", Slug: "api"}, "main")
+	if err == nil {
+		t.Fatal("an unreadable body must be an error")
+	}
+	message := err.Error()
+	if strings.Contains(message, "Go value of type") || strings.Contains(message, "struct {") {
+		t.Fatalf("the Go type leaked to the caller: %q", message)
+	}
+	for _, expected := range []string{"GitLab", "repository/tree", "proxy or login page", "object where a list was expected"} {
+		if !strings.Contains(message, expected) {
+			t.Fatalf("the message does not say what to check: %q", message)
+		}
 	}
 }

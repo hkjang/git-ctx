@@ -35,6 +35,23 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-25 v0.54.1 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./...                 PASS
+go vet ./... && go build ./...               PASS
+32개 MCP 도구 실인스턴스 일괄 호출             PASS
+연동 디코딩 실패 메시지 시험                   PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.54.1 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.54.1 빌드      PASS
+```
+
+이번 검증은 32개 도구를 실제 인스턴스에서 모두 호출했다. 그 과정에서 소스 응답을
+읽지 못했을 때 Go 타입 정의가 MCP 클라이언트까지 전달되던 것을 발견해, 네 연동이
+공용 진단 문장을 쓰도록 고쳤다. 인자 검증 메시지는 이미 실행 가능한 문장이어서
+수정하지 않았다.
+
 2026-08-25 v0.54.0 릴리스 전 검증 결과:
 
 ```text
