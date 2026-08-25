@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"git-ctx/internal/store"
@@ -22,6 +23,11 @@ type Service struct {
 	store                *store.Store
 	pepper               []byte
 	rateLimitAlertLoader func(context.Context) bool
+	// lastUsedMu guards the coalescing of last_used_at writes. See touch.
+	lastUsedMu sync.Mutex
+	lastUsed   map[string]time.Time
+	// now is injectable so the coalescing window can be tested without waiting.
+	now func() time.Time
 }
 type Restrictions struct {
 	AllowedCIDRs        []string `json:"allowedCidrs,omitempty"`
@@ -51,7 +57,9 @@ type RateLimitError struct{ RetryAfter time.Duration }
 
 func (e *RateLimitError) Error() string { return "API key rate limit exceeded" }
 
-func New(s *store.Store, pepper string) *Service { return &Service{store: s, pepper: []byte(pepper)} }
+func New(s *store.Store, pepper string) *Service {
+	return &Service{store: s, pepper: []byte(pepper), lastUsed: map[string]time.Time{}, now: time.Now}
+}
 
 func (s *Service) SetRateLimitAlertLoader(loader func(context.Context) bool) {
 	s.rateLimitAlertLoader = loader
@@ -186,9 +194,51 @@ func (s *Service) AuthenticateRequest(ctx context.Context, raw, ip string) (Auth
 	if err = s.applyRateLimits(ctx, info.KeyID, info.Restrictions); err != nil {
 		return AuthInfo{}, err
 	}
-	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`UPDATE api_keys SET last_used_at=? WHERE id=?`), time.Now().UTC(), info.KeyID)
+	s.touch(ctx, info.KeyID)
 	return info, nil
 }
+
+// lastUsedInterval is how often one key's last_used_at is written. The column
+// is read by operators as a date, so a minute of precision costs nothing.
+const lastUsedInterval = time.Minute
+
+// touch records that a key was used, at most once per minute per key.
+//
+// Recording it on every request put a database write in front of every
+// authenticated call. On SQLite, where writes serialise on a single writer, a
+// burst of tool calls from one agent therefore queued behind itself for nothing
+// more than a timestamp an operator reads as a date. The in-memory throttle
+// removes the statement entirely between writes, and the SQL guard keeps a
+// second replica from moving the value backwards.
+func (s *Service) touch(ctx context.Context, keyID string) {
+	now := s.clock()
+	s.lastUsedMu.Lock()
+	if s.lastUsed == nil {
+		s.lastUsed = map[string]time.Time{}
+	}
+	previous, seen := s.lastUsed[keyID]
+	if seen && now.Sub(previous) < lastUsedInterval {
+		s.lastUsedMu.Unlock()
+		return
+	}
+	s.lastUsed[keyID] = now
+	// The map is bounded by the number of keys in use; a very large estate is
+	// cleared wholesale rather than tracked per entry.
+	if len(s.lastUsed) > 10000 {
+		s.lastUsed = map[string]time.Time{keyID: now}
+	}
+	s.lastUsedMu.Unlock()
+	stamp := now.UTC()
+	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`UPDATE api_keys SET last_used_at=? WHERE id=? AND (last_used_at IS NULL OR last_used_at<?)`), stamp, keyID, stamp)
+}
+
+func (s *Service) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
 func (s *Service) List(ctx context.Context, userID string) ([]Key, error) {
 	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT k.id,k.name,k.prefix,k.scopes,k.expires_at,k.created_at,k.last_used_at,k.disabled_at,k.revoked_at,COALESCE(k.replaced_by,''),COALESCE(r.allowed_cidrs,''),COALESCE(r.allowed_repositories,''),COALESCE(r.rate_per_minute,0),COALESCE(r.rate_per_hour,0),COALESCE(r.rate_per_day,0) FROM api_keys k LEFT JOIN api_key_restrictions r ON r.api_key_id=k.id WHERE k.user_id=? ORDER BY k.created_at DESC`), userID)
 	if err != nil {

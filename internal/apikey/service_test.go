@@ -2,9 +2,11 @@ package apikey
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"git-ctx/internal/store"
 )
@@ -152,5 +154,63 @@ func TestRejectsInvalidRestrictions(t *testing.T) {
 	}
 	if _, _, err := svc.CreateWithRestrictions(ctx, "u3", "bad", nil, nil, Restrictions{AllowedRepositories: []string{"repo"}}); err == nil {
 		t.Fatal("invalid repository accepted")
+	}
+}
+
+// Recording "last used" on every request put a database write in front of every
+// authenticated call, which on SQLite serialises a burst of tool calls behind
+// itself for a timestamp operators read as a date.
+func TestLastUsedWriteIsCoalesced(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:apikey-touch?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	if _, err = db.DB.Exec(`INSERT INTO users(id,subject,username,email) VALUES('u1','alice','alice','')`); err != nil {
+		t.Fatal(err)
+	}
+	service := New(db, strings.Repeat("p", 32))
+	clock := time.Now().UTC()
+	service.now = func() time.Time { return clock }
+	_, secret, err := service.Create(ctx, "u1", "agent", []string{"search-code"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func() time.Time {
+		t.Helper()
+		var stamp sql.NullTime
+		if err := db.DB.QueryRow(`SELECT last_used_at FROM api_keys WHERE user_id='u1'`).Scan(&stamp); err != nil {
+			t.Fatal(err)
+		}
+		return stamp.Time.UTC()
+	}
+
+	for index := 0; index < 20; index++ {
+		if _, err = service.AuthenticateRequest(ctx, secret, "10.0.0.1"); err != nil {
+			t.Fatalf("call %d: %v", index, err)
+		}
+	}
+	first := read()
+	if first.IsZero() {
+		t.Fatal("the first use must be recorded")
+	}
+	// Twenty calls inside the window wrote once: the stored value is still the
+	// first one even though the clock moved.
+	clock = clock.Add(30 * time.Second)
+	if _, err = service.AuthenticateRequest(ctx, secret, "10.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	if again := read(); !again.Equal(first) {
+		t.Fatalf("a write happened inside the coalescing window: %s then %s", first, again)
+	}
+
+	// Past the window the timestamp moves again, so "last used" stays useful.
+	clock = clock.Add(2 * lastUsedInterval)
+	if _, err = service.AuthenticateRequest(ctx, secret, "10.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	if later := read(); !later.After(first) {
+		t.Fatalf("the timestamp stopped advancing: %s then %s", first, later)
 	}
 }

@@ -35,6 +35,24 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-25 v0.53.3 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./...                 PASS
+go vet ./... && go build ./...               PASS
+인증 last_used 쓰기 병합 시험                  PASS
+API 키 인증 경로 감사                          PASS(수정 없음)
+사용자·관리자 UI JavaScript parse·계약 시험    PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.53.3 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.53.3 빌드      PASS
+```
+
+이번 검증은 인증 경로의 요청당 쓰기를 제거한 것을 고정한다. 키당 1분에 한 번만
+기록하고, 창 안에서는 문장 자체가 발생하지 않으며, 복제본이 값을 뒤로 되돌리지
+않도록 SQL 조건을 둔다. 인증 경로의 상태·CIDR·호출량 검사와 비활성 사용자 거부는
+이미 갖춰져 있어 수정이 필요 없었다.
+
 2026-08-25 v0.53.2 릴리스 전 검증 결과:
 
 ```text
