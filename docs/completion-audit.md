@@ -35,6 +35,23 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-25 v0.53.7 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./...                 PASS
+go vet ./... && go build ./...               PASS
+실제 GitLab 웹훅 수신 경로 실호출              PASS
+수신기 상태 코드 구분 회귀 시험                PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.53.7 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.53.7 빌드      PASS
+```
+
+이번 검증은 수신기가 보내는 상태 코드를 바로잡았다. 이 플랫폼 쪽 장애가 4xx 로
+응답되어 소스 서버가 재시도하지 않고 이벤트가 사라지던 경로가 있었고, 읽을 수 없는
+payload 와 미등록 저장소가 같은 코드로 묶여 있었다. 서명 검증·중복 제거·색인 작업
+등록은 실호출로 확인했고 수정할 결함이 없었다.
+
 2026-08-25 v0.53.6 릴리스 전 검증 결과:
 
 ```text

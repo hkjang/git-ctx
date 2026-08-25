@@ -2763,3 +2763,50 @@ func TestAPIKeyIsAcceptedFromTheAuthorizationHeader(t *testing.T) {
 		t.Fatalf("a bearer token must not be treated as a key: status=%d body=%s", other.Code, other.Body.String())
 	}
 }
+
+// A source server decides whether to retry from the status code alone. A
+// payload it cannot fix must not look like a missing repository, and an outage
+// on this side must not be reported as a rejection — that drops an event the
+// sender would otherwise have delivered.
+func TestWebhookFailuresAreDistinguishedByStatus(t *testing.T) {
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:webhook-status?mode=memory&cache=shared&_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	// Saving through the API would run a connection test against a GitLab that
+	// does not exist here, so the receiver's secret is sealed in directly.
+	sealed, err := a.seal([]byte(`{"webhookSecret":"s3cret"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.store.DB.Exec(a.store.Rebind(`INSERT INTO system_settings(category,version,value_encrypted,updated_by,updated_at) VALUES(?,?,?,?,?)`),
+		"gitlab", 1, sealed, "test", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	post := func(body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/webhooks/gitlab", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-Gitlab-Token", "s3cret")
+		request.Header.Set("X-Gitlab-Event", "Push Hook")
+		request.Header.Set("X-Gitlab-Event-UUID", fmt.Sprintf("evt-%d", len(body)))
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+	if unreadable := post(`{"project":{"id":"not-a-number"}}`); unreadable.Code != http.StatusBadRequest {
+		t.Fatalf("an unreadable payload must be a client error: status=%d body=%s", unreadable.Code, unreadable.Body.String())
+	}
+	if unknown := post(`{"project":{"id":4242},"ref":"refs/heads/main"}`); unknown.Code != http.StatusNotFound {
+		t.Fatalf("an unregistered repository must be 404: status=%d body=%s", unknown.Code, unknown.Body.String())
+	}
+	// With the store unavailable the receiver must ask for a retry rather than
+	// telling the sender the event was refused.
+	a.store.DB.Close()
+	if broken := post(`{"project":{"id":4243},"ref":"refs/heads/main"}`); broken.Code != http.StatusInternalServerError {
+		t.Fatalf("a failure on this side must be retryable: status=%d body=%s", broken.Code, broken.Body.String())
+	}
+}

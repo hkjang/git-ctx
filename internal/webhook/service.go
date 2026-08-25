@@ -23,9 +23,26 @@ type Result struct {
 	Jobs      int    `json:"jobs"`
 }
 
+// The two ways an event can be refused are told apart, because the sender acts
+// on the status code. A body this receiver cannot read is the sender's mistake
+// and will fail again on every retry; an event for a repository this platform
+// does not have is a routing mistake an operator has to fix. Anything else —
+// a database that is down, for instance — must not be reported as either, or
+// the source server stops retrying an event that would have succeeded.
+var (
+	// ErrPayloadUnreadable is a body this receiver cannot parse.
+	ErrPayloadUnreadable = errors.New("webhook payload is unreadable")
+	// ErrRepositoryUnknown is an event for a repository that is not registered
+	// here, or is disabled.
+	ErrRepositoryUnknown = errors.New("webhook repository is not registered")
+	// ErrSourceUnsupported is an event for a source type this build has no
+	// receiver for.
+	ErrSourceUnsupported = errors.New("unsupported webhook source")
+)
+
 func (s *Service) Enqueue(ctx context.Context, sourceType, eventID, eventType string, payload []byte) (Result, error) {
 	if sourceType != "bitbucket" && sourceType != "gitlab" {
-		return Result{}, errors.New("unsupported webhook source")
+		return Result{}, ErrSourceUnsupported
 	}
 	sum := sha256.Sum256(payload)
 	payloadHash := hex.EncodeToString(sum[:])
@@ -43,10 +60,9 @@ func (s *Service) Enqueue(ctx context.Context, sourceType, eventID, eventType st
 	var repoID string
 	err = s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT id FROM repositories WHERE source_type=? AND source_external_id=? AND enabled=1`), sourceType, externalRepo).Scan(&repoID)
 	if err != nil {
-		rejection := errors.New("webhook repository is not registered")
 		s.reject(ctx, sourceType, eventID, eventType, payloadHash, externalRepo,
 			"this platform has no enabled repository with source id "+externalRepo)
-		return Result{}, rejection
+		return Result{}, ErrRepositoryUnknown
 	}
 	tx, err := s.store.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -120,10 +136,10 @@ func parse(sourceType string, payload []byte) (string, []string, error) {
 			}
 		}
 		if err := json.Unmarshal(payload, &p); err != nil {
-			return "", nil, errors.New("invalid Bitbucket webhook JSON")
+			return "", nil, fmt.Errorf("%w: invalid Bitbucket webhook JSON", ErrPayloadUnreadable)
 		}
 		if p.Repository.ID == 0 {
-			return "", nil, errors.New("Bitbucket repository ID is missing")
+			return "", nil, fmt.Errorf("%w: Bitbucket repository ID is missing", ErrPayloadUnreadable)
 		}
 		var refs []string
 		for _, c := range p.Changes {
@@ -138,10 +154,10 @@ func parse(sourceType string, payload []byte) (string, []string, error) {
 		Ref     string
 	}
 	if err := json.Unmarshal(payload, &p); err != nil {
-		return "", nil, errors.New("invalid GitLab webhook JSON")
+		return "", nil, fmt.Errorf("%w: invalid GitLab webhook JSON", ErrPayloadUnreadable)
 	}
 	if p.Project.ID == 0 {
-		return "", nil, errors.New("GitLab project ID is missing")
+		return "", nil, fmt.Errorf("%w: GitLab project ID is missing", ErrPayloadUnreadable)
 	}
 	ref := strings.TrimPrefix(strings.TrimPrefix(p.Ref, "refs/heads/"), "refs/tags/")
 	var refs []string
