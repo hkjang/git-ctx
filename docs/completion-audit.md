@@ -35,6 +35,24 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-25 v0.53.2 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./...                 PASS
+go vet ./... && go build ./...               PASS
+pnpm 락파일 3종 형식 시험                      PASS
+yarn 락파일 두 형식 회귀 시험                  PASS(수정 없음)
+사용자·관리자 UI JavaScript parse·계약 시험    PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.53.2 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.53.2 빌드      PASS
+```
+
+이번 검증은 락파일 형식 누락을 고정한다. pnpm 의 슬래시 형식(v5~v7)을 전혀 읽지
+못해 해당 저장소가 인벤토리에서 조용히 빠졌고, v9 의 scope 패키지와 peer 접미사도
+잘못 처리됐다. 세 형식과 접미사를 모두 회귀 시험으로 고정했다. yarn 은 클래식과
+berry 두 형식 모두 이미 정확히 읽고 있어 수정이 필요 없었다.
+
 2026-08-25 v0.53.1 릴리스 전 검증 결과:
 
 ```text

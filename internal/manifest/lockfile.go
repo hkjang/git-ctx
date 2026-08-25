@@ -185,18 +185,45 @@ func parseYarnLock(content string) []Package {
 	return out
 }
 
-var pnpmEntry = regexp.MustCompile(`(?m)^\s{2}/?(@?[^@\s/][^@\s]*)@([0-9][^:\s(]*)`)
+// pnpm has shipped three key layouts and an inventory that reads only the
+// newest silently omits every repository still on an older one — the failure
+// mode this feature exists to avoid. Both shapes are matched:
+//
+//	/lodash/4.17.21:        (v5, v6, v7)
+//	/@babel/core/7.24.0:
+//	lodash@4.17.21:         (v9)
+//	'@babel/core@7.24.0':
+var (
+	// A peer-resolution suffix — /react-dom/18.2.0(react@18.2.0): — may follow the
+	// version and is not part of it.
+	pnpmSlashEntry = regexp.MustCompile(`(?m)^\s+/?'?(@[^/'\s]+/[^/'\s]+|[^/@'\s][^/'\s]*)/([0-9][^:'\s(]*)(?:\([^)]*\))?'?:`)
+	// The name may not contain a slash or a parenthesis: those belong to the
+	// older slash layout and to the peer-resolution suffix respectively, and
+	// letting them through produced entries like "react-dom/18.2.0(react".
+	pnpmAtEntry = regexp.MustCompile(`(?m)^\s+'?(@[^/'\s]+/[^@'\s(/]+|[^@'\s(/][^@'\s(/]*)@([0-9][^:'\s(]*)(?:\([^)]*\))?'?:`)
+)
 
 func parsePnpmLock(content string) []Package {
 	seen := map[string]bool{}
 	var out []Package
-	for _, match := range pnpmEntry.FindAllStringSubmatch(content, -1) {
-		name, version := match[1], match[2]
-		if seen[name+"\x00"+version] {
-			continue
+	add := func(name, version string) {
+		// A peer-dependency suffix — lodash@4.17.21(react@18.0.0) — describes the
+		// resolution context, not the version.
+		if at := strings.IndexByte(version, '('); at >= 0 {
+			version = version[:at]
+		}
+		version = strings.TrimSuffix(version, ":")
+		if name == "" || version == "" || seen[name+"\x00"+version] {
+			return
 		}
 		seen[name+"\x00"+version] = true
 		out = append(out, Package{Name: name, Version: version})
+	}
+	for _, match := range pnpmSlashEntry.FindAllStringSubmatch(content, -1) {
+		add(match[1], match[2])
+	}
+	for _, match := range pnpmAtEntry.FindAllStringSubmatch(content, -1) {
+		add(match[1], match[2])
 	}
 	return out
 }
