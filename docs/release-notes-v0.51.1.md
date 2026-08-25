@@ -1,4 +1,4 @@
-# git-ctx v0.51.0
+# git-ctx v0.51.1
 
 이번 릴리스는 사용자 작업 흐름과 관리자 설정 안전성을 함께 개선한 UI/UX 고도화 릴리스입니다. 기본 서비스 포트는 계속 `4747`이며 기존 API·MCP 호환성을 유지합니다.
 
@@ -15,6 +15,7 @@
 - PostgreSQL 데이터 이전은 현재 입력한 동일 DSN의 연결 시험을 통과하고 확인 문구를 입력한 경우에만 활성화됩니다.
 - 모바일 메뉴, 키보드 탭 이동, 메뉴 역할, focus, live status와 좁은 화면 레이아웃을 보강했습니다.
 - 버전 메타데이터 정합성을 CI와 릴리스 게이트에서 자동 검증하여 상단·로그인·프로필·OpenAPI·Kubernetes·오프라인 문서가 같은 버전을 표시합니다.
+- 릴리스 검증용 trusted tooling checkout에 워크플로 계약 파일을 명시적으로 포함해, 상세 본문과 자산 계약 시험이 태그 빌드에서도 동일하게 실행됩니다.
 
 ## 업그레이드 참고
 
@@ -27,16 +28,16 @@
 
 릴리스 자산은 아키텍처 접미사가 없는 다음 두 파일입니다.
 
-- `git-ctx-v0.51.0.tar.gz`
-- `git-ctx-v0.51.0.tar.gz.sha256`
+- `git-ctx-v0.51.1.tar.gz`
+- `git-ctx-v0.51.1.tar.gz.sha256`
 
 ```bash
-sha256sum -c git-ctx-v0.51.0.tar.gz.sha256
-gzip -dc git-ctx-v0.51.0.tar.gz | docker load
-docker image inspect git-ctx:v0.51.0 --format '{{.Os}}/{{.Architecture}} {{.Config.User}}'
+sha256sum -c git-ctx-v0.51.1.tar.gz.sha256
+gzip -dc git-ctx-v0.51.1.tar.gz | docker load
+docker image inspect git-ctx:v0.51.1 --format '{{.Os}}/{{.Architecture}} {{.Config.User}}'
 ```
 
-기대 결과는 `linux/amd64 10001`입니다. 아카이브에는 `git-ctx:v0.51.0`과 `git-ctx:0.51.0` 태그가 포함됩니다.
+기대 결과는 `linux/amd64 10001`입니다. 아카이브에는 `git-ctx:v0.51.1`과 `git-ctx:0.51.1` 태그가 포함됩니다.
 
 ## 검증
 
@@ -46,4 +47,4 @@ docker image inspect git-ctx:v0.51.0 --format '{{.Os}}/{{.Architecture}} {{.Conf
 - GitHub Actions, 버전 정합성, Kubernetes와 Docker 릴리스 검증
 - 공개 릴리스 자산 재다운로드, SHA-256과 이미지 version/revision/platform/non-root 검증
 
-**전체 변경 내역**: https://github.com/hkjang/git-ctx/compare/v0.50.1...v0.51.0
+**전체 변경 내역**: https://github.com/hkjang/git-ctx/compare/v0.50.1...v0.51.1

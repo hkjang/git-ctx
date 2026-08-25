@@ -77,5 +77,11 @@ release_workflow="$repository_root/.github/workflows/release.yml"
 grep -F 'echo "notes=release-notes-v${version}.md" >> "$GITHUB_OUTPUT"' "$release_workflow" >/dev/null
 grep -F -- '--notes-file "$notes_file"' "$release_workflow" >/dev/null
 grep -F -- '--notes-file "$GITHUB_WORKSPACE/release-artifact/$NOTES_NAME"' "$release_workflow" >/dev/null
+trusted_checkout=$(awk '
+  /- name: Check out trusted release tooling/ && !capture { capture = 1 }
+  capture { print }
+  capture && /- name: Validate tag and source version/ { exit }
+' "$release_workflow")
+printf '%s\n' "$trusted_checkout" | grep -F '            .github' >/dev/null
 
 echo "version sync and release-note workflow tests passed"
