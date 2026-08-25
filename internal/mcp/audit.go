@@ -106,10 +106,17 @@ func retrievalMode(text string) string {
 
 // errorCode classifies a failure so the analytics screen can separate "the
 // source server was slow" from "the caller asked for something that is gone".
+// errToolNotPermitted is the answer to a tool the credential was not granted.
+// Its text is what the client sees, and it carries its own audit code so a
+// refusal is never counted among ordinary failures.
+var errToolNotPermitted = errors.New("This MCP tool is unavailable for this credential.")
+
 func errorCode(err error) string {
 	switch {
 	case err == nil:
 		return ""
+	case errors.Is(err, errToolNotPermitted):
+		return "tool_not_permitted"
 	case errors.Is(err, context.DeadlineExceeded):
 		return "timeout"
 	case errors.Is(err, context.Canceled):

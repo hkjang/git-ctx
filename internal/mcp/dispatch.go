@@ -58,7 +58,13 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 	defer span.End()
 	r = r.WithContext(ctx)
 	if !s.toolVisible(r.Context(), p, entry) {
-		write(w, response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"content": []map[string]string{{"type": "text", "text": "This MCP tool is unavailable for this credential."}}, "isError": true}})
+		// A credential reaching for a tool it was not granted is exactly what a
+		// security review looks for, so the refusal is audited like any other
+		// call instead of being answered and forgotten.
+		denied := s.auditContext(w, r, params.Name, params.Arguments)
+		_, deniedTrace := calltrace.New(r.Context())
+		denied.trace = deniedTrace
+		s.finishCall(w, r, req, p, params.Name, "", start, "", errToolNotPermitted, false, MinResponseBytes, denied)
 		return
 	}
 	timeout := s.toolTimeout(r.Context(), params.Name)

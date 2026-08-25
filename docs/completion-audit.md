@@ -35,6 +35,22 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-25 v0.53.6 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./...                 PASS
+go vet ./... && go build ./...               PASS
+권한 밖 MCP 호출 감사 기록 실측                PASS
+클라이언트 주소 확정·전달 시험                 PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.53.6 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.53.6 빌드      PASS
+```
+
+이번 검증은 감사 기록의 두 공백을 메웠다. 권한 밖 도구 호출은 기록 없이 끝나고
+있었고, 남는 클라이언트 주소는 임시 포트가 붙어 CIDR 제한과 대조할 수 없었으며
+MCP 계층이 신뢰하지 않은 전달 헤더를 그대로 믿고 있었다.
+
 2026-08-25 v0.53.5 릴리스 전 검증 결과:
 
 ```text

@@ -43,6 +43,9 @@ type attemptLimiter struct {
 
 func (a *App) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Resolved once, with the trusted-proxy decision applied, and carried on
+		// the context so every later reader records the same address.
+		r = r.WithContext(auth.WithClientIP(r.Context(), a.requestIP(r)))
 		raw := r.Header.Get("CONTEXT7_API_KEY")
 		if raw == "" {
 			raw = r.Header.Get("X-API-Key")

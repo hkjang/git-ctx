@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"net"
 	"strings"
 
 	"git-ctx/internal/auth"
@@ -44,12 +45,22 @@ func truncate(value string, limit int) string {
 	}
 	return runeSafeCut(value, limit) + "…"
 }
+
+// clientIP is the address to record against a call. The HTTP layer has already
+// decided whether a forwarding header may be believed, so that answer is used
+// as it stands; trusting X-Forwarded-For here would let any caller write its
+// own address into the audit trail. The fallback strips the ephemeral port,
+// which is noise in an audit row and makes the value unmatchable against the
+// CIDR restrictions the same address is checked against.
 func clientIP(r *http.Request) string {
-	host := r.RemoteAddr
-	if x := r.Header.Get("X-Forwarded-For"); x != "" {
-		host = strings.TrimSpace(strings.Split(x, ",")[0])
+	if ip := auth.ClientIP(r.Context()); ip != "" {
+		return ip
 	}
-	return host
+	address := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(address); err == nil {
+		address = host
+	}
+	return strings.Trim(address, "[]")
 }
 func contains(values []string, want string) bool {
 	for _, value := range values {

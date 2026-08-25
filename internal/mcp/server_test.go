@@ -927,3 +927,56 @@ func TestRepositoryMapCarriesTheStack(t *testing.T) {
 		t.Fatalf("an uninventoried repository must not claim an empty stack:\n%s", text)
 	}
 }
+
+// A credential reaching for a tool it was never granted is the first thing a
+// security review looks for, and it used to leave no trace at all: the refusal
+// was answered and forgotten. The address recorded with it has to be the one
+// the HTTP layer resolved, without the ephemeral port, or it cannot be matched
+// against the CIDR restrictions the same key is checked against.
+func TestARefusedToolCallIsAudited(t *testing.T) {
+	s := fixture(t)
+	restricted := auth.Principal{UserID: "u1", Subject: "alice", ACLPrincipal: "alice",
+		KeyID: "k1", KeyPrefix: "ABCDEF", Scopes: []string{"search-code"}}
+	request := httptest.NewRequest(http.MethodPost, "/mcp",
+		bytes.NewBufferString(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read-file","arguments":{"libraryId":"/kcb/clustara","path":"service.go"}}}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.RemoteAddr = "203.0.113.7:51234"
+	request = request.WithContext(auth.WithClientIP(auth.WithPrincipal(request.Context(), restricted), "203.0.113.7"))
+	recorder := httptest.NewRecorder()
+	s.ServeHTTP(recorder, request)
+	if !bytes.Contains(recorder.Body.Bytes(), []byte("unavailable for this credential")) {
+		t.Fatalf("the caller must still be told: %s", recorder.Body.String())
+	}
+
+	var tool, outcome, code, prefix, ip string
+	if err := s.store.DB.QueryRow(`SELECT tool,outcome,error_code,api_key_prefix,client_ip FROM mcp_calls ORDER BY occurred_at DESC LIMIT 1`).
+		Scan(&tool, &outcome, &code, &prefix, &ip); err != nil {
+		t.Fatalf("the refusal was not audited at all: %v", err)
+	}
+	if tool != "read-file" || code != "tool_not_permitted" || prefix != "ABCDEF" {
+		t.Fatalf("audit row=%s/%s/%s/%s", tool, outcome, code, prefix)
+	}
+	if ip != "203.0.113.7" {
+		t.Fatalf("the audited address must be the resolved one, without its port: %q", ip)
+	}
+
+	// A permitted call records the same resolved address rather than re-deriving
+	// one from the connection.
+	allowed := auth.Principal{UserID: "u1", Subject: "alice", ACLPrincipal: "alice",
+		KeyID: "k1", KeyPrefix: "ABCDEF", Scopes: []string{"search-code"}}
+	ok := httptest.NewRequest(http.MethodPost, "/mcp",
+		bytes.NewBufferString(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search-code","arguments":{"query":"GPU"}}}`))
+	ok.Header.Set("Content-Type", "application/json")
+	ok.RemoteAddr = "203.0.113.7:51999"
+	// A forwarding header that the HTTP layer did not believe must not reach the
+	// audit trail: otherwise any caller writes its own address into it.
+	ok.Header.Set("X-Forwarded-For", "198.51.100.99")
+	ok = ok.WithContext(auth.WithClientIP(auth.WithPrincipal(ok.Context(), allowed), "203.0.113.7"))
+	s.ServeHTTP(httptest.NewRecorder(), ok)
+	if err := s.store.DB.QueryRow(`SELECT tool,client_ip FROM mcp_calls ORDER BY occurred_at DESC LIMIT 1`).Scan(&tool, &ip); err != nil {
+		t.Fatal(err)
+	}
+	if tool != "search-code" || ip != "203.0.113.7" {
+		t.Fatalf("permitted call recorded %s from %q", tool, ip)
+	}
+}
