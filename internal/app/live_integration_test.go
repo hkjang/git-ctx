@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"git-ctx/internal/apikey"
 	"git-ctx/internal/config"
 )
 
@@ -929,4 +930,156 @@ func TestIncrementalPushChainIntegration(t *testing.T) {
 	if !strings.Contains(advisory, "AFFECTED") {
 		t.Fatalf("the inventory did not survive the push:\n%s", advisory)
 	}
+}
+
+// The platform's core promise is that an answer never contains a repository the
+// caller cannot read. Every chain test so far ran as the bootstrap
+// administrator, whose ACL is bypassed, so the promise itself was never
+// exercised through the real path: identity to principals to the SQL predicate
+// to the tool output. This drives two indexed repositories and two developers
+// who can each read one of them.
+func TestAccessControlChainIntegration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("the platform chain waits on the background worker")
+	}
+	ctx := context.Background()
+
+	payments := newFakeGitLabRepository(&fakeRepository{commit: "pay-1", files: map[string]string{
+		"README.md":  "# Payments\n\n결제 정산 서비스.\n",
+		"service.go": "package main\n\nfunc settleInvoice() error { return nil }\n",
+	}}, nil)
+	defer payments.Close()
+
+	directory := t.TempDir()
+	a, err := New(ctx, config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(directory, "acl.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
+		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer bootstrap")
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+	if saved := call(http.MethodPut, "/api/v1/admin/settings/gitlab",
+		fmt.Sprintf(`{"baseUrl":%q,"token":"t","webhookSecret":"s3cret"}`, payments.URL)); saved.Code != http.StatusOK {
+		t.Fatalf("gitlab settings status=%d body=%s", saved.Code, saved.Body.String())
+	}
+	registered := call(http.MethodPost, "/api/v1/admin/repositories",
+		`{"sourceType":"gitlab","repository":{"id":4242,"projectKey":"core","slug":"api","name":"api","description":"payment api","defaultBranch":"main"}}`)
+	if registered.Code != http.StatusCreated {
+		t.Fatalf("register status=%d body=%s", registered.Code, registered.Body.String())
+	}
+	var indexed struct{ ID, LibraryID string }
+	if err = json.Unmarshal(registered.Body.Bytes(), &indexed); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 60*time.Second, "the repository to finish indexing", func() bool {
+		var chunks int
+		_ = a.store.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id=?`, indexed.ID).Scan(&chunks)
+		return chunks > 0
+	})
+
+	// A second repository nobody indexed from this source, readable only by the
+	// other team, so a leak is visible as a name rather than as a count.
+	must := func(query string, args ...any) {
+		t.Helper()
+		if _, err := a.store.DB.Exec(query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,enabled) VALUES('gitlab:9','core','ledger','ledger','원장','gitlab','9','/core/ledger','main',1)`)
+	must(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('gitlab:9','group:ledger-team','read')`)
+	must(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id) VALUES('gitlab:9','main','led-1')`)
+	must(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('led1','gitlab:9','main','led-1','ledger.go',1,9,'Ledger','code','func settleInvoice() error { return nil }','ledh1')`)
+
+	// The indexed repository is readable by the payments team only.
+	must(`DELETE FROM repository_permissions WHERE repository_id=?`, indexed.ID)
+	must(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES(?,'group:payments-team','read')`, indexed.ID)
+
+	// Two developers, each mapped to one team, each with their own key.
+	newDeveloper := func(id, group string) string {
+		t.Helper()
+		must(`INSERT INTO users(id,subject,username,email,status) VALUES(?,?,?,'',"active")`, id, id, id)
+		must(`INSERT INTO user_identities(user_id,bitbucket_user_slug,gitlab_user_id,mapping_source,bitbucket_groups) VALUES(?,'',?,'manual',?)`, id, id, group)
+		_, secret, err := a.keys.Create(ctx, id, "agent", []string{"search-code", "search-repositories", "query-docs", "read-file"}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return secret
+	}
+	paymentsKey := newDeveloper("dev-payments", "group:payments-team")
+	ledgerKey := newDeveloper("dev-ledger", "group:ledger-team")
+
+	// Each developer sees their own repository and never the other's.
+	paymentsRepositories := mcpCallWithKey(t, a, paymentsKey, "search-repositories", `{"query":"payment"}`)
+	if !strings.Contains(paymentsRepositories, indexed.LibraryID) || strings.Contains(paymentsRepositories, "/core/ledger") {
+		t.Fatalf("the payments developer saw the wrong catalogue:\n%s", paymentsRepositories)
+	}
+	ledgerRepositories := mcpCallWithKey(t, a, ledgerKey, "search-repositories", `{"query":"원장"}`)
+	if !strings.Contains(ledgerRepositories, "/core/ledger") || strings.Contains(ledgerRepositories, indexed.LibraryID) {
+		t.Fatalf("the ledger developer saw the wrong catalogue:\n%s", ledgerRepositories)
+	}
+
+	// The same query matches content in both repositories; each caller may only
+	// see their own, which is where a predicate mistake would show.
+	paymentsCode := mcpCallWithKey(t, a, paymentsKey, "search-code", `{"query":"settleInvoice"}`)
+	if strings.Contains(paymentsCode, "ledger.go") {
+		t.Fatalf("code search leaked the other team's file:\n%s", paymentsCode)
+	}
+	ledgerCode := mcpCallWithKey(t, a, ledgerKey, "search-code", `{"query":"settleInvoice"}`)
+	if strings.Contains(ledgerCode, "service.go") {
+		t.Fatalf("code search leaked the other team's file:\n%s", ledgerCode)
+	}
+
+	// Naming the repository directly is refused, and the refusal must not
+	// confirm that it exists.
+	denied := mcpDeniedWithKey(t, a, ledgerKey, "read-file", fmt.Sprintf(`{"libraryId":%q,"path":"service.go"}`, indexed.LibraryID))
+	if strings.Contains(denied, "payment") {
+		t.Fatalf("the refusal described the repository: %q", denied)
+	}
+
+	// A key may be narrowed further than its owner's access. The repository is
+	// readable by this developer, but not through this key.
+	_, restricted, err := a.keys.CreateWithRestrictions(ctx, "dev-payments", "narrow",
+		[]string{"search-repositories", "search-code"}, nil, apikey.Restrictions{AllowedRepositories: []string{"/core/nothing"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	narrow := mcpCallWithKey(t, a, restricted, "search-repositories", `{"query":"payment"}`)
+	if strings.Contains(narrow, indexed.LibraryID) {
+		t.Fatalf("a key restricted to another repository still returned this one:\n%s", narrow)
+	}
+}
+
+// mcpDeniedWithKey calls a tool expecting a refusal and returns its text.
+func mcpDeniedWithKey(t *testing.T, a *App, secret, tool, arguments string) string {
+	t.Helper()
+	body := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":%q,"arguments":%s}}`, tool, arguments)
+	request := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+	request.Header.Set("X-API-Key", secret)
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	a.Handler().ServeHTTP(recorder, request)
+	var response struct {
+		Result struct {
+			Content []struct{ Text string } `json:"content"`
+			IsError bool                    `json:"isError"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("%s: %v", tool, err)
+	}
+	if len(response.Result.Content) == 0 || !response.Result.IsError {
+		t.Fatalf("%s was not refused: %s", tool, recorder.Body.String())
+	}
+	return response.Result.Content[0].Text
 }
