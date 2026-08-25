@@ -50,7 +50,7 @@ func inventoryFixture(t *testing.T, name string) *store.Store {
 func TestFindDependencyUsageGroupsVersionsAndRespectsACL(t *testing.T) {
 	db := inventoryFixture(t, "dependency-usage")
 	service := New(db)
-	result, err := service.FindDependencyUsage(context.Background(), []string{"alice"}, "org.apache.logging.log4j:log4j-core", "", "", 50)
+	result, err := service.FindDependencyUsage(context.Background(), []string{"alice"}, "org.apache.logging.log4j:log4j-core", "", "", "", 50)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestFindDependencyUsageSeparatesEmptyFromUnindexed(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer empty.DB.Close()
-	result, err := New(empty).FindDependencyUsage(ctx, []string{"alice"}, "left-pad", "", "", 10)
+	result, err := New(empty).FindDependencyUsage(ctx, []string{"alice"}, "left-pad", "", "", "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestFindDependencyUsageSeparatesEmptyFromUnindexed(t *testing.T) {
 	}
 
 	populated := inventoryFixture(t, "dependency-known")
-	known, err := New(populated).FindDependencyUsage(ctx, []string{"alice"}, "left-pad", "", "", 10)
+	known, err := New(populated).FindDependencyUsage(ctx, []string{"alice"}, "left-pad", "", "", "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,14 +121,68 @@ func TestFindDependencyUsageSeparatesEmptyFromUnindexed(t *testing.T) {
 	}
 
 	// Filters narrow the same query without changing its shape.
-	filtered, err := New(populated).FindDependencyUsage(ctx, []string{"alice"}, "lodash", "npm", "", 10)
+	filtered, err := New(populated).FindDependencyUsage(ctx, []string{"alice"}, "lodash", "npm", "", "", 10)
 	if err != nil || len(filtered.Users) != 1 || filtered.Users[0].Ecosystem != "npm" {
 		t.Fatalf("filtered=%#v err=%v", filtered, err)
 	}
-	if none, err := New(populated).FindDependencyUsage(ctx, []string{"alice"}, "lodash", "maven", "", 10); err != nil || len(none.Users) != 0 {
+	if none, err := New(populated).FindDependencyUsage(ctx, []string{"alice"}, "lodash", "maven", "", "", 10); err != nil || len(none.Users) != 0 {
 		t.Fatalf("the ecosystem filter must apply: %#v err=%v", none, err)
 	}
-	if denied, err := New(populated).FindDependencyUsage(ctx, nil, "lodash", "", "", 10); err != nil || len(denied.Users) != 0 {
+	if denied, err := New(populated).FindDependencyUsage(ctx, nil, "lodash", "", "", "", 10); err != nil || len(denied.Users) != 0 {
 		t.Fatalf("a caller with no principal must see nothing: %#v err=%v", denied, err)
+	}
+}
+
+// An advisory names a fixed version, and the only dangerous answer is a false
+// "safe". A declaration that cannot be read must land in undecided, and a
+// repository that declares both an affected and a fixed version stays affected.
+func TestFindDependencyUsageJudgesAgainstTheFix(t *testing.T) {
+	db := inventoryFixture(t, "dependency-advisory")
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.DB.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	// console declares the package a second time, unreadably; api declares an
+	// affected version in one manifest and a fixed one in another.
+	exec(`INSERT INTO repository_packages(repository_id,ref_name,ecosystem,name,name_lower,version,scope,manifest_path,commit_id) VALUES('console','main','maven','org.apache.logging.log4j:log4j-core','org.apache.logging.log4j:log4j-core','${log4j.version}','direct','other/pom.xml','abc')`)
+	exec(`INSERT INTO repository_packages(repository_id,ref_name,ecosystem,name,name_lower,version,scope,manifest_path,commit_id) VALUES('api','main','maven','org.apache.logging.log4j:log4j-core','org.apache.logging.log4j:log4j-core','2.17.1','direct','extra/pom.xml','abc')`)
+
+	result, err := New(db).FindDependencyUsage(context.Background(), []string{"alice"},
+		"org.apache.logging.log4j:log4j-core", "", "", "2.17.1", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(result.Affected, ",") != "/core/api" {
+		t.Fatalf("affected=%v (api declares 2.14.1 somewhere and must stay affected)", result.Affected)
+	}
+	if strings.Join(result.Undecided, ",") != "/core/console" {
+		t.Fatalf("undecided=%v", result.Undecided)
+	}
+	if strings.Join(result.Safe, ",") != "/core/worker" {
+		t.Fatalf("safe=%v", result.Safe)
+	}
+	// The affected group is read first.
+	if result.Versions[0].Status != "affected" {
+		t.Fatalf("version order=%#v", result.Versions)
+	}
+	joined := strings.Join(result.Diagnostics, " ")
+	if !strings.Contains(joined, "영향 1개") || !strings.Contains(joined, "안전으로 간주하지 마세요") {
+		t.Fatalf("diagnostics=%v", result.Diagnostics)
+	}
+	rendered := FormatDependencyUsage(result)
+	if !strings.Contains(rendered, "AFFECTED") || !strings.Contains(rendered, "undecidable from the manifest") {
+		t.Fatalf("rendered:\n%s", rendered)
+	}
+
+	// Without a fix version the tool keeps its plain inventory shape.
+	plain, err := New(db).FindDependencyUsage(context.Background(), []string{"alice"},
+		"org.apache.logging.log4j:log4j-core", "", "", "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plain.Affected)+len(plain.Safe)+len(plain.Undecided) != 0 || plain.Versions[0].Status != "" {
+		t.Fatalf("no advisory was asked for: %#v", plain)
 	}
 }

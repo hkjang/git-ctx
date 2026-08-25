@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"git-ctx/internal/calltrace"
+	"git-ctx/internal/manifest"
 )
 
 // DependencyUser is one repository that declares a package.
@@ -28,14 +29,26 @@ type DependencyUser struct {
 type DependencyVersion struct {
 	Version      string
 	Repositories []string
+	// Status answers an advisory directly: "affected", "safe" or "unknown".
+	// It is empty when the caller asked no advisory question.
+	Status string
 }
 
 // DependencyUsage answers "who depends on this, at which version".
 type DependencyUsage struct {
-	Query        string
-	Ecosystem    string
-	Users        []DependencyUser
-	Versions     []DependencyVersion
+	Query     string
+	Ecosystem string
+	Users     []DependencyUser
+	Versions  []DependencyVersion
+	// FixedIn is the release an advisory names as the fix, when the caller
+	// supplied one.
+	FixedIn string
+	// Affected, Safe and Undecided count repositories, not declarations. During
+	// an advisory the number that matters is how many repositories must change,
+	// and how many could not be judged from what their manifest declares.
+	Affected     []string
+	Safe         []string
+	Undecided    []string
 	Repositories int
 	Diagnostics  []string
 }
@@ -51,7 +64,7 @@ const dependencyScanLimit = 2000
 // its version, and a transitive dependency has no import line at all. During an
 // advisory the question is exactly "who is on the affected version", so the
 // answer is grouped by version rather than listed flat.
-func (s *Service) FindDependencyUsage(ctx context.Context, principals []string, name, ecosystem, sourceType string, limit int) (DependencyUsage, error) {
+func (s *Service) FindDependencyUsage(ctx context.Context, principals []string, name, ecosystem, sourceType, fixedIn string, limit int) (DependencyUsage, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return DependencyUsage{}, errors.New("name is required")
@@ -59,7 +72,9 @@ func (s *Service) FindDependencyUsage(ctx context.Context, principals []string, 
 	if limit < 1 || limit > 500 {
 		limit = 100
 	}
-	result := DependencyUsage{Query: name, Ecosystem: ecosystem, Users: []DependencyUser{}, Versions: []DependencyVersion{}}
+	fixedIn = strings.TrimSpace(fixedIn)
+	result := DependencyUsage{Query: name, Ecosystem: ecosystem, FixedIn: fixedIn,
+		Users: []DependencyUser{}, Versions: []DependencyVersion{}}
 	if len(principals) == 0 {
 		result.Diagnostics = append(result.Diagnostics, "acl: no source principal is mapped to this account, so no repository can be authorized.")
 		return result, nil
@@ -140,6 +155,9 @@ WHERE r.enabled=1 AND ` + predicate + ` AND (pkg.name_lower=LOWER(?) OR pkg.name
 		}
 		return result.Versions[i].Version > result.Versions[j].Version
 	})
+	if fixedIn != "" {
+		result = classifyAgainstFix(result, fixedIn)
+	}
 	span.End(statusFor(len(result.Users)), scanned, len(result.Users), fmt.Sprintf("%d repositories, %d distinct versions", result.Repositories, len(result.Versions)))
 
 	if len(result.Users) == 0 {
@@ -164,7 +182,82 @@ WHERE r.enabled=1 AND ` + predicate + ` AND (pkg.name_lower=LOWER(?) OR pkg.name
 		result.Diagnostics = append(result.Diagnostics,
 			fmt.Sprintf("versions: %d개 버전이 공존합니다. 업그레이드는 버전별로 나뉘어 진행해야 합니다.", len(result.Versions)))
 	}
+	if fixedIn != "" {
+		result.Diagnostics = append(result.Diagnostics,
+			fmt.Sprintf("advisory: %s 기준 영향 %d개 · 안전 %d개 · 판정 불가 %d개 저장소.",
+				fixedIn, len(result.Affected), len(result.Safe), len(result.Undecided)))
+		if len(result.Undecided) > 0 {
+			// The undecided set is the honest part of the answer: a caret range or a
+			// floating version cannot be judged from the manifest alone, and calling
+			// it safe is the one mistake an advisory cannot afford.
+			result.Diagnostics = append(result.Diagnostics,
+				"advisory: 판정 불가 저장소는 선언이 범위·부동 버전이라 매니페스트만으로 결정할 수 없습니다. 락파일이나 빌드 산출물로 확인하세요. 안전으로 간주하지 마세요.")
+		}
+	}
 	return result, nil
+}
+
+// classifyAgainstFix labels each version group against the release that fixes
+// an advisory, and counts repositories rather than declarations because that is
+// the unit of work an upgrade is planned in.
+func classifyAgainstFix(result DependencyUsage, fixedIn string) DependencyUsage {
+	affected, safe, undecided := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	for index, group := range result.Versions {
+		below, decided := manifest.Below(group.Version, fixedIn)
+		switch {
+		case !decided:
+			result.Versions[index].Status = "unknown"
+			for _, library := range group.Repositories {
+				undecided[library] = true
+			}
+		case below:
+			result.Versions[index].Status = "affected"
+			for _, library := range group.Repositories {
+				affected[library] = true
+			}
+		default:
+			result.Versions[index].Status = "safe"
+			for _, library := range group.Repositories {
+				safe[library] = true
+			}
+		}
+	}
+	// A repository that declares the package twice — an affected version in one
+	// manifest and a fixed one in another — is affected. The stricter label wins
+	// so a mixed repository is never reported as done.
+	for library := range affected {
+		delete(safe, library)
+		delete(undecided, library)
+	}
+	for library := range undecided {
+		delete(safe, library)
+	}
+	result.Affected, result.Safe, result.Undecided = sortedLibraries(affected), sortedLibraries(safe), sortedLibraries(undecided)
+	// Affected first: an advisory is read from the top.
+	sort.SliceStable(result.Versions, func(i, j int) bool {
+		return statusRank(result.Versions[i].Status) < statusRank(result.Versions[j].Status)
+	})
+	return result
+}
+
+func statusRank(status string) int {
+	switch status {
+	case "affected":
+		return 0
+	case "unknown":
+		return 1
+	default:
+		return 2
+	}
+}
+
+func sortedLibraries(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for key := range set {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // FormatDependencyUsage renders the inventory for an agent: versions first,
@@ -177,10 +270,23 @@ func FormatDependencyUsage(result DependencyUsage) string {
 		fmt.Fprintf(&b, " · ecosystem: %s", result.Ecosystem)
 	}
 	fmt.Fprintf(&b, "\nRepositories: %d · declared versions: %d\n", result.Repositories, len(result.Versions))
+	if result.FixedIn != "" {
+		fmt.Fprintf(&b, "Advisory: fixed in %s · affected %d · safe %d · undecided %d repositories\n",
+			result.FixedIn, len(result.Affected), len(result.Safe), len(result.Undecided))
+	}
 	if len(result.Versions) > 0 {
 		b.WriteString("\n### Versions\n")
 		for _, version := range result.Versions {
-			fmt.Fprintf(&b, "\n- **%s** — %d repositor%s: %s\n", version.Version, len(version.Repositories),
+			label := ""
+			switch version.Status {
+			case "affected":
+				label = " — AFFECTED"
+			case "safe":
+				label = " — safe"
+			case "unknown":
+				label = " — undecidable from the manifest"
+			}
+			fmt.Fprintf(&b, "\n- **%s**%s — %d repositor%s: %s\n", version.Version, label, len(version.Repositories),
 				plural(len(version.Repositories)), strings.Join(version.Repositories, ", "))
 		}
 	}

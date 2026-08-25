@@ -218,13 +218,14 @@ func (a *App) testDependencyUsage(w http.ResponseWriter, r *http.Request) {
 		Name       string `json:"name"`
 		Ecosystem  string `json:"ecosystem"`
 		SourceType string `json:"sourceType"`
+		FixedIn    string `json:"fixedIn"`
 		Limit      int    `json:"limit"`
 	}
 	if decode(r, &in) != nil || strings.TrimSpace(in.Name) == "" {
 		problem(w, http.StatusBadRequest, "invalid_request", "name is required")
 		return
 	}
-	result, err := a.search.FindDependencyUsage(r.Context(), searchPrincipals(p), in.Name, in.Ecosystem, in.SourceType, in.Limit)
+	result, err := a.search.FindDependencyUsage(r.Context(), searchPrincipals(p), in.Name, in.Ecosystem, in.SourceType, in.FixedIn, in.Limit)
 	if err != nil {
 		problem(w, http.StatusBadRequest, "search_failed", err.Error())
 		return

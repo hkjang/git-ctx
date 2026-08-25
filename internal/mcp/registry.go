@@ -298,11 +298,12 @@ var registry = []tool{
 	},
 	{
 		name:        toolcatalog.FindDependencyUsage,
-		description: "Reports which repositories declare a third-party package and at which versions, read from their manifests (go.mod, package.json, pom.xml, build.gradle, requirements.txt, pyproject.toml, Cargo.toml). Use it for an advisory (\"who is on the affected version\") or an upgrade plan; find-dependents answers the different question of who imports a symbol, and cannot see versions or transitive dependencies at all.",
+		description: "Reports which repositories declare a third-party package and at which versions, read from their manifests (go.mod, package.json, pom.xml, build.gradle, requirements.txt, pyproject.toml, Cargo.toml). Pass fixedIn to have each version judged against an advisory fix. Use it for an advisory (\"who is on the affected version\") or an upgrade plan; find-dependents answers the different question of who imports a symbol, and cannot see versions or transitive dependencies at all.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"name"}, "properties": map[string]any{
 			"name":       map[string]string{"type": "string", "description": "Package name as its ecosystem writes it: github.com/gin-gonic/gin, lodash, org.apache.logging.log4j:log4j-core"},
 			"ecosystem":  map[string]string{"type": "string", "description": "Optional filter: go, npm, maven, gradle, pypi, cargo"},
 			"sourceType": map[string]string{"type": "string", "description": "Optional filter: bitbucket or gitlab"},
+			"fixedIn":    map[string]string{"type": "string", "description": "Advisory fix version, for example 2.17.1. Each version group is then labelled affected, safe or undecidable; a range or floating version is never called safe"},
 			"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 500}}},
 		handler: handleFindDependencyUsage,
 	},

@@ -1190,9 +1190,19 @@ function setupKnowledgeSearch() {
       const versions = rows(result.Versions);
       // 버전별 묶음을 먼저 보여 줍니다. 업그레이드·보안 공지 대응에서 정작 필요한
       // 판단은 "어느 버전 그룹이 있는가" 이기 때문입니다.
-      const lines = [`패키지: ${result.Query} · 저장소 ${result.Repositories}개 · 버전 ${versions.length}종`, ""];
+      const lines = [`패키지: ${result.Query} · 저장소 ${result.Repositories}개 · 버전 ${versions.length}종`];
+      if (result.FixedIn) {
+        // 보안 공지 대응에서는 "몇 개 저장소를 고쳐야 하는가"와 "판정할 수 없는 곳이
+        // 어디인가"가 결론입니다. 판정 불가를 안전으로 접지 않습니다.
+        lines.push(`수정 버전 ${result.FixedIn} 기준 · 영향 ${rows(result.Affected).length}개 · 안전 ${rows(result.Safe).length}개 · 판정 불가 ${rows(result.Undecided).length}개`);
+        if (rows(result.Affected).length) lines.push(`  영향: ${rows(result.Affected).join(", ")}`);
+        if (rows(result.Undecided).length) lines.push(`  판정 불가: ${rows(result.Undecided).join(", ")}`);
+      }
+      lines.push("");
+      const statusLabel = { affected: "영향", safe: "안전", unknown: "판정 불가" };
       for (const version of versions) {
-        lines.push(`── ${version.Version} · ${version.Repositories.length}개 저장소 ──`);
+        const status = version.Status ? ` [${statusLabel[version.Status] || version.Status}]` : "";
+        lines.push(`── ${version.Version}${status} · ${version.Repositories.length}개 저장소 ──`);
         lines.push(`  ${version.Repositories.join(", ")}`);
       }
       if (users.length) {

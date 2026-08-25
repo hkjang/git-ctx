@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: git-ctx REST API
-  version: 0.52.0
+  version: 0.52.1
   description: User and administrative API for the Context7-compatible internal repository knowledge platform.
 servers:
   - url: https://git-ctx.company.local
@@ -166,7 +166,7 @@ paths:
   /api/v1/tools/dependency-usage/test:
     post:
       {
-        summary: Which accessible repositories declare a third-party package and at which versions read from their manifests,
+        summary: Which accessible repositories declare a third-party package and at which versions read from their manifests with an optional advisory judgement against a fix version,
         responses: { "200": { description: Version groups and declaration sites } },
       }
   /api/v1/tools/dependents/test:

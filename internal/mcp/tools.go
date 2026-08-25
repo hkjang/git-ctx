@@ -424,7 +424,7 @@ func handleFindCodeOwner(s *Server, r *http.Request, p auth.Principal, args map[
 func handleFindDependencyUsage(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
 	var result search.DependencyUsage
 	result, err = s.search.FindDependencyUsage(r.Context(), principalACLs(p), stringArg(args, "name"),
-		stringArg(args, "ecosystem"), stringArg(args, "sourceType"), intArg(args, "limit", 100))
+		stringArg(args, "ecosystem"), stringArg(args, "sourceType"), stringArg(args, "fixedIn"), intArg(args, "limit", 100))
 	if err != nil {
 		return "", false, err
 	}
