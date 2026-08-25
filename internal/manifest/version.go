@@ -38,12 +38,32 @@ func Compare(left, right string) (int, bool) {
 
 // Below reports whether a declared version is strictly below a fixed release,
 // which is how an advisory is phrased: "fixed in 2.17.1".
+//
+// A range is only decidable in one direction. ">=2.17.1" cannot resolve below
+// the fix, so it is safe. "^18.2.0" may resolve to 18.2.0 or to 18.9.9, so a
+// floor below the fix decides nothing — calling it affected would flood an
+// advisory with repositories that are probably already patched, and calling it
+// safe would hide the ones that are not. Only an exact pin below the fix is
+// reported as affected.
 func Below(declared, fixed string) (bool, bool) {
-	order, ok := Compare(declared, fixed)
+	left, isRange, ok := parseDeclared(declared)
 	if !ok {
 		return false, false
 	}
-	return order < 0, true
+	right, _, ok := parseDeclared(fixed)
+	if !ok {
+		return false, false
+	}
+	order := left.compare(right)
+	if order >= 0 {
+		// At or above the fix: neither an exact pin nor a range floor can be
+		// affected, because a range only resolves upwards.
+		return false, true
+	}
+	if isRange {
+		return false, false
+	}
+	return true, true
 }
 
 type version struct {
@@ -61,18 +81,34 @@ var rangeOperators = []string{">=", "<=", "==", "~=", "^", "~", ">", "<", "=", "
 // that there is none. Wildcards, ranges with no numeric floor, git references
 // and "latest" are all undecidable by design.
 func parseVersion(declared string) (version, bool) {
+	parsed, _, ok := parseDeclared(declared)
+	return parsed, ok
+}
+
+// parseDeclared also reports whether the declaration was a range rather than an
+// exact pin, which decides whether a comparison below the fix means anything.
+func parseDeclared(declared string) (version, bool, bool) {
 	value := strings.TrimSpace(declared)
 	if value == "" {
-		return version{}, false
+		return version{}, false, false
 	}
 	// A compound range ("&gt;=1.2,&lt;2.0") has no single floor worth trusting.
 	if strings.ContainsAny(value, ",|") || strings.Contains(value, " - ") {
-		return version{}, false
+		return version{}, false, false
 	}
 	lower := strings.ToLower(value)
 	for _, word := range []string{"latest", "*", "x", "main", "master", "file:", "git+", "http", "workspace:", "link:"} {
 		if strings.HasPrefix(lower, word) {
-			return version{}, false
+			return version{}, false, false
+		}
+	}
+	// "==1.2.3" and "v1.2.3" pin exactly; "^", "~", ">=" and ">" are ranges that
+	// resolve upwards from the number that follows them.
+	isRange := false
+	for _, operator := range []string{"^", "~", ">=", ">", "~="} {
+		if strings.HasPrefix(value, operator) {
+			isRange = true
+			break
 		}
 	}
 	for {
@@ -87,7 +123,7 @@ func parseVersion(declared string) (version, bool) {
 		value = trimmed
 	}
 	if value == "" {
-		return version{}, false
+		return version{}, false, false
 	}
 	core, prerelease := value, ""
 	if at := strings.IndexAny(core, "-+"); at >= 0 {
@@ -97,19 +133,19 @@ func parseVersion(declared string) (version, bool) {
 	numbers := make([]int, 0, len(parts))
 	for _, part := range parts {
 		if part == "" {
-			return version{}, false
+			return version{}, false, false
 		}
 		// A wildcard segment ("1.2.x") leaves the release unknown.
 		number, err := strconv.Atoi(part)
 		if err != nil {
-			return version{}, false
+			return version{}, false, false
 		}
 		numbers = append(numbers, number)
 	}
 	if len(numbers) == 0 {
-		return version{}, false
+		return version{}, false, false
 	}
-	return version{numbers: numbers, prerelease: prerelease}, true
+	return version{numbers: numbers, prerelease: prerelease}, isRange, true
 }
 
 func (v version) compare(other version) int {

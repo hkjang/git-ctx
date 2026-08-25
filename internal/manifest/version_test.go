@@ -57,3 +57,32 @@ func TestBelowAnswersTheAdvisoryQuestion(t *testing.T) {
 		t.Fatalf("range floor at the fix: affected=%v ok=%v", affected, ok)
 	}
 }
+
+// A range only resolves upwards, so it decides the advisory in one direction
+// only. Treating "^18.2.0" as affected because its floor is below the fix would
+// flood the report with repositories that are probably already patched.
+func TestRangeBelowTheFixIsUndecided(t *testing.T) {
+	if _, decided := Below("^18.2.0", "18.3.0"); decided {
+		t.Fatal("a caret range below the fix cannot be decided")
+	}
+	if _, decided := Below("~2.14.0", "2.17.1"); decided {
+		t.Fatal("a tilde range below the fix cannot be decided")
+	}
+	if _, decided := Below(">=2.14.1", "2.17.1"); decided {
+		t.Fatal("an open lower bound below the fix cannot be decided")
+	}
+	// Above or at the fix a range is safe: it cannot resolve downwards.
+	if affected, decided := Below("^18.4.0", "18.3.0"); !decided || affected {
+		t.Fatalf("affected=%v decided=%v", affected, decided)
+	}
+	// An exact pin is decided in both directions.
+	if affected, decided := Below("2.14.1", "2.17.1"); !decided || !affected {
+		t.Fatalf("an exact pin below the fix is affected: %v %v", affected, decided)
+	}
+	if affected, decided := Below("==4.2.7", "4.2.8"); !decided || !affected {
+		t.Fatalf("a pinned requirement is exact: %v %v", affected, decided)
+	}
+	if affected, decided := Below("v1.10.0", "1.11.0"); !decided || !affected {
+		t.Fatalf("a go version is exact: %v %v", affected, decided)
+	}
+}

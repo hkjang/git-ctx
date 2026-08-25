@@ -289,3 +289,60 @@ func TestFindDependencyUsageTreatsWildcardsLiterally(t *testing.T) {
 		}
 	}
 }
+
+// A repository with a lock file is judged by what its build resolved. Without
+// this the most common npm declaration — a caret range — would leave a
+// perfectly determinable repository sitting in "undecidable" during an advisory.
+func TestResolvedVersionsDecideTheAdvisory(t *testing.T) {
+	db := inventoryFixture(t, "dependency-resolved")
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.DB.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	add := func(repository, version, scope, path string) {
+		exec(`INSERT INTO repository_packages(repository_id,ref_name,ecosystem,name,name_lower,version,scope,manifest_path,commit_id) VALUES(?,'main','npm','react','react',?,?,?,'abc')`,
+			repository, version, scope, path)
+	}
+	// api declares a range and locks a fixed version; worker only declares one.
+	add("api", "^18.2.0", "direct", "web/package.json")
+	add("api", "18.3.1", "resolved", "web/package-lock.json")
+	add("worker", "^18.2.0", "direct", "web/package.json")
+
+	result, err := New(db).FindDependencyUsage(context.Background(), []string{"alice"}, "react", "", "", "18.3.0", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(result.Safe, ",") != "/core/api" {
+		t.Fatalf("the locked repository must be judged from its lock file: safe=%v", result.Safe)
+	}
+	if strings.Join(result.Undecided, ",") != "/core/worker" {
+		t.Fatalf("a repository with only a range stays undecided: %v", result.Undecided)
+	}
+	joined := strings.Join(result.Diagnostics, " ")
+	if !strings.Contains(joined, "락파일에 해석된 버전으로 판정") {
+		t.Fatalf("the lock-file basis must be stated: %v", result.Diagnostics)
+	}
+	// The declaration list still shows the range: that is what a fix edits.
+	var sawRange bool
+	for _, user := range result.Users {
+		if user.LibraryID == "/core/api" && user.Version == "^18.2.0" {
+			sawRange = true
+		}
+	}
+	if !sawRange {
+		t.Fatalf("the declared range must remain visible: %#v", result.Users)
+	}
+
+	// A locked version below the fix makes the repository affected even though
+	// the declared range could have resolved higher.
+	exec(`UPDATE repository_packages SET version='18.2.0' WHERE repository_id='api' AND scope='resolved'`)
+	affected, err := New(db).FindDependencyUsage(context.Background(), []string{"alice"}, "react", "", "", "18.3.0", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(affected.Affected, ",") != "/core/api" {
+		t.Fatalf("a locked affected version must win over the range: %#v", affected)
+	}
+}

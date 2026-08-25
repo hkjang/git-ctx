@@ -35,6 +35,24 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-25 v0.52.4 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./...                 PASS
+go vet ./... && go build ./...               PASS
+락파일 파서(7종)·중첩 사본 보존 시험           PASS
+락파일 우선 판정·범위 방향 회귀 시험           PASS
+사용자·관리자 UI JavaScript parse·계약 시험    PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.52.4 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.52.4 빌드      PASS
+```
+
+이번 검증에는 락파일 기반 판정이 포함된다. 락파일이 있는 저장소는 해석된 버전으로
+판정하고, 범위는 위로만 해석되므로 하한이 수정 버전 미만이면 판정 불가, 이상이면
+안전으로 처리한다. 정확히 고정된 버전만 영향으로 보고하는 것을 회귀 시험으로
+고정했다.
+
 2026-08-25 v0.52.3 릴리스 전 검증 결과:
 
 ```text

@@ -468,6 +468,9 @@ VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET comm
 		if _, isManifest := manifest.Recognize(file.Path); isManifest {
 			manifests[filepath.ToSlash(file.Path)] = safeContent
 		}
+		if _, isLock := manifest.RecognizeLock(file.Path); isLock {
+			manifests[filepath.ToSlash(file.Path)] = safeContent
+		}
 		contentLines := strings.Split(strings.ReplaceAll(safeContent, "\r\n", "\n"), "\n")
 		for _, symbol := range codeintel.Extract(file.Path, safeContent) {
 			symbolID := hash(repoID + "\x00" + ref.Name + "\x00" + file.Path + "\x00" + symbol.QualifiedName + "\x00" + fmt.Sprint(symbol.LineStart))
@@ -528,10 +531,17 @@ VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET comm
 		if _, already := manifests[path]; already {
 			continue
 		}
-		if _, isManifest := manifest.Recognize(path); !isManifest {
+		_, isManifest := manifest.Recognize(path)
+		_, isLock := manifest.RecognizeLock(path)
+		if !isManifest && !isLock {
 			continue
 		}
-		if file.Size > manifest.MaxManifestBytes {
+		limit := int64(manifest.MaxManifestBytes)
+		if isLock {
+			// A lock file is large by nature; it is read up to its own bound.
+			limit = manifest.MaxLockBytes
+		}
+		if file.Size > limit {
 			continue
 		}
 		raw, readErr := adapter.GetFile(ctx, repo, snapshotRef, file.Path)
@@ -548,7 +558,7 @@ VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET comm
 	packages := collectPackages(manifests)
 	for _, item := range packages {
 		if _, err = i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_packages_staging(generation_id,repository_id,ref_name,ecosystem,name,name_lower,version,scope,manifest_path,commit_id) VALUES(?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(generation_id,repository_id,ref_name,ecosystem,name,manifest_path) DO UPDATE SET version=excluded.version,scope=excluded.scope`),
+ON CONFLICT(generation_id,repository_id,ref_name,ecosystem,name,version,manifest_path) DO UPDATE SET scope=excluded.scope`),
 			generationID, repoID, ref.Name, item.Ecosystem, item.Name, strings.ToLower(item.Name), item.Version, item.Scope, item.ManifestPath, ref.LatestCommit); err != nil {
 			return fail(err)
 		}
@@ -658,7 +668,9 @@ FROM code_dependencies_staging WHERE generation_id=?`), generationID); err != ni
 		}
 		// A manifest deleted by this commit leaves the inventory with it.
 		for path := range removedPaths {
-			if _, isManifest := manifest.Recognize(path); !isManifest {
+			_, isManifest := manifest.Recognize(path)
+			_, isLock := manifest.RecognizeLock(path)
+			if !isManifest && !isLock {
 				continue
 			}
 			if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM repository_packages WHERE repository_id=? AND ref_name=? AND manifest_path=?`), repoID, ref.Name, path); err != nil {
@@ -901,7 +913,12 @@ func collectPackages(manifests map[string]string) []inventoryPackage {
 	sort.Strings(paths)
 	var out []inventoryPackage
 	for _, path := range paths {
-		for _, item := range manifest.Parse(path, manifests[path]) {
+		// A manifest states intent and a lock file states the resolved result.
+		// Both are recorded: the first is what a team edits, the second is what
+		// an advisory can actually judge.
+		declared := manifest.Parse(path, manifests[path])
+		declared = append(declared, manifest.ParseLock(path, manifests[path])...)
+		for _, item := range declared {
 			if strings.TrimSpace(item.Name) == "" {
 				continue
 			}
