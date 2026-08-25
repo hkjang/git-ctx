@@ -1267,3 +1267,228 @@ func newFakeJira() *httptest.Server {
 		}
 	}))
 }
+
+// OpenSearch is the last optional backend whose whole path was never run: the
+// indexer projects each finished ref into it, and searches read candidates back
+// from it. A projection that silently stops leaves the index believing it is
+// current while the cluster answers from content that no longer exists — the
+// kind of divergence that only shows as a stale hit weeks later.
+func TestOpenSearchProjectionChainIntegration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("the platform chain waits on the background worker")
+	}
+	ctx := context.Background()
+
+	cluster := newFakeOpenSearch()
+	defer cluster.Close()
+	repository := &fakeRepository{commit: "os-1", files: map[string]string{
+		"README.md":  "# Payments\n\n정산 서비스.\n",
+		"service.go": "package main\n\nfunc settleInvoice() error { return nil }\n",
+		"legacy.go":  "package main\n\nfunc removedLater() {}\n",
+	}}
+	source := newFakeGitLabRepository(repository, nil)
+	defer source.Close()
+
+	directory := t.TempDir()
+	a, err := New(ctx, config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(directory, "opensearch.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
+		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer bootstrap")
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+	if saved := call(http.MethodPut, "/api/v1/admin/settings/gitlab",
+		fmt.Sprintf(`{"baseUrl":%q,"token":"t","webhookSecret":"s3cret"}`, source.URL)); saved.Code != http.StatusOK {
+		t.Fatalf("gitlab settings status=%d body=%s", saved.Code, saved.Body.String())
+	}
+	if saved := call(http.MethodPut, "/api/v1/admin/settings/opensearch",
+		fmt.Sprintf(`{"enabled":true,"baseUrl":%q,"index":"git-ctx-chunks","authType":"none","timeoutSeconds":10}`, cluster.URL)); saved.Code != http.StatusOK {
+		t.Fatalf("opensearch settings status=%d body=%s", saved.Code, saved.Body.String())
+	}
+
+	registered := call(http.MethodPost, "/api/v1/admin/repositories",
+		`{"sourceType":"gitlab","repository":{"id":4242,"projectKey":"core","slug":"api","name":"api","description":"payment api","defaultBranch":"main"}}`)
+	if registered.Code != http.StatusCreated {
+		t.Fatalf("register status=%d body=%s", registered.Code, registered.Body.String())
+	}
+	var target struct{ ID, LibraryID string }
+	if err = json.Unmarshal(registered.Body.Bytes(), &target); err != nil {
+		t.Fatal(err)
+	}
+
+	// Every indexed chunk is projected, and the projection is recorded so a
+	// later run knows it does not have to repeat itself.
+	waitFor(t, 60*time.Second, "the ref to be projected", func() bool {
+		return cluster.documents(target.ID) >= 3
+	})
+	waitFor(t, 30*time.Second, "the projection to be recorded", func() bool {
+		var projected int
+		_ = a.store.DB.QueryRow(`SELECT COUNT(*) FROM search_projection_states WHERE repository_id=?`, target.ID).Scan(&projected)
+		return projected > 0
+	})
+	if cluster.indexCreated() == 0 {
+		t.Fatal("the index was never created")
+	}
+
+	// A push removes a file. The projection has to follow, or the cluster keeps
+	// answering with a file the repository no longer has.
+	repository.push("os-2", map[string]string{
+		"service.go": "package main\n\nfunc settleRefund() error { return nil }\n",
+	}, []string{"legacy.go"})
+	hook := httptest.NewRequest(http.MethodPost, "/webhooks/gitlab",
+		strings.NewReader(`{"project":{"id":4242},"ref":"refs/heads/main"}`))
+	hook.Header.Set("Content-Type", "application/json")
+	hook.Header.Set("X-Gitlab-Token", "s3cret")
+	hook.Header.Set("X-Gitlab-Event", "Push Hook")
+	hook.Header.Set("X-Gitlab-Event-UUID", "os-push-1")
+	accepted := httptest.NewRecorder()
+	a.Handler().ServeHTTP(accepted, hook)
+	if accepted.Code != http.StatusAccepted {
+		t.Fatalf("webhook status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+	waitFor(t, 60*time.Second, "the deleted file to leave the projection", func() bool {
+		return !cluster.hasPath("legacy.go") && cluster.hasContent("settleRefund")
+	})
+	if cluster.hasContent("removedLater") {
+		t.Fatal("the projection kept the content of a deleted file")
+	}
+}
+
+// newFakeOpenSearch keeps the documents the platform pushes so the test can ask
+// what the cluster would answer with.
+func newFakeOpenSearch() *fakeCluster {
+	cluster := &fakeCluster{documents_: map[string]map[string]any{}}
+	cluster.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		path := r.URL.EscapedPath()
+		switch {
+		case path == "/" || path == "":
+			_, _ = io.WriteString(w, `{"version":{"number":"2.13.0","distribution":"opensearch"}}`)
+		case r.Method == http.MethodHead:
+			cluster.mu.Lock()
+			exists := cluster.created > 0
+			cluster.mu.Unlock()
+			if !exists {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPut:
+			cluster.mu.Lock()
+			cluster.created++
+			cluster.mu.Unlock()
+			_, _ = io.WriteString(w, `{"acknowledged":true}`)
+		case strings.HasSuffix(path, "/_bulk"):
+			body, _ := io.ReadAll(r.Body)
+			cluster.applyBulk(string(body))
+			_, _ = io.WriteString(w, `{"errors":false,"items":[]}`)
+		case strings.HasSuffix(path, "/_delete_by_query"):
+			body, _ := io.ReadAll(r.Body)
+			cluster.deleteByQuery(string(body))
+			_, _ = io.WriteString(w, `{"deleted":0}`)
+		case strings.HasSuffix(path, "/_search"):
+			_, _ = io.WriteString(w, `{"hits":{"hits":[]}}`)
+		default:
+			_, _ = io.WriteString(w, `{"acknowledged":true}`)
+		}
+	}))
+	return cluster
+}
+
+type fakeCluster struct {
+	*httptest.Server
+	mu         sync.Mutex
+	created    int
+	documents_ map[string]map[string]any
+}
+
+// applyBulk reads the ndjson the platform sends: an action line followed, for
+// an index action, by the document itself.
+func (c *fakeCluster) applyBulk(body string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	lines := strings.Split(strings.TrimSpace(body), "\n")
+	for index := 0; index < len(lines); index++ {
+		var action map[string]map[string]any
+		if json.Unmarshal([]byte(lines[index]), &action) != nil {
+			continue
+		}
+		if meta, ok := action["delete"]; ok {
+			id, _ := meta["_id"].(string)
+			delete(c.documents_, id)
+			continue
+		}
+		meta, ok := action["index"]
+		if !ok || index+1 >= len(lines) {
+			continue
+		}
+		id, _ := meta["_id"].(string)
+		var document map[string]any
+		if json.Unmarshal([]byte(lines[index+1]), &document) == nil {
+			c.documents_[id] = document
+		}
+		index++
+	}
+}
+
+func (c *fakeCluster) deleteByQuery(body string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for id, document := range c.documents_ {
+		repository, _ := document["repository_id"].(string)
+		if repository != "" && strings.Contains(body, repository) {
+			delete(c.documents_, id)
+		}
+	}
+}
+
+func (c *fakeCluster) documents(repositoryID string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	count := 0
+	for _, document := range c.documents_ {
+		if value, _ := document["repository_id"].(string); value == repositoryID {
+			count++
+		}
+	}
+	return count
+}
+
+func (c *fakeCluster) indexCreated() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.created
+}
+
+func (c *fakeCluster) hasPath(path string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, document := range c.documents_ {
+		if value, _ := document["file_path"].(string); value == path {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *fakeCluster) hasContent(fragment string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, document := range c.documents_ {
+		if value, _ := document["content"].(string); strings.Contains(value, fragment) {
+			return true
+		}
+	}
+	return false
+}
