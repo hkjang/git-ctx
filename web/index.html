@@ -686,6 +686,18 @@
             </div>
             <div id="index-queue" class="notice"></div>
             <div id="index-diagnostics" class="table-wrap"></div>
+            <div class="section-title">
+              <div><h3>의존성 인벤토리</h3><p>매니페스트에서 만든 카탈로그 전체 목록입니다. 저장소마다 버전이 갈린 패키지를 먼저 보여 줍니다.</p></div>
+              <div class="button-row">
+                <label class="inline-field">생태계<select id="inventory-ecosystem">
+                    <option value="">전체</option><option value="go">go</option><option value="npm">npm</option>
+                    <option value="maven">maven</option><option value="gradle">gradle</option><option value="pypi">pypi</option><option value="cargo">cargo</option>
+                  </select></label>
+                <button id="refresh-inventory" class="secondary" type="button">인벤토리 새로고침</button>
+              </div>
+            </div>
+            <div id="inventory-coverage" class="notice"></div>
+            <div id="dependency-inventory" class="table-wrap"></div>
             <h3>최신성 SLO</h3>
             <div id="freshness" class="table-wrap"></div>
             <h3>등록 저장소</h3>

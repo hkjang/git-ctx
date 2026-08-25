@@ -186,3 +186,81 @@ func TestFindDependencyUsageJudgesAgainstTheFix(t *testing.T) {
 		t.Fatalf("no advisory was asked for: %#v", plain)
 	}
 }
+
+// Standardisation starts from the list, not from a name you already suspect.
+// The ordering has to put drift first, and the coverage ratio has to be stated:
+// a short list from a mostly unindexed catalogue is not "we use very little".
+func TestDependencyInventorySummaryRanksDriftAndStatesCoverage(t *testing.T) {
+	db := inventoryFixture(t, "dependency-summary")
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.DB.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	// A package used widely but consistently must rank below the drifting one.
+	for _, repository := range []string{"api", "worker", "console"} {
+		exec(`INSERT INTO repository_packages(repository_id,ref_name,ecosystem,name,name_lower,version,scope,manifest_path,commit_id) VALUES(?,'main','npm','react','react','18.2.0','direct','web/package.json','abc')`, repository)
+	}
+	result, err := New(db).DependencyInventorySummary(context.Background(), []string{"alice"}, "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Packages) == 0 {
+		t.Fatal("summary is empty")
+	}
+	first := result.Packages[0]
+	if first.Name != "org.apache.logging.log4j:log4j-core" || len(first.Versions) != 2 {
+		t.Fatalf("drift must lead: %#v", result.Packages[:min(3, len(result.Packages))])
+	}
+	var react DependencySummaryEntry
+	for _, entry := range result.Packages {
+		if entry.Name == "react" {
+			react = entry
+		}
+	}
+	if react.Repositories != 3 || len(react.Versions) != 1 {
+		t.Fatalf("react=%#v", react)
+	}
+	if result.DriftPackage < 1 {
+		t.Fatalf("drift count=%d", result.DriftPackage)
+	}
+	// The fixture gives alice three readable repositories, all of which have
+	// packages; the fourth is another principal's and must not be counted.
+	if result.Total != 3 || result.Covered != 3 {
+		t.Fatalf("coverage=%d/%d", result.Covered, result.Total)
+	}
+	joined := strings.Join(result.Diagnostics, " ")
+	if !strings.Contains(joined, "표준화 대상") {
+		t.Fatalf("diagnostics=%v", result.Diagnostics)
+	}
+
+	// A repository with no manifest indexed lowers coverage, and that must be
+	// said rather than left for the reader to assume.
+	exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('fresh','core','fresh','fresh','gitlab','9','/core/fresh','main')`)
+	exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('fresh','alice','read')`)
+	partial, err := New(db).DependencyInventorySummary(context.Background(), []string{"alice"}, "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if partial.Total != 4 || partial.Covered != 3 {
+		t.Fatalf("coverage=%d/%d", partial.Covered, partial.Total)
+	}
+	if !strings.Contains(strings.Join(partial.Diagnostics, " "), "대변하지 않습니다") {
+		t.Fatalf("partial coverage must be stated: %v", partial.Diagnostics)
+	}
+
+	// The ecosystem filter narrows both the packages and the breakdown.
+	npm, err := New(db).DependencyInventorySummary(context.Background(), []string{"alice"}, "npm", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range npm.Packages {
+		if entry.Ecosystem != "npm" {
+			t.Fatalf("filter leaked %#v", entry)
+		}
+	}
+	if len(npm.Ecosystems) != 1 || npm.Ecosystems[0].Ecosystem != "npm" {
+		t.Fatalf("ecosystems=%#v", npm.Ecosystems)
+	}
+}

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"strconv"
+
 	"git-ctx/internal/auth"
 	"git-ctx/internal/backup"
 	"git-ctx/internal/embedding"
@@ -796,6 +798,24 @@ func indexState(chunks int, status, message string, files int, startedAt sql.Nul
 	default:
 		return "indexed", fmt.Sprintf("청크 %d개가 검색 가능합니다.", chunks), ""
 	}
+}
+
+// dependencyInventory is the catalogue-wide view of what the estate depends on.
+// It is scoped to the caller's own ACL like every other search, so an operator
+// without repository access does not learn the inventory of repositories they
+// cannot read.
+func (a *App) dependencyInventory(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	limit := 50
+	if value, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && value > 0 {
+		limit = value
+	}
+	result, err := a.search.DependencyInventorySummary(r.Context(), searchPrincipals(p), r.URL.Query().Get("ecosystem"), limit)
+	if err != nil {
+		problem(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	jsonOut(w, http.StatusOK, result)
 }
 
 func (a *App) adminFreshness(w http.ResponseWriter, r *http.Request) {

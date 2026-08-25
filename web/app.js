@@ -3303,6 +3303,9 @@ function setupOps(capabilities) {
   refreshBackups(capabilities);
   setupIndexPolicyDialog();
   $("#refresh-index-diagnostics").onclick = () => refreshIndexDiagnostics(capabilities);
+  $("#refresh-inventory").onclick = () => refreshDependencyInventory(capabilities);
+  $("#inventory-ecosystem").onchange = () => refreshDependencyInventory(capabilities);
+  refreshDependencyInventory(capabilities);
   $("#refresh-source-health").onclick = () => refreshSourceHealth(capabilities);
   refreshSourceHealth(capabilities);
   $("#refresh-setup-status").onclick = refreshSetupStatus;
@@ -4192,6 +4195,43 @@ async function refreshSourceHealth(capabilities = activeCapabilities) {
     );
   } catch (error) {
     target.innerHTML = `<div class="notice error">${esc(error.message)}</div>`;
+  }
+}
+
+// refreshDependencyInventory 는 카탈로그 전체가 무엇에 의존하는지 보여 줍니다.
+// 커버리지를 함께 표시하는 것이 핵심입니다. 색인이 일부만 된 상태의 짧은 목록을
+// "우리는 별로 안 쓴다" 로 읽으면 표준화 판단이 통째로 틀립니다.
+async function refreshDependencyInventory(capabilities = activeCapabilities) {
+  if (!capabilities.source) return;
+  const target = $("#dependency-inventory");
+  const coverage = $("#inventory-coverage");
+  try {
+    const ecosystem = $("#inventory-ecosystem").value;
+    const result = (await api(`/api/v1/admin/dependency-inventory?limit=60${ecosystem ? `&ecosystem=${encodeURIComponent(ecosystem)}` : ""}`)) || {};
+    const packages = rows(result.Packages);
+    const ecosystems = rows(result.Ecosystems).map((item) => `${item.Ecosystem} ${item.Packages}종`).join(" · ");
+    const complete = result.Total > 0 && result.Covered === result.Total;
+    coverage.className = `notice ${complete ? "ok" : "warn"}`;
+    coverage.textContent =
+      `매니페스트 색인 저장소 ${result.Covered}/${result.Total} · 버전이 갈린 패키지 ${result.DriftPackage || 0}개` +
+      (ecosystems ? ` · ${ecosystems}` : "") +
+      (complete ? "" : " · 색인되지 않은 저장소는 이 목록에 없습니다");
+    target.innerHTML = packages.length
+      ? `<table><thead><tr><th>패키지</th><th>생태계</th><th>저장소</th><th>버전</th><th>분포</th></tr></thead><tbody>${packages
+          .map((item) => {
+            const versions = rows(item.Versions);
+            const drift = versions.length > 1;
+            return `<tr><td><code>${esc(item.Name)}</code></td><td>${esc(item.Ecosystem)}</td><td>${item.Repositories}</td>
+<td>${drift ? `<strong>${versions.length}종</strong>` : "1종"}</td>
+<td>${versions.map((version) => `${esc(version.Version)} <small>(${version.Repositories.length})</small>`).join(" · ")}</td></tr>`;
+          })
+          .join("")}</tbody></table>`
+      : '<p class="field-help">색인된 의존성이 없습니다. 저장소를 재색인하면 매니페스트에서 인벤토리를 만듭니다.</p>';
+    markEmptyTables();
+  } catch (error) {
+    coverage.className = "notice error";
+    coverage.textContent = error.message;
+    target.innerHTML = "";
   }
 }
 

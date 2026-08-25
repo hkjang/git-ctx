@@ -317,3 +317,178 @@ func plural(count int) string {
 	}
 	return "ies"
 }
+
+// DependencySummaryEntry is one package as the whole catalogue uses it.
+type DependencySummaryEntry struct {
+	Ecosystem string
+	Name      string
+	// Repositories is how many accessible repositories declare it, which is the
+	// unit a standardisation decision is made in.
+	Repositories int
+	// Versions lists the distinct declared versions, most used first. More than
+	// one is drift: the same library at different versions across the estate.
+	Versions []DependencyVersion
+}
+
+// DependencyInventory is the catalogue-wide view.
+type DependencyInventory struct {
+	Ecosystems []DependencyEcosystemCount
+	Packages   []DependencySummaryEntry
+	// Covered and Total say how much of the catalogue the inventory speaks for.
+	// Without them a short list reads as "we use very little", when it may only
+	// mean most repositories have not been indexed since the feature existed.
+	Covered      int
+	Total        int
+	Diagnostics  []string
+	DriftPackage int
+}
+
+// DependencyEcosystemCount is the package-manager breakdown.
+type DependencyEcosystemCount struct {
+	Ecosystem string
+	Packages  int
+}
+
+// inventorySummaryScan bounds the aggregate. A catalogue of thousands of
+// repositories has tens of thousands of declarations, and the screen shows the
+// head of the distribution.
+const inventorySummaryScan = 20000
+
+// DependencyInventorySummary answers the question the per-package tool cannot:
+// what does this organisation actually depend on, and where has it drifted?
+//
+// find-dependency-usage needs a package name, so it can only confirm a suspicion.
+// Standardisation starts from the opposite end — the list itself — and the number
+// that makes it actionable is how many distinct versions of one library the
+// estate carries.
+func (s *Service) DependencyInventorySummary(ctx context.Context, principals []string, ecosystem string, limit int) (DependencyInventory, error) {
+	if limit < 1 || limit > 200 {
+		limit = 50
+	}
+	result := DependencyInventory{Ecosystems: []DependencyEcosystemCount{}, Packages: []DependencySummaryEntry{}}
+	if len(principals) == 0 {
+		result.Diagnostics = append(result.Diagnostics, "acl: no source principal is mapped to this account, so no repository can be authorized.")
+		return result, nil
+	}
+	join, predicate, aclArgs := repositoryACL(principals)
+	// Coverage is counted over the same ACL scope as the inventory itself, so the
+	// ratio describes what this caller can see rather than the whole catalogue.
+	coverage := `SELECT COUNT(DISTINCT r.id),
+COUNT(DISTINCT CASE WHEN EXISTS (SELECT 1 FROM repository_packages pk WHERE pk.repository_id=r.id) THEN r.id END)
+FROM repositories r ` + join + `
+WHERE r.enabled=1 AND ` + predicate
+	if err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(coverage), aclArgs...).Scan(&result.Total, &result.Covered); err != nil {
+		return DependencyInventory{}, err
+	}
+
+	args := append([]any(nil), aclArgs...)
+	statement := `SELECT pkg.ecosystem,pkg.name,pkg.version,r.library_id
+FROM repository_packages pkg JOIN repositories r ON r.id=pkg.repository_id ` + join + `
+WHERE r.enabled=1 AND ` + predicate
+	if ecosystem != "" {
+		statement += ` AND pkg.ecosystem=?`
+		args = append(args, ecosystem)
+	}
+	statement += ` LIMIT ?`
+	args = append(args, inventorySummaryScan)
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
+	if err != nil {
+		return DependencyInventory{}, err
+	}
+	defer rows.Close()
+	type aggregate struct {
+		ecosystem, name string
+		repositories    map[string]bool
+		versions        map[string]map[string]bool
+	}
+	packages := map[string]*aggregate{}
+	ecosystems := map[string]map[string]bool{}
+	scanned := 0
+	for rows.Next() {
+		var eco, name, version, library string
+		if err = rows.Scan(&eco, &name, &version, &library); err != nil {
+			return DependencyInventory{}, err
+		}
+		scanned++
+		key := eco + "\x00" + name
+		entry := packages[key]
+		if entry == nil {
+			entry = &aggregate{ecosystem: eco, name: name, repositories: map[string]bool{}, versions: map[string]map[string]bool{}}
+			packages[key] = entry
+		}
+		entry.repositories[library] = true
+		declared := version
+		if strings.TrimSpace(declared) == "" {
+			declared = "(선언 없음)"
+		}
+		if entry.versions[declared] == nil {
+			entry.versions[declared] = map[string]bool{}
+		}
+		entry.versions[declared][library] = true
+		if ecosystems[eco] == nil {
+			ecosystems[eco] = map[string]bool{}
+		}
+		ecosystems[eco][name] = true
+	}
+	if err = rows.Err(); err != nil {
+		return DependencyInventory{}, err
+	}
+	for eco, names := range ecosystems {
+		result.Ecosystems = append(result.Ecosystems, DependencyEcosystemCount{Ecosystem: eco, Packages: len(names)})
+	}
+	sort.SliceStable(result.Ecosystems, func(i, j int) bool {
+		return result.Ecosystems[i].Packages > result.Ecosystems[j].Packages
+	})
+	for _, entry := range packages {
+		summary := DependencySummaryEntry{Ecosystem: entry.ecosystem, Name: entry.name, Repositories: len(entry.repositories)}
+		for version, libraries := range entry.versions {
+			summary.Versions = append(summary.Versions, DependencyVersion{Version: version, Repositories: sortedLibraries(libraries)})
+		}
+		sort.SliceStable(summary.Versions, func(i, j int) bool {
+			if len(summary.Versions[i].Repositories) != len(summary.Versions[j].Repositories) {
+				return len(summary.Versions[i].Repositories) > len(summary.Versions[j].Repositories)
+			}
+			return summary.Versions[i].Version > summary.Versions[j].Version
+		})
+		if len(summary.Versions) > 1 {
+			result.DriftPackage++
+		}
+		result.Packages = append(result.Packages, summary)
+	}
+	// Drift first, then reach: a library used everywhere at one version needs no
+	// decision, while one used in five repositories at four versions does.
+	sort.SliceStable(result.Packages, func(i, j int) bool {
+		left, right := result.Packages[i], result.Packages[j]
+		if (len(left.Versions) > 1) != (len(right.Versions) > 1) {
+			return len(left.Versions) > 1
+		}
+		if len(left.Versions) != len(right.Versions) {
+			return len(left.Versions) > len(right.Versions)
+		}
+		if left.Repositories != right.Repositories {
+			return left.Repositories > right.Repositories
+		}
+		return left.Name < right.Name
+	})
+	if len(result.Packages) > limit {
+		result.Packages = result.Packages[:limit]
+	}
+	if result.Total > 0 && result.Covered < result.Total {
+		result.Diagnostics = append(result.Diagnostics,
+			fmt.Sprintf("coverage: 접근 가능한 저장소 %d개 중 %d개만 의존성 매니페스트가 색인되어 있습니다. 이 목록은 나머지 저장소를 대변하지 않습니다.",
+				result.Total, result.Covered))
+	}
+	if result.Covered == 0 {
+		result.Diagnostics = append(result.Diagnostics,
+			"coverage: 아직 어떤 저장소도 매니페스트가 색인되지 않았습니다. 재색인 후 다시 확인하세요.")
+	}
+	if scanned >= inventorySummaryScan {
+		result.Diagnostics = append(result.Diagnostics,
+			fmt.Sprintf("inventory: 선언 %d건까지만 집계했습니다. 생태계 필터로 범위를 좁히세요.", inventorySummaryScan))
+	}
+	if result.DriftPackage > 0 {
+		result.Diagnostics = append(result.Diagnostics,
+			fmt.Sprintf("drift: %d개 패키지가 저장소마다 다른 버전으로 선언되어 있습니다. 표준화 대상입니다.", result.DriftPackage))
+	}
+	return result, nil
+}
