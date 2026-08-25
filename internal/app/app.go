@@ -418,6 +418,8 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/admin/vector/rebuild", a.authorize(http.HandlerFunc(a.vectorRebuild), "search-admin"))
 	a.mux.Handle("GET /api/v1/admin/index-diagnostics", a.authorize(http.HandlerFunc(a.indexDiagnostics), "source-admin", "readonly-operator"))
 	a.mux.Handle("GET /api/v1/admin/freshness", a.authorize(http.HandlerFunc(a.adminFreshness), "source-admin", "readonly-operator"))
+	a.mux.Handle("GET /api/v1/admin/webhook-events", a.authorize(http.HandlerFunc(a.webhookEvents), "source-admin", "readonly-operator"))
+	a.mux.Handle("GET /api/v1/admin/dependency-inventory", a.authorize(http.HandlerFunc(a.dependencyInventory), "source-admin", "search-admin", "readonly-operator"))
 	a.mux.Handle("GET /api/v1/admin/database/status", a.authorize(http.HandlerFunc(a.adminDatabaseStatus), "readonly-operator"))
 	a.mux.Handle("POST /api/v1/admin/database/test", a.admin(http.HandlerFunc(a.testDatabaseTarget)))
 	a.mux.Handle("POST /api/v1/admin/database/migrate", a.admin(http.HandlerFunc(a.migrateDatabaseTarget)))

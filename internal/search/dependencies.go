@@ -477,7 +477,7 @@ WHERE r.enabled=1 AND ` + predicate
 	}
 
 	args := append([]any(nil), aclArgs...)
-	statement := `SELECT pkg.ecosystem,pkg.name,pkg.version,r.library_id
+	statement := `SELECT pkg.ecosystem,pkg.name,pkg.version,pkg.scope,r.library_id
 FROM repository_packages pkg JOIN repositories r ON r.id=pkg.repository_id ` + join + `
 WHERE r.enabled=1 AND ` + predicate
 	if ecosystem != "" {
@@ -491,24 +491,34 @@ WHERE r.enabled=1 AND ` + predicate
 		return DependencyInventory{}, err
 	}
 	defer rows.Close()
+	// A declaration and the lock file that resolves it are the same dependency,
+	// so the rows are kept per repository until every row is read and only then
+	// reduced: counting "^18.2.0" and the "18.3.1" its lock file pins as two
+	// versions would report drift inside a single repository, which is the one
+	// place drift cannot exist.
+	type declaration struct {
+		library, version string
+		resolved         bool
+	}
 	type aggregate struct {
 		ecosystem, name string
 		repositories    map[string]bool
-		versions        map[string]map[string]bool
+		declarations    []declaration
+		resolvedLibs    map[string]bool
 	}
 	packages := map[string]*aggregate{}
 	ecosystems := map[string]map[string]bool{}
 	scanned := 0
 	for rows.Next() {
-		var eco, name, version, library string
-		if err = rows.Scan(&eco, &name, &version, &library); err != nil {
+		var eco, name, version, scope, library string
+		if err = rows.Scan(&eco, &name, &version, &scope, &library); err != nil {
 			return DependencyInventory{}, err
 		}
 		scanned++
 		key := eco + "\x00" + name
 		entry := packages[key]
 		if entry == nil {
-			entry = &aggregate{ecosystem: eco, name: name, repositories: map[string]bool{}, versions: map[string]map[string]bool{}}
+			entry = &aggregate{ecosystem: eco, name: name, repositories: map[string]bool{}, resolvedLibs: map[string]bool{}}
 			packages[key] = entry
 		}
 		entry.repositories[library] = true
@@ -516,10 +526,11 @@ WHERE r.enabled=1 AND ` + predicate
 		if strings.TrimSpace(declared) == "" {
 			declared = "(선언 없음)"
 		}
-		if entry.versions[declared] == nil {
-			entry.versions[declared] = map[string]bool{}
+		resolved := scope == "resolved"
+		if resolved {
+			entry.resolvedLibs[library] = true
 		}
-		entry.versions[declared][library] = true
+		entry.declarations = append(entry.declarations, declaration{library: library, version: declared, resolved: resolved})
 		if ecosystems[eco] == nil {
 			ecosystems[eco] = map[string]bool{}
 		}
@@ -527,6 +538,12 @@ WHERE r.enabled=1 AND ` + predicate
 	}
 	if err = rows.Err(); err != nil {
 		return DependencyInventory{}, err
+	}
+	lockedRepositories := map[string]bool{}
+	for _, entry := range packages {
+		for library := range entry.resolvedLibs {
+			lockedRepositories[library] = true
+		}
 	}
 	for eco, names := range ecosystems {
 		result.Ecosystems = append(result.Ecosystems, DependencyEcosystemCount{Ecosystem: eco, Packages: len(names)})
@@ -536,7 +553,17 @@ WHERE r.enabled=1 AND ` + predicate
 	})
 	for _, entry := range packages {
 		summary := DependencySummaryEntry{Ecosystem: entry.ecosystem, Name: entry.name, Repositories: len(entry.repositories)}
-		for version, libraries := range entry.versions {
+		versions := map[string]map[string]bool{}
+		for _, item := range entry.declarations {
+			if entry.resolvedLibs[item.library] && !item.resolved {
+				continue
+			}
+			if versions[item.version] == nil {
+				versions[item.version] = map[string]bool{}
+			}
+			versions[item.version][item.library] = true
+		}
+		for version, libraries := range versions {
 			summary.Versions = append(summary.Versions, DependencyVersion{Version: version, Repositories: sortedLibraries(libraries)})
 		}
 		sort.SliceStable(summary.Versions, func(i, j int) bool {
@@ -584,6 +611,10 @@ WHERE r.enabled=1 AND ` + predicate
 	if result.DriftPackage > 0 {
 		result.Diagnostics = append(result.Diagnostics,
 			fmt.Sprintf("drift: %d개 패키지가 저장소마다 다른 버전으로 선언되어 있습니다. 표준화 대상입니다.", result.DriftPackage))
+	}
+	if len(lockedRepositories) > 0 {
+		result.Diagnostics = append(result.Diagnostics,
+			fmt.Sprintf("inventory: %d개 저장소는 락파일에 해석된 버전으로 집계했습니다. 선언된 범위가 아니라 실제 빌드가 쓰는 버전입니다.", len(lockedRepositories)))
 	}
 	return result, nil
 }

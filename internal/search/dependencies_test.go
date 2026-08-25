@@ -387,3 +387,54 @@ func TestFindDependencyUsageStatesIndexAge(t *testing.T) {
 		t.Fatalf("a current index needs no note: %v", fresh.Diagnostics)
 	}
 }
+
+// A range and the lock file that resolves it are one dependency, not two. The
+// catalogue view must not report a single repository as drifting against
+// itself, because "these repositories disagree" is the whole signal an operator
+// standardises on.
+func TestInventorySummaryCountsALockedRangeOnce(t *testing.T) {
+	db := inventoryFixture(t, "dependency-lock-drift")
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.DB.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	add := func(repository, version, scope, path string) {
+		exec(`INSERT INTO repository_packages(repository_id,ref_name,ecosystem,name,name_lower,version,scope,manifest_path,commit_id) VALUES(?,'main','npm','react','react',?,?,?,'abc')`,
+			repository, version, scope, path)
+	}
+	add("api", "^18.2.0", "direct", "web/package.json")
+	add("api", "18.3.1", "resolved", "web/package-lock.json")
+	add("worker", "^18.2.0", "direct", "web/package.json")
+
+	result, err := New(db).DependencyInventorySummary(context.Background(), []string{"alice"}, "npm", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var react DependencySummaryEntry
+	for _, entry := range result.Packages {
+		if entry.Name == "react" {
+			react = entry
+		}
+	}
+	if react.Repositories != 2 {
+		t.Fatalf("react must cover both repositories: %#v", react)
+	}
+	// api is judged by its lock file, worker by its declaration: two versions
+	// across two repositories, not three declarations across one.
+	if len(react.Versions) != 2 {
+		t.Fatalf("a locked range must be counted once: %#v", react.Versions)
+	}
+	for _, version := range react.Versions {
+		if version.Version == "18.3.1" && (len(version.Repositories) != 1 || version.Repositories[0] != "/core/api") {
+			t.Fatalf("the resolved version must belong to its own repository: %#v", version)
+		}
+		if version.Version == "^18.2.0" && (len(version.Repositories) != 1 || version.Repositories[0] != "/core/worker") {
+			t.Fatalf("a locked repository must not appear under the declared range: %#v", version)
+		}
+	}
+	if !strings.Contains(strings.Join(result.Diagnostics, " "), "락파일에 해석된 버전으로 집계") {
+		t.Fatalf("lock-file precedence must be stated: %v", result.Diagnostics)
+	}
+}

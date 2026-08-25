@@ -35,6 +35,25 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-25 v0.53.4 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./...                 PASS
+go vet ./... && go build ./...               PASS
+실제 인스턴스 기동·로그인·엔드포인트 실호출     PASS(라우팅 누락 2건 수정)
+문서화된 엔드포인트 라우팅 시험                PASS
+락파일 우선 집계 시험                          PASS
+사용자·관리자 UI JavaScript parse·계약 시험    PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.53.4 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.53.4 빌드      PASS
+```
+
+이번 검증은 단위 시험만으로는 드러나지 않던 연결 누락을 실제 기동으로 확인했다.
+웹훅 수신 현황과 의존성 인벤토리 API 는 구현·문서·화면이 모두 있었으나 라우터에
+등록되지 않아 항상 404 였다. 정적 화면이 루트에서 서비스되므로 미등록 경로도
+화면 핸들러로 흘러가며, 이를 실패로 판정하는 계약 시험을 함께 넣었다.
+
 2026-08-25 v0.53.3 릴리스 전 검증 결과:
 
 ```text

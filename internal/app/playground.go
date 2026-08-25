@@ -390,7 +390,15 @@ func (a *App) testRepositoryMap(w http.ResponseWriter, r *http.Request) {
 	}
 	var summary any
 	_ = json.Unmarshal([]byte(item.SummaryJSON), &summary)
-	jsonOut(w, 200, map[string]any{"libraryId": item.LibraryID, "ref": item.Ref, "commitId": item.CommitID, "summary": summary, "conventions": item.Conventions})
+	// The stack travels with the map for the MCP tool, so the console playground
+	// shows it too — otherwise an operator checking what an agent will receive
+	// sees less than the agent does.
+	stack := make([]map[string]any, 0, len(item.Stack))
+	for _, entry := range item.Stack {
+		stack = append(stack, map[string]any{"ecosystem": entry.Ecosystem, "name": entry.Name, "version": entry.Version})
+	}
+	jsonOut(w, 200, map[string]any{"libraryId": item.LibraryID, "ref": item.Ref, "commitId": item.CommitID, "summary": summary,
+		"conventions": item.Conventions, "stack": stack, "stackTotal": item.StackTotal})
 }
 func (a *App) testSymbols(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())

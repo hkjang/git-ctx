@@ -2650,3 +2650,69 @@ func TestRetrievalFunnelAggregatesTheStoredCallTrace(t *testing.T) {
 		t.Errorf("the funnel did not reach the response: %s", recorder.Body.String())
 	}
 }
+
+// TestEveryDocumentedEndpointIsRouted closes the gap that let two finished
+// handlers ship unreachable: they were written, documented and called by the
+// console, but never registered on the mux, so every caller got a bare 404.
+// Walking the published contract catches that class before a release does.
+func TestEveryDocumentedEndpointIsRouted(t *testing.T) {
+	spec, err := os.ReadFile(filepath.Join("..", "..", "docs", "openapi.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:documented-routes?mode=memory&cache=shared&_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	var missing []string
+	var path string
+	documented := 0
+	for _, line := range strings.Split(string(spec), "\n") {
+		switch {
+		case strings.HasPrefix(line, "  /"):
+			path = strings.TrimSuffix(strings.TrimSpace(line), ":")
+		case path != "" && strings.HasPrefix(line, "    ") && !strings.HasPrefix(line, "     "):
+			method := strings.ToUpper(strings.TrimSuffix(strings.TrimSpace(line), ":"))
+			switch method {
+			case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
+			default:
+				continue
+			}
+			documented++
+			// A concrete value stands in for every path parameter; the router
+			// only has to resolve the shape, not find the row.
+			concrete := path
+			for strings.Contains(concrete, "{") {
+				open := strings.Index(concrete, "{")
+				close := strings.Index(concrete[open:], "}")
+				if close < 0 {
+					break
+				}
+				concrete = concrete[:open] + "sample" + concrete[open+close+1:]
+			}
+			request := httptest.NewRequest(method, concrete, nil)
+			// The console is served from "/", so an unrouted API path still
+			// resolves — to the static handler. Only a pattern that names the
+			// path itself counts as routed.
+			_, pattern := a.mux.Handler(request)
+			route := pattern
+			if _, rest, ok := strings.Cut(pattern, " "); ok {
+				route = rest
+			}
+			if pattern == "" || route == "/" {
+				missing = append(missing, method+" "+path)
+			}
+		}
+	}
+	if documented < 40 {
+		t.Fatalf("the spec walk found only %d operations, so it is not reading the document", documented)
+	}
+	if len(missing) > 0 {
+		t.Fatalf("documented but unreachable: %v", missing)
+	}
+}
