@@ -174,24 +174,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // serverInstructions is returned by initialize. MCP clients hand it to the
 // model, so it is the one place where tool choice can be taught once instead of
 // being rediscovered in every conversation.
-const serverInstructions = `git-ctx searches internal Bitbucket and GitLab repositories. Every result is filtered by the caller's repository permissions.
+const serverInstructions = `git-ctx searches an organization's own Bitbucket and GitLab repositories, and the Confluence spaces and Jira projects connected alongside them. Every result is filtered by the caller's permissions on the repository or space it came from.
 
 Choosing a tool:
-- Any question about source code, configuration or "where is X": start with search-code. It returns matching repositories AND file contents in one call.
+- Any question about source code, configuration or "where is X": start with search-code. It returns matching repositories AND file contents in one call, and it covers wiki pages and issues too, because those are searched from the same index.
 - When search-code finds nothing because the wording differs from the code: search-semantic matches by meaning across repositories.
 - Looking for a file by name or extension: find-file (Dockerfile, *.tf, **/migrations/*.sql).
 - Need the file itself: read-file, optionally with startLine and endLine.
-- Orienting in an unknown repository: list-directory, then get-repository-map.
+- Orienting in an unknown repository: list-directory, then get-repository-map, which also lists the third-party packages the repository declares.
 - "Why is this like this", "when did this change": get-file-history for commits, search-merge-requests for the reasoning behind them.
 - Exact identifier: find-symbol, then get-symbol-context.
-- Before changing shared code: find-dependents shows every repository that uses it.
-- Third-party library questions ("who uses this package", "which version are we on", an advisory): find-dependency-usage reads the manifests and groups repositories by declared version. find-dependents cannot answer it — an import line has no version and a transitive dependency has no import line.
+- Before changing shared code: find-dependents shows every repository that uses it, and build-context assembles callers, dependencies, tests and history in one call.
+- "Who owns this", "who should review this": find-code-owner answers from the repository's CODEOWNERS declaration when it has one, and ranks recent contributors otherwise.
+- Third-party library questions ("who uses this package", "which version are we on", an advisory): find-dependency-usage reads the manifests and lock files and groups repositories by version. find-dependents cannot answer it — an import line has no version and a transitive dependency has no import line.
 - Documentation for a known library id: query-docs.
 - search-repositories returns repository names only, never file contents.
 
 Reading the results:
 - Search responses end with Notes explaining which path ran, what the ACL filtered and whether a timeout was hit. An empty result with an ACL or indexing note is not proof that the code does not exist.
-- Repositories that are still indexing are answered live from the source code search API and the response says so.
+- The live source search and the local index are both used. A note saying an answer came from the index means it is as recent as the last index run, not as recent as the repository; a note saying the live path was unavailable explains why. Wiki pages and issues are only ever in the index.
+- A note may also say that the reranker or the vector database could not be reached. The answer still stands, but its order or its breadth is not what it would have been.
 - Snippets and files are secret-masked. Cite the Source line, which points at the exact ref and lines.
 - Answers are bounded by a byte budget. A Truncated section states how many results were withheld; narrow the call (libraryId, path, limit, read-file line range) rather than repeating it. Pass maxBytes to ask for a smaller answer.`
 

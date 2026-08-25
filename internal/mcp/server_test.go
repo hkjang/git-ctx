@@ -1018,3 +1018,47 @@ func TestPlatformStatusReportsUndeliveredAlerts(t *testing.T) {
 		t.Fatalf("a dead delivery must say what it means:\n%s", text)
 	}
 }
+
+// The instructions are the first thing every client hands to a model, and they
+// are the only place tool choice is taught. When the platform grew — document
+// sources, ownership from CODEOWNERS, answers served from the index — the text
+// stayed as it was, and an agent reading it would not have known to look. This
+// holds the claims it makes against what the server actually offers.
+func TestServerInstructionsDescribeWhatThisServerDoes(t *testing.T) {
+	// Every tool the instructions name has to exist, or the advice sends an
+	// agent to a tool it cannot call.
+	for _, name := range []string{"search-code", "search-semantic", "find-file", "read-file",
+		"list-directory", "get-repository-map", "get-file-history", "search-merge-requests",
+		"find-symbol", "get-symbol-context", "find-dependents", "build-context", "find-code-owner",
+		"find-dependency-usage", "query-docs", "search-repositories"} {
+		if !strings.Contains(serverInstructions, name) {
+			t.Errorf("the instructions never mention %s", name)
+		}
+		if _, known := lookupTool(name); !known {
+			t.Errorf("the instructions name %s, which is not a registered tool", name)
+		}
+	}
+
+	// The sources that can be connected are all worth naming: an agent told
+	// only about Git repositories will not think to look for a runbook page.
+	for _, subject := range []string{"Bitbucket", "GitLab", "Confluence", "Jira"} {
+		if !strings.Contains(serverInstructions, subject) {
+			t.Errorf("the instructions do not mention %s, which this server indexes", subject)
+		}
+	}
+
+	// The reader has to be able to tell a fresh answer from an index-aged one,
+	// and to know that a degraded component changed the answer rather than
+	// broke it. Those are the notes the server actually emits.
+	for _, claim := range []string{"index", "ACL", "secret-masked", "byte budget", "reranker"} {
+		if !strings.Contains(serverInstructions, claim) {
+			t.Errorf("the instructions never explain %q, which appears in answers", claim)
+		}
+	}
+
+	// It travels in every session, so it has to stay a briefing rather than a
+	// manual.
+	if size := len(serverInstructions); size > 4000 {
+		t.Errorf("the instructions have grown to %d bytes; they are sent to every client", size)
+	}
+}

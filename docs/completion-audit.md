@@ -35,6 +35,22 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.59.2 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./... (FTS5/태그 없음)  PASS
+안내문·도구 등록 일치 시험 신규                PASS
+안내문 길이 상한 시험(2,954/4,000바이트)       PASS
+go vet ./... && go build ./...               PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.59.2 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.59.2 빌드      PASS
+```
+
+이번 릴리스는 MCP 안내문을 실제 동작에 맞췄다. 문서형 소스·소유자 도구·색인 기준
+답변 표시가 빠져 있어, 에이전트가 그 기능들을 찾아볼 근거가 없었다. 안내문이 부르는
+도구가 실제로 등록되어 있는지도 시험으로 붙잡았다.
+
 2026-08-26 v0.59.1 릴리스 전 검증 결과:
 
 ```text
