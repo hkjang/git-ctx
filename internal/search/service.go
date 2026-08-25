@@ -979,15 +979,21 @@ func (s *Service) ExplainSearch(ctx context.Context, principals []string, librar
 	if limit < 1 || limit > 50 {
 		limit = 10
 	}
+	terms := unique(embedding.Tokens(query))
+	// The configuration is read before the cursor is opened, not while it is
+	// held. SQLite is limited to a single connection so a second query issued
+	// with rows still open waits for a connection this goroutine itself is
+	// holding — a stall that ends only when the statement times out. Measured
+	// at 15 seconds per call on a real instance, with the configuration then
+	// silently falling back to defaults.
+	cfg := s.load(ctx)
+	cfg.RetrievalMode = NormalizeRetrievalMode(cfg.RetrievalMode)
 	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(`SELECT file_path,heading,commit_id,line_start,line_end,
 COALESCE(embedding_provider,''),COALESCE(embedding_model,''),COALESCE(embedding_revision,''),content
 FROM document_chunks WHERE repository_id=? AND ref_name=? ORDER BY indexed_at DESC LIMIT 500`), repositoryID, ref)
 	if err != nil {
 		return SearchExplanation{}, err
 	}
-	terms := unique(embedding.Tokens(query))
-	cfg := s.load(ctx)
-	cfg.RetrievalMode = NormalizeRetrievalMode(cfg.RetrievalMode)
 	var hits []ExplainedHit
 	for rows.Next() {
 		var item ExplainedHit
@@ -1565,6 +1571,11 @@ WHERE r.enabled=1 AND ` + predicate
 		result.Files = append(result.Files, item)
 	}
 	if err = rows.Err(); err != nil {
+		return FileSearchResult{}, err
+	}
+	// The remote listing below opens its own cursor and calls the source
+	// servers; this one is released first rather than held across both.
+	if err = rows.Close(); err != nil {
 		return FileSearchResult{}, err
 	}
 	calltrace.From(ctx).Count("index-files", "", statusFor(len(result.Files)), len(result.Files), len(result.Files),
@@ -3984,6 +3995,12 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 			}
 		}
 		hits = append(hits, h)
+	}
+	// Closed before anything below touches the database again — the embedding
+	// and reranker providers both read their settings from the same pool, and
+	// on SQLite that is the only connection.
+	if err = rows.Close(); err != nil {
+		return "", err
 	}
 	avgLength := float64(totalLength) / math.Max(1, float64(len(hits)))
 	var queryVector []float32

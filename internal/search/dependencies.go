@@ -153,6 +153,13 @@ WHERE r.enabled=1 AND ` + predicate + ` AND (pkg.name_lower=LOWER(?) OR pkg.name
 		span.Fail(err)
 		return DependencyUsage{}, err
 	}
+	// Closed here, not by the defer: everything below reads the database again,
+	// and on SQLite's single connection a query issued with this cursor still
+	// open waits for a connection this goroutine is holding.
+	if err = rows.Close(); err != nil {
+		span.Fail(err)
+		return DependencyUsage{}, err
+	}
 	result.Repositories = len(repositories)
 	for version, users := range versions {
 		list := make([]string, 0, len(users))

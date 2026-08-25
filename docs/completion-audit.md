@@ -35,6 +35,24 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.56.3 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./... (FTS5/태그 없음)  PASS
+단일 연결 자기 잠금 회귀 시험                  PASS
+32개 도구 규모 스윕(청크 200,000)              PASS
+커서 보유 중 재질의 지점 전수 조사             PASS(1건 수정, 5건 예방)
+go vet ./... && go build ./...               PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.56.3 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.56.3 빌드      PASS
+```
+
+이번 검증은 규모 스윕에서 explain-search-result 가 호출마다 15초씩 멈추는 것을 찾아
+원인을 goroutine 덤프로 확정했다. SQLite 단일 연결에서 커서를 쥔 채 설정을 다시
+읽어 자기 자신을 기다리고 있었고, 설정 읽기가 실패해 검색 모드 설명도 기본값으로
+대체되고 있었다. 같은 유형을 전수 조사해 벡터 동기화의 연결 점유를 함께 없앴다.
+
 2026-08-26 v0.56.2 릴리스 전 검증 결과:
 
 ```text

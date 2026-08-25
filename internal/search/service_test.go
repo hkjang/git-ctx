@@ -2233,3 +2233,56 @@ func TestSemanticFallbackAndDocsFindTheSameContentThroughEitherPath(t *testing.T
 		t.Fatalf("the lookup leaked past the ACL: %#v", denied.Hits)
 	}
 }
+
+// SQLite is opened with a single connection, so a second query issued while a
+// rows cursor is still open waits for a connection this goroutine is itself
+// holding. It ends only when the statement times out — fifteen seconds per call
+// on a real instance, with the configuration it was trying to read silently
+// falling back to defaults. The store here uses one connection so the stall is
+// reproduced rather than hidden.
+func TestExplainSearchDoesNotQueryWhileHoldingItsCursor(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:explain-single-conn?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	db.DB.SetMaxOpenConns(1)
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.DB.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,enabled) VALUES('gitlab:1','core','api','api','','gitlab','1','/core/api','main',1)`)
+	exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('gitlab:1','alice','read')`)
+	exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('c1','gitlab:1','main','abc','internal/payment.go',1,20,'Payment','code','func retryPayment() error { return nil }','h1')`)
+
+	service := New(db)
+	// A configuration loader that reads the database is what the running server
+	// installs; the default in-memory one would not reproduce the stall.
+	service.SetConfigLoader(func(ctx context.Context) Config {
+		var count int
+		if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM repositories`).Scan(&count); err != nil {
+			t.Errorf("the configuration load was starved of a connection: %v", err)
+		}
+		return Config{KeywordWeight: 1, RetrievalMode: RetrievalKeywordOnly, FinalK: 8, CandidateLimit: 100}
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		explanation, err := service.ExplainSearch(ctx, []string{"alice"}, "/core/api", "main", "payment", 10)
+		if err == nil && len(explanation.Hits) == 0 {
+			err = errors.New("no candidates were explained")
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ExplainSearch stalled: it is querying while its own cursor is open")
+	}
+}

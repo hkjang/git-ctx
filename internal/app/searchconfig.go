@@ -458,57 +458,71 @@ func (a *App) projectVectors(ctx context.Context, repositoryID, ref string) erro
 // streamVectors reads stored embeddings in batches and upserts them, so a full
 // rebuild never loads the whole corpus into memory.
 func (a *App) streamVectors(ctx context.Context, store vectorstore.Store, repositoryID, ref string) (int, error) {
-	statement := `SELECT c.id,c.repository_id,c.ref_name,COALESCE(r.library_id,''),c.file_path,COALESCE(c.embedding_revision,''),c.embedding
+	// Read a page, close the cursor, then send it. Sending while the cursor was
+	// open held the database connection across a network round trip to the
+	// vector store for every batch — and SQLite is opened with a single
+	// connection, so a whole-repository sync blocked every other request for as
+	// long as it ran. Paginating by chunk id keeps the read bounded and the
+	// connection free while the batch is in flight.
+	const page = 500
+	after := ""
+	total := 0
+	for {
+		statement := `SELECT c.id,c.repository_id,c.ref_name,COALESCE(r.library_id,''),c.file_path,COALESCE(c.embedding_revision,''),c.embedding
 FROM document_chunks c LEFT JOIN repositories r ON r.id=c.repository_id
 WHERE c.embedding IS NOT NULL`
-	var args []any
-	if repositoryID != "" {
-		statement += ` AND c.repository_id=?`
-		args = append(args, repositoryID)
-	}
-	if ref != "" {
-		statement += ` AND c.ref_name=?`
-		args = append(args, ref)
-	}
-	rows, err := a.store.DB.QueryContext(ctx, a.store.Rebind(statement), args...)
-	if err != nil {
-		return 0, err
-	}
-	defer rows.Close()
-	batch := make([]vectorstore.Chunk, 0, 500)
-	total := 0
-	flush := func() error {
-		if len(batch) == 0 {
-			return nil
+		var args []any
+		if repositoryID != "" {
+			statement += ` AND c.repository_id=?`
+			args = append(args, repositoryID)
 		}
-		if err := store.Upsert(ctx, batch); err != nil {
-			return err
+		if ref != "" {
+			statement += ` AND c.ref_name=?`
+			args = append(args, ref)
 		}
-		total += len(batch)
-		batch = batch[:0]
-		return nil
-	}
-	for rows.Next() {
-		var chunk vectorstore.Chunk
-		var raw []byte
-		if err = rows.Scan(&chunk.ID, &chunk.RepositoryID, &chunk.Ref, &chunk.LibraryID, &chunk.FilePath, &chunk.Revision, &raw); err != nil {
+		if after != "" {
+			statement += ` AND c.id>?`
+			args = append(args, after)
+		}
+		statement += ` ORDER BY c.id LIMIT ?`
+		args = append(args, page)
+
+		rows, err := a.store.DB.QueryContext(ctx, a.store.Rebind(statement), args...)
+		if err != nil {
 			return total, err
 		}
-		chunk.Vector = embedding.Decode(raw)
-		if len(chunk.Vector) == 0 {
-			continue
-		}
-		batch = append(batch, chunk)
-		if len(batch) == cap(batch) {
-			if err = flush(); err != nil {
+		batch := make([]vectorstore.Chunk, 0, page)
+		read := 0
+		for rows.Next() {
+			var chunk vectorstore.Chunk
+			var raw []byte
+			if err = rows.Scan(&chunk.ID, &chunk.RepositoryID, &chunk.Ref, &chunk.LibraryID, &chunk.FilePath, &chunk.Revision, &raw); err != nil {
+				rows.Close()
 				return total, err
 			}
+			read++
+			after = chunk.ID
+			chunk.Vector = embedding.Decode(raw)
+			if len(chunk.Vector) == 0 {
+				continue
+			}
+			batch = append(batch, chunk)
+		}
+		if err = rows.Err(); err != nil {
+			rows.Close()
+			return total, err
+		}
+		rows.Close()
+		if len(batch) > 0 {
+			if err = store.Upsert(ctx, batch); err != nil {
+				return total, err
+			}
+			total += len(batch)
+		}
+		if read < page {
+			return total, nil
 		}
 	}
-	if err = rows.Err(); err != nil {
-		return total, err
-	}
-	return total, flush()
 }
 
 // vectorCandidates is the search side of the integration.

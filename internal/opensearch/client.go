@@ -178,6 +178,12 @@ func (c *Client) SyncRef(ctx context.Context, s *store.Store, repositoryID, ref 
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	// The bulk request below waits for an OpenSearch refresh, and the projection
+	// state is written to this same store afterwards. Holding the cursor across
+	// both pins SQLite's only connection for the length of a network round trip.
+	if err := rows.Close(); err != nil {
+		return err
+	}
 	w.Flush()
 	if count == 0 {
 		return markProjection(ctx, s, repositoryID, ref, principals)

@@ -464,6 +464,12 @@ FROM mcp_calls WHERE ` + condition + ` ORDER BY occurred_at DESC LIMIT ? OFFSET 
 			"arguments": preview, "resultCount": results, "cacheHit": cacheHit == 1, "errorCode": code, "retrievalMode": mode,
 		})
 	}
+	// The audit write below goes to the same store, so the cursor is released
+	// first rather than held across it.
+	if err = rows.Close(); err != nil {
+		problem(w, 500, "internal_error", err.Error())
+		return
+	}
 	if query.Get("format") == "csv" {
 		p, _ := auth.FromContext(r.Context())
 		a.audit(r, p, "mcp_calls.export", "mcp_calls", window, "success", map[string]any{"rows": len(items)})
