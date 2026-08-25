@@ -35,6 +35,22 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.57.3 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./... (FTS5/태그 없음)  PASS
+알림 발송·재시도·데드레터·관리자 재시도 실측    PASS(수정 없음)
+미도달 알림의 상태 보고 시험                   PASS
+go vet ./... && go build ./...               PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.57.3 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.57.3 빌드      PASS
+```
+
+이번 검증은 알림 발송 경로를 실제 수신기로 끝까지 돌렸다. 발송·실패·지수 재시도·
+데드레터·관리자 재시도가 모두 설계대로였고 고칠 것이 없었다. 다만 재시도를 소진한
+알림이 있다는 사실을 알려주는 통로가 없어, 플랫폼 상태에 포함하도록 했다.
+
 2026-08-26 v0.57.2 릴리스 전 검증 결과:
 
 ```text

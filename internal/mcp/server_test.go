@@ -980,3 +980,41 @@ func TestARefusedToolCallIsAudited(t *testing.T) {
 		t.Fatalf("permitted call recorded %s from %q", tool, ip)
 	}
 }
+
+// Alerts that never arrive are the failure an operator is least likely to
+// notice, because the thing that would have told them is the thing that broke.
+// Asking an agent for platform status has to surface it.
+func TestPlatformStatusReportsUndeliveredAlerts(t *testing.T) {
+	s := fixture(t)
+	admin := auth.Principal{UserID: "u1", Subject: "alice", ACLPrincipal: "alice",
+		KeyID: "admin-key", KeyPrefix: "ADMIN1",
+		Roles: []string{"source-admin"}, Scopes: []string{"get-platform-status"}}
+	statusText := func() string {
+		t.Helper()
+		s.cache = map[string]cacheEntry{}
+		out := callAs(t, s, admin, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get-platform-status","arguments":{}}}`)
+		return out["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	}
+	if text := statusText(); !strings.Contains(text, "Notifications: no failed deliveries") {
+		t.Fatalf("a healthy platform must say so:\n%s", text)
+	}
+
+	must := func(query string, args ...any) {
+		t.Helper()
+		if _, err := s.store.DB.Exec(query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(`INSERT INTO notifications(id,user_id,notification_type,resource_id,title,message) VALUES('n1','u1','api_key_expiring','k1','MCP API key expires soon','곧 만료됩니다.')`)
+	must(`INSERT INTO notification_deliveries(id,notification_id,channel,destination_hash,status,attempts,next_attempt_at) VALUES('d1','n1','webhook','hash','failed',1,CURRENT_TIMESTAMP)`)
+	if text := statusText(); !strings.Contains(text, "1 delivery(ies) failed and are being retried") {
+		t.Fatalf("a retrying delivery must be reported:\n%s", text)
+	}
+
+	// A delivery that gave up is the one that needs an instruction, not a count.
+	must(`UPDATE notification_deliveries SET status='dead' WHERE id='d1'`)
+	text := statusText()
+	if !strings.Contains(text, "gave up after their retries") || !strings.Contains(text, "Alerts are not reaching their destination") {
+		t.Fatalf("a dead delivery must say what it means:\n%s", text)
+	}
+}

@@ -35,7 +35,20 @@ func (s *Server) platformStatus(ctx context.Context) (string, error) {
 	if s.store.FullTextAvailable() {
 		lexical = "full-text index"
 	}
+	// Undelivered alerts are the failure an operator is least likely to notice,
+	// because the thing that would have told them is the thing that broke. The
+	// counts are read here so asking an agent for platform status surfaces them.
+	var notificationsFailed, notificationsDead int
+	_ = s.store.DB.QueryRowContext(ctx, `SELECT COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),0),COALESCE(SUM(CASE WHEN status='dead' THEN 1 ELSE 0 END),0) FROM notification_deliveries`).Scan(&notificationsFailed, &notificationsDead)
 	status := fmt.Sprintf("## git-ctx Platform Status\n\n- Version: %s\n- Metadata Database: connected\n- Indexed Content Search: %s\n- Enabled Repositories: %d\n- Bitbucket Repositories: %d\n- GitLab Repositories: %d\n- Index Jobs Pending: %d\n- Index Jobs Running: %d\n- Index Jobs Failed: %d\n", version.Full(), lexical, repositories, bitbucket, gitlab, pending, running, failed)
+	switch {
+	case notificationsDead > 0:
+		status += fmt.Sprintf("- Notifications: %d delivery(ies) gave up after their retries and %d are still retrying. Alerts are not reaching their destination; check the notification settings and retry them from the operations screen.\n", notificationsDead, notificationsFailed)
+	case notificationsFailed > 0:
+		status += fmt.Sprintf("- Notifications: %d delivery(ies) failed and are being retried.\n", notificationsFailed)
+	default:
+		status += "- Notifications: no failed deliveries\n"
+	}
 	// Connector health belongs in the status an operator asks an agent for: a
 	// paused source is the difference between "nothing matched" and "we are not
 	// currently able to look".
