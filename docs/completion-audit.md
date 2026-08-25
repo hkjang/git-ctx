@@ -35,6 +35,23 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.56.1 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./... (FTS5/태그 없음)  PASS
+PostgreSQL 16 통합 시험(전문 인덱스)           PASS
+SQLite→PostgreSQL 논리 이전 시험               PASS(회귀 1건 수정)
+200,000행 질의 계획 확인                        PASS(GIN 사용)
+go vet ./... && go build ./...               PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.56.1 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.56.1 빌드      PASS
+```
+
+이번 검증으로 두 데이터베이스의 검색 경로가 같아졌다. 생성 열이 백업의 열 대조를
+깨뜨려 논리 이전이 거부되던 회귀를 기존 통합 시험이 잡았고, 생성 열을 데이터가 아닌
+색인으로 취급하도록 고쳤다.
+
 2026-08-26 v0.56.0 릴리스 전 검증 결과:
 
 ```text

@@ -1398,14 +1398,22 @@ func (s *Service) fullTextCandidates(terms []string, sourceType, project, reposi
 	if !s.store.FullTextAvailable() {
 		return "", nil, false
 	}
-	match := store.FullTextQuery(terms)
+	match := s.store.FullTextQuery(terms)
 	if match == "" {
 		return "", nil, false
 	}
 	join, predicate, args := repositoryACL(principals)
+	// The two engines differ only in how the index is reached: SQLite joins its
+	// index table, PostgreSQL tests a column on the row.
+	source := `document_chunks c`
+	lookup := `c.search_vector @@ to_tsquery('simple',?)`
+	if s.store.Driver() != "postgres" {
+		source = `document_chunks_fts f JOIN document_chunks c ON c.rowid=f.rowid`
+		lookup = `document_chunks_fts MATCH ?`
+	}
 	statement := `SELECT r.library_id,r.source_type,r.project_key,r.slug,c.ref_name,c.commit_id,c.file_path,c.content,c.line_start,c.line_end
-FROM document_chunks_fts f JOIN document_chunks c ON c.rowid=f.rowid JOIN repositories r ON r.id=c.repository_id ` + join + `
-WHERE r.enabled=1 AND ` + predicate + ` AND document_chunks_fts MATCH ?`
+FROM ` + source + ` JOIN repositories r ON r.id=c.repository_id ` + join + `
+WHERE r.enabled=1 AND ` + predicate + ` AND ` + lookup
 	args = append(args, match)
 	if sourceType != "" {
 		statement += ` AND r.source_type=?`

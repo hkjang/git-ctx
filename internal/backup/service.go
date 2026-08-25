@@ -374,14 +374,21 @@ func (s *Service) writeSnapshotJSON(ctx context.Context, tx *sql.Tx, writer *log
 		return err
 	}
 	for tableIndex, table := range tables {
-		rows, queryErr := tx.QueryContext(ctx, `SELECT * FROM "`+table+`"`)
+		// The column list is read first so the derived ones can be left out of
+		// the query itself, rather than exported and discarded.
+		probe, queryErr := tx.QueryContext(ctx, `SELECT * FROM "`+table+`" WHERE 1=0`)
 		if queryErr != nil {
 			return fmt.Errorf("read %s: %w", table, queryErr)
 		}
-		columns, queryErr := rows.Columns()
+		all, queryErr := probe.Columns()
+		probe.Close()
 		if queryErr != nil {
-			rows.Close()
 			return queryErr
+		}
+		columns := carriedColumns(table, all)
+		rows, queryErr := tx.QueryContext(ctx, `SELECT `+quotedColumns(columns)+` FROM "`+table+`"`)
+		if queryErr != nil {
+			return fmt.Errorf("read %s: %w", table, queryErr)
 		}
 		if tableIndex > 0 {
 			if queryErr = write(","); queryErr != nil {
@@ -682,6 +689,30 @@ func (s *Service) restoreArchive(ctx context.Context, a archive) error {
 	return tx.Commit()
 }
 
+// derivedColumns are values the database computes for itself. They are an index
+// in disguise — a search vector, not a fact — so a backup neither carries them
+// nor is judged against them: PostgreSQL refuses to be given a generated
+// column, and a schema check that counted one would reject every archive taken
+// on the other engine.
+var derivedColumns = map[string]map[string]bool{
+	"document_chunks": {"search_vector": true},
+}
+
+// carriedColumns drops the derived columns from a table's column list.
+func carriedColumns(table string, columns []string) []string {
+	derived := derivedColumns[table]
+	if len(derived) == 0 {
+		return columns
+	}
+	kept := make([]string, 0, len(columns))
+	for _, column := range columns {
+		if !derived[column] {
+			kept = append(kept, column)
+		}
+	}
+	return kept
+}
+
 func (s *Service) validateArchive(ctx context.Context, a archive) error {
 	actualTables := make([]string, len(a.Tables))
 	for index := range a.Tables {
@@ -698,6 +729,9 @@ func (s *Service) validateArchive(ctx context.Context, a archive) error {
 		}
 		current, err := columns.Columns()
 		columns.Close()
+		if err == nil {
+			current = carriedColumns(data.Name, current)
+		}
 		if err != nil || strings.Join(current, ",") != data.ColumnsCSV {
 			return fmt.Errorf("backup schema for %s does not match", data.Name)
 		}
