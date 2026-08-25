@@ -893,56 +893,89 @@ func (s *Service) FindRunbooks(ctx context.Context, principals []string, library
 	if limit < 1 || limit > 50 {
 		limit = 10
 	}
-	join, predicate, aclArgs := repositoryACL(principals)
-	args := append(make([]any, 0, len(principals)+2), aclArgs...)
-	statement := `SELECT DISTINCT r.library_id,c.ref_name,c.commit_id,c.file_path,c.heading,c.content,c.line_start,c.line_end
-FROM document_chunks c JOIN repositories r ON r.id=c.repository_id ` + join + `
-WHERE r.enabled=1 AND ` + predicate + ` AND
-(LOWER(c.file_path) LIKE '%runbook%' OR LOWER(c.file_path) LIKE '%playbook%' OR LOWER(c.file_path) LIKE '%operations%' OR LOWER(c.heading) LIKE '%runbook%')`
+	baseID := ""
 	if libraryID != "" {
-		baseID, _, ok := splitLibraryID(libraryID)
+		base, _, ok := splitLibraryID(libraryID)
 		if !ok {
 			return nil, errors.New("libraryId must use /organization/project[/version]")
 		}
-		statement += ` AND r.library_id=?`
-		args = append(args, baseID)
+		baseID = base
 	}
-	statement += ` ORDER BY c.file_path,c.line_start LIMIT 200`
-	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	terms := unique(embedding.Tokens(query))
 	type scored struct {
 		RunbookResult
 		score int
 	}
 	var matches []scored
-	for rows.Next() {
-		var item scored
-		if err = rows.Scan(&item.LibraryID, &item.Ref, &item.CommitID, &item.FilePath, &item.Heading, &item.Content, &item.LineStart, &item.LineEnd); err != nil {
-			return nil, err
+
+	// The markers are words, so the index can look them up. Matching them by
+	// substring means reading every chunk in the catalogue first — measured at
+	// 1.1 seconds over 200,000 chunks before anything was ranked. The substring
+	// form stays as the fallback: it is what runs without an index, and what
+	// still catches a marker buried inside a longer word.
+	gather := func(markers string, markerArgs []any) error {
+		join, predicate, args := repositoryACL(principals)
+		args = append(args, markerArgs...)
+		statement := `SELECT DISTINCT r.library_id,c.ref_name,c.commit_id,c.file_path,c.heading,c.content,c.line_start,c.line_end
+FROM document_chunks c JOIN repositories r ON r.id=c.repository_id ` + join + `
+WHERE r.enabled=1 AND ` + predicate + ` AND ` + markers
+		if baseID != "" {
+			statement += ` AND r.library_id=?`
+			args = append(args, baseID)
 		}
-		haystack := strings.ToLower(item.FilePath + " " + item.Heading + " " + item.Content)
-		for _, term := range terms {
-			if strings.Contains(haystack, term) {
-				item.score++
+		statement += ` ORDER BY c.file_path,c.line_start LIMIT 200`
+		rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item scored
+			if err = rows.Scan(&item.LibraryID, &item.Ref, &item.CommitID, &item.FilePath, &item.Heading, &item.Content, &item.LineStart, &item.LineEnd); err != nil {
+				return err
+			}
+			haystack := strings.ToLower(item.FilePath + " " + item.Heading + " " + item.Content)
+			for _, term := range terms {
+				if strings.Contains(haystack, term) {
+					item.score++
+				}
+			}
+			if item.score > 0 {
+				matches = append(matches, item)
 			}
 		}
-		if item.score > 0 {
-			matches = append(matches, item)
+		return rows.Err()
+	}
+
+	const substringMarkers = `(LOWER(c.file_path) LIKE '%runbook%' OR LOWER(c.file_path) LIKE '%playbook%' OR LOWER(c.file_path) LIKE '%operations%' OR LOWER(c.heading) LIKE '%runbook%')`
+	indexed := false
+	if clause, markerArgs, ok := s.fullTextRestriction("c", []string{"runbook", "playbook", "operations"}); ok {
+		if err := gather(clause, markerArgs); err != nil {
+			return nil, err
+		}
+		indexed = true
+	}
+	if !indexed || len(matches) == 0 {
+		if err := gather(substringMarkers, nil); err != nil {
+			return nil, err
 		}
 	}
+
 	sort.SliceStable(matches, func(i, j int) bool { return matches[i].score > matches[j].score })
-	if len(matches) > limit {
-		matches = matches[:limit]
+	seen := map[string]bool{}
+	out := make([]RunbookResult, 0, min(limit, len(matches)))
+	for _, item := range matches {
+		key := item.LibraryID + "\x00" + item.Ref + "\x00" + item.FilePath + "\x00" + strconv.Itoa(item.LineStart)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, item.RunbookResult)
+		if len(out) == limit {
+			break
+		}
 	}
-	out := make([]RunbookResult, len(matches))
-	for index := range matches {
-		out[index] = matches[index].RunbookResult
-	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (s *Service) ExportContext(ctx context.Context, principals []string, libraryIDs []string, query string) (string, error) {

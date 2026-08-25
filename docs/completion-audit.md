@@ -35,6 +35,23 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.56.4 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./... (FTS5/태그 없음)  PASS
+제한 사용자 관점 ACL 격리 스윕(18개 호출)      PASS(누출 0건, 수정 없음)
+런북 표식 두 경로 시험                         PASS
+find-runbook 지연 실측 1,143ms → 6ms           PASS
+go vet ./... && go build ./...               PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.56.4 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.56.4 빌드      PASS
+```
+
+이번 검증은 처음으로 ACL 을 우회하지 않는 자격으로 규모 인스턴스를 훑었다. 400개
+저장소 중 20개만 볼 수 있는 개발자 관점에서 목록형 9종에 누출이 없었고 저장소를
+직접 지정한 9종은 모두 거부됐다. find-runbook 의 전수 훑기는 인덱스 조회로 옮겼다.
+
 2026-08-26 v0.56.3 릴리스 전 검증 결과:
 
 ```text

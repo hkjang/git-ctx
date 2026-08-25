@@ -2286,3 +2286,59 @@ func TestExplainSearchDoesNotQueryWhileHoldingItsCursor(t *testing.T) {
 		t.Fatal("ExplainSearch stalled: it is querying while its own cursor is open")
 	}
 }
+
+// Runbooks are found by markers in the path or heading. The index knows them as
+// words; the substring scan also catches one buried inside a longer word. Both
+// have to keep working, because an operator looking for the runbook during an
+// incident does not get a second try.
+func TestRunbookLookupKeepsBothWaysOfMatchingAMarker(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:runbook-markers?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.DB.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,enabled) VALUES('gitlab:1','core','api','api','','gitlab','1','/core/api','main',1)`)
+	exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('gitlab:1','alice','read')`)
+	exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES
+('c1','gitlab:1','main','abc','docs/runbooks/payment.md',1,20,'Payment restart','document','결제 배치가 멈추면 컨슈머를 재시작한다.','h1'),
+('c2','gitlab:1','main','abc','docs/oncall.md',1,20,'Runbook: cache','document','캐시 워머를 재시작한다.','h2'),
+('c3','gitlab:1','main','abc','docs/team.md',1,20,'Team','document','팀 소개.','h3')`)
+
+	service := New(db)
+	// A marker as its own word in the path, and as a word in a heading.
+	for _, query := range []string{"결제", "캐시"} {
+		found, err := service.FindRunbooks(ctx, []string{"alice"}, "", query, 10)
+		if err != nil {
+			t.Fatalf("%q: %v", query, err)
+		}
+		if len(found) == 0 {
+			t.Fatalf("%q found no runbook (full text: %v)", query, db.FullTextAvailable())
+		}
+	}
+	// A marker inside a longer word: only the substring form sees this, and it
+	// must still run when the index comes back empty.
+	exec(`DELETE FROM document_chunks WHERE id IN ('c1','c2')`)
+	exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('c4','gitlab:1','main','abc','docs/myrunbooks.md',1,20,'Restart','document','결제 컨슈머를 재시작한다.','h4')`)
+	buried, err := service.FindRunbooks(ctx, []string{"alice"}, "", "결제", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buried) != 1 || buried[0].FilePath != "docs/myrunbooks.md" {
+		t.Fatalf("a marker inside a word was lost: %#v", buried)
+	}
+	// A document with no marker at all stays out, whichever path ran.
+	if plain, err := service.FindRunbooks(ctx, []string{"alice"}, "", "팀", 10); err != nil || len(plain) != 0 {
+		t.Fatalf("a non-runbook matched: %#v err=%v", plain, err)
+	}
+	// The ACL applies to both paths.
+	if denied, err := service.FindRunbooks(ctx, []string{"mallory"}, "", "결제", 10); err != nil || len(denied) != 0 {
+		t.Fatalf("runbook lookup leaked past the ACL: %#v err=%v", denied, err)
+	}
+}
