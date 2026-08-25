@@ -432,7 +432,10 @@ VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET comm
 	// file is accepted by policy, failing to read it makes this generation
 	// incomplete, so it must never replace the active ref index.
 	candidates := 0
-	manifests := map[string]string{}
+	// parsedManifests records which manifest paths this run has already read, so
+	// the second pass does not fetch a file the content pass already parsed.
+	parsedManifests := map[string]bool{}
+	var packages []inventoryPackage
 	var manifestWarnings []string
 	for _, file := range files {
 		if !i.allowed(file) {
@@ -465,11 +468,17 @@ VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET comm
 		}
 		// A manifest states the versions an import line never carries, so the
 		// dependency inventory is built from the same read as the chunks.
-		if _, isManifest := manifest.Recognize(file.Path); isManifest {
-			manifests[filepath.ToSlash(file.Path)] = safeContent
-		}
-		if _, isLock := manifest.RecognizeLock(file.Path); isLock {
-			manifests[filepath.ToSlash(file.Path)] = safeContent
+		// Manifests are parsed as they are read and the text is dropped. Holding
+		// every manifest and lock file of a ref in memory at once is a real cost:
+		// a lock file is megabytes, and a monorepo has dozens.
+		if path := filepath.ToSlash(file.Path); !parsedManifests[path] {
+			if _, isManifest := manifest.Recognize(path); isManifest {
+				parsedManifests[path] = true
+				packages = appendPackages(packages, path, safeContent)
+			} else if _, isLock := manifest.RecognizeLock(path); isLock {
+				parsedManifests[path] = true
+				packages = appendPackages(packages, path, safeContent)
+			}
 		}
 		contentLines := strings.Split(strings.ReplaceAll(safeContent, "\r\n", "\n"), "\n")
 		for _, symbol := range codeintel.Extract(file.Path, safeContent) {
@@ -524,11 +533,11 @@ VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET comm
 	// bounded so a monorepo of a thousand packages cannot turn one index run into
 	// a thousand extra round trips.
 	for _, file := range files {
-		if len(manifests) >= maxManifestsPerRef {
+		if len(parsedManifests) >= maxManifestsPerRef {
 			break
 		}
 		path := filepath.ToSlash(file.Path)
-		if _, already := manifests[path]; already {
+		if parsedManifests[path] {
 			continue
 		}
 		_, isManifest := manifest.Recognize(path)
@@ -553,13 +562,32 @@ VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET comm
 			continue
 		}
 		safeManifest, _ := sanitize(string(raw))
-		manifests[path] = safeManifest
+		parsedManifests[path] = true
+		packages = appendPackages(packages, path, safeManifest)
 	}
-	packages := collectPackages(manifests)
-	for _, item := range packages {
-		if _, err = i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_packages_staging(generation_id,repository_id,ref_name,ecosystem,name,name_lower,version,scope,manifest_path,commit_id) VALUES(?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(generation_id,repository_id,ref_name,ecosystem,name,version,manifest_path) DO UPDATE SET scope=excluded.scope`),
-			generationID, repoID, ref.Name, item.Ecosystem, item.Name, strings.ToLower(item.Name), item.Version, item.Scope, item.ManifestPath, ref.LatestCommit); err != nil {
+	// A ref with an enormous number of declarations is bounded here rather than
+	// at write time, so the inventory stays a catalogue instead of a copy of
+	// every lock file in the repository.
+	if len(packages) > maxPackagesPerRef {
+		manifestWarnings = append(manifestWarnings,
+			fmt.Sprintf("dependency inventory truncated at %d declarations", maxPackagesPerRef))
+		packages = packages[:maxPackagesPerRef]
+	}
+	// One statement per package would be thousands of round trips for a single
+	// lock file, so declarations are written in batches.
+	for start := 0; start < len(packages); start += packageInsertBatch {
+		end := min(start+packageInsertBatch, len(packages))
+		values := make([]string, 0, end-start)
+		args := make([]any, 0, (end-start)*10)
+		for _, item := range packages[start:end] {
+			values = append(values, "(?,?,?,?,?,?,?,?,?,?)")
+			args = append(args, generationID, repoID, ref.Name, item.Ecosystem, item.Name,
+				strings.ToLower(item.Name), item.Version, item.Scope, item.ManifestPath, ref.LatestCommit)
+		}
+		statement := `INSERT INTO repository_packages_staging(generation_id,repository_id,ref_name,ecosystem,name,name_lower,version,scope,manifest_path,commit_id) VALUES ` +
+			strings.Join(values, ",") +
+			` ON CONFLICT(generation_id,repository_id,ref_name,ecosystem,name,version,manifest_path) DO UPDATE SET scope=excluded.scope`
+		if _, err = i.store.DB.ExecContext(ctx, i.store.Rebind(statement), args...); err != nil {
 			return fail(err)
 		}
 	}
@@ -660,7 +688,7 @@ FROM code_dependencies_staging WHERE generation_id=?`), generationID); err != ni
 	// files, so replacing the whole ref from that set would delete every manifest
 	// the commit did not touch and leave the repository looking dependency-free.
 	if incremental {
-		for path := range manifests {
+		for path := range parsedManifests {
 			if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM repository_packages WHERE repository_id=? AND ref_name=? AND manifest_path=?`), repoID, ref.Name, path); err != nil {
 				_ = tx.Rollback()
 				return fail(err)
@@ -896,34 +924,35 @@ func isKeyFile(path string) bool {
 // manifests the content policy excluded.
 const maxManifestsPerRef = 60
 
+// maxPackagesPerRef bounds the whole inventory of one ref. Sixty lock files can
+// declare hundreds of thousands of resolved packages between them; the estate
+// view needs the catalogue, not every edge of every dependency tree.
+const maxPackagesPerRef = 20000
+
+// packageInsertBatch bounds one multi-row insert. It stays well under the
+// parameter limits both engines impose (ten placeholders per row).
+const packageInsertBatch = 200
+
 // inventoryPackage is one parsed dependency with the manifest it came from.
 type inventoryPackage struct {
 	manifest.Package
 	ManifestPath string
 }
 
-// collectPackages parses every manifest of a ref. A package declared by two
-// manifests is kept once per manifest, because "which file declares this" is
-// what an upgrade has to edit.
-func collectPackages(manifests map[string]string) []inventoryPackage {
-	paths := make([]string, 0, len(manifests))
-	for path := range manifests {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-	var out []inventoryPackage
-	for _, path := range paths {
-		// A manifest states intent and a lock file states the resolved result.
-		// Both are recorded: the first is what a team edits, the second is what
-		// an advisory can actually judge.
-		declared := manifest.Parse(path, manifests[path])
-		declared = append(declared, manifest.ParseLock(path, manifests[path])...)
-		for _, item := range declared {
-			if strings.TrimSpace(item.Name) == "" {
-				continue
-			}
-			out = append(out, inventoryPackage{Package: item, ManifestPath: path})
+// appendPackages parses one manifest or lock file and adds what it declares.
+// A package declared by two files is kept once per file, because "which file
+// declares this" is what an upgrade has to edit.
+func appendPackages(out []inventoryPackage, path, content string) []inventoryPackage {
+	// A manifest states intent and a lock file states the resolved result. Both
+	// are recorded: the first is what a team edits, the second is what an
+	// advisory can actually judge.
+	declared := manifest.Parse(path, content)
+	declared = append(declared, manifest.ParseLock(path, content)...)
+	for _, item := range declared {
+		if strings.TrimSpace(item.Name) == "" {
+			continue
 		}
+		out = append(out, inventoryPackage{Package: item, ManifestPath: path})
 	}
 	return out
 }

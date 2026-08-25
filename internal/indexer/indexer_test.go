@@ -3,11 +3,13 @@ package indexer
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"git-ctx/internal/embedding"
+	"git-ctx/internal/manifest"
 	"git-ctx/internal/source"
 	"git-ctx/internal/store"
 )
@@ -911,4 +913,56 @@ func TestIncrementalSyncKeepsUntouchedManifestsInTheInventory(t *testing.T) {
 	if err = s.DB.QueryRow(`SELECT COUNT(*) FROM repository_packages WHERE repository_id='gitlab:12' AND manifest_path='go.mod'`).Scan(&goRows); err != nil || goRows != 2 {
 		t.Fatalf("go.mod rows=%d err=%v", goRows, err)
 	}
+}
+
+// lockHeavySource serves a repository whose lock file declares far more
+// packages than the inventory should carry, which is ordinary for go.sum.
+type lockHeavySource struct{ manifestSource }
+
+func (lockHeavySource) ListFiles(context.Context, source.RepositoryRef, string) ([]source.File, error) {
+	return []source.File{{Path: "go.mod"}, {Path: "go.sum"}}, nil
+}
+
+func (lockHeavySource) GetFile(_ context.Context, _ source.RepositoryRef, _ string, path string) ([]byte, error) {
+	if path == "go.sum" {
+		var builder strings.Builder
+		for index := 0; index < 26000; index++ {
+			fmt.Fprintf(&builder, "example.com/mod%d v1.0.%d h1:abc=\n", index, index)
+		}
+		return []byte(builder.String()), nil
+	}
+	return []byte("module svc\n\nrequire github.com/gin-gonic/gin v1.10.0\n"), nil
+}
+
+// The inventory is a catalogue of what the estate uses, not a copy of every
+// lock file. An unbounded ref would put hundreds of thousands of rows behind a
+// single repository and make the catalogue view useless as well as slow.
+func TestInventoryIsBoundedPerRef(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file:manifest-bounded?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+	idx := New(s, DefaultPolicy())
+	repo := source.Repository{ID: 13, ProjectKey: "core", Slug: "svc", Name: "svc", DefaultBranch: "main"}
+	if err = idx.SyncRepository(ctx, lockHeavySource{}, "gitlab", repo, []source.Reference{{Name: "main", LatestCommit: "abc123"}}); err != nil {
+		t.Fatal(err)
+	}
+	var rows int
+	if err = s.DB.QueryRow(`SELECT COUNT(*) FROM repository_packages WHERE repository_id='gitlab:13'`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows == 0 || rows > maxPackagesPerRef {
+		t.Fatalf("inventory rows=%d, bound=%d", rows, maxPackagesPerRef)
+	}
+	// One lock file also has its own bound, so a single file cannot fill the ref.
+	if rows > manifest.MaxLockPackages+50 {
+		t.Fatalf("one lock file contributed %d rows", rows)
+	}
+	var warning string
+	if err = s.DB.QueryRow(`SELECT error_message FROM index_jobs LIMIT 1`).Scan(&warning); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("job warning: %q", warning)
 }

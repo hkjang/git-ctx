@@ -35,6 +35,23 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-25 v0.52.5 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./...                 PASS
+go vet ./... && go build ./...               PASS
+대용량 락파일 색인 상한 시험                   PASS
+증분 색인 인벤토리 보존 회귀 시험              PASS
+사용자·관리자 UI JavaScript parse·계약 시험    PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.52.5 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.52.5 빌드      PASS
+```
+
+이번 검증은 락파일 색인의 자원 사용을 고정한다. 매니페스트·락파일 원문을 모아 두지
+않고 읽는 즉시 파싱하며, 선언은 배치로 기록하고, ref 총량 상한을 넘으면 작업 경고로
+남긴다.
+
 2026-08-25 v0.52.4 릴리스 전 검증 결과:
 
 ```text
