@@ -158,6 +158,17 @@ func (i *Indexer) syncRepository(ctx context.Context, adapter source.RepositoryS
 	libraryID := LibraryIDForSource(sourceType, repo.ProjectKey, repo.Slug)
 	_, err := i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,enabled) VALUES(?,?,?,?,?,?,?,?,?,1) ON CONFLICT(id) DO UPDATE SET project_key=excluded.project_key,slug=excluded.slug,name=excluded.name,description=excluded.description,default_branch=excluded.default_branch,enabled=1`), repoID, repo.ProjectKey, repo.Slug, repo.Name, repo.Description, sourceType, fmt.Sprint(repo.ID), libraryID, repo.DefaultBranch)
 	if err != nil {
+		// The path is unique, so a project that took over a path another project
+		// used to hold — a rename or a transfer, both routine on GitLab and
+		// Bitbucket — fails here with a bare constraint string that names a
+		// database index and no repository. The conflict is looked up and
+		// reported in terms an operator can act on.
+		var holder, holderExternal string
+		if lookup := i.store.DB.QueryRowContext(ctx, i.store.Rebind(`SELECT id,source_external_id FROM repositories WHERE source_type=? AND project_key=? AND slug=? AND id<>?`),
+			sourceType, repo.ProjectKey, repo.Slug, repoID).Scan(&holder, &holderExternal); lookup == nil {
+			return fmt.Errorf("%s/%s is already registered as %s (source id %s), so %s cannot take that path. The project was renamed, transferred or replaced at the source: disable or remove the stale repository, then index again",
+				repo.ProjectKey, repo.Slug, holder, holderExternal, repoID)
+		}
 		return err
 	}
 	ref := source.RepositoryRef{ProjectKey: repo.ProjectKey, Slug: repo.Slug}

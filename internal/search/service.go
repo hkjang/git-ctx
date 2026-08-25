@@ -1259,6 +1259,98 @@ WHERE r.enabled=1 AND ` + predicate
 	return out, nil
 }
 
+// indexedSourceHits answers a code search from what has already been indexed.
+//
+// The content leg of search-code queries the source servers, because the index
+// may lag a push by minutes. But when that query fails — a paused connector, a
+// Bitbucket without code search enabled, an outage — the answer used to be
+// empty even though every file was sitting in this platform's own index. An
+// agent then reads "no file contents matched" and concludes the code does not
+// exist, which is the one conclusion this product exists to prevent.
+func (s *Service) indexedSourceHits(ctx context.Context, principals []string, query, sourceType, project, repository, ref string, limit int) ([]SourceResult, error) {
+	terms := unique(embedding.Tokens(query))
+	if len(terms) == 0 {
+		return nil, nil
+	}
+	join, predicate, args := repositoryACL(principals)
+	statement := `SELECT r.library_id,r.source_type,r.project_key,r.slug,c.ref_name,c.commit_id,c.file_path,c.content,c.line_start,c.line_end
+FROM document_chunks c JOIN repositories r ON r.id=c.repository_id ` + join + `
+WHERE r.enabled=1 AND ` + predicate
+	if sourceType != "" {
+		statement += ` AND r.source_type=?`
+		args = append(args, sourceType)
+	}
+	if project != "" {
+		statement += ` AND LOWER(r.project_key)=LOWER(?)`
+		args = append(args, project)
+	}
+	if repository != "" {
+		statement += ` AND (LOWER(r.slug)=LOWER(?) OR LOWER(r.library_id)=LOWER(?))`
+		args = append(args, repository, repository)
+	}
+	if ref != "" {
+		statement += ` AND c.ref_name=?`
+		args = append(args, ref)
+	}
+	statement += ` AND (`
+	for index, term := range terms[:min(len(terms), 6)] {
+		if index > 0 {
+			statement += ` OR `
+		}
+		statement += `LOWER(c.file_path || ' ' || c.heading || ' ' || c.content) LIKE ?`
+		args = append(args, "%"+term+"%")
+	}
+	statement += `) LIMIT 2000`
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type scored struct {
+		result SourceResult
+		score  int
+	}
+	var candidates []scored
+	for rows.Next() {
+		var item SourceResult
+		var content string
+		if err = rows.Scan(&item.LibraryID, &item.SourceType, &item.ProjectKey, &item.RepositorySlug,
+			&item.Ref, &item.QueryResult.CommitID, &item.QueryResult.Path, &content,
+			&item.QueryResult.LineStart, &item.QueryResult.LineEnd); err != nil {
+			return nil, err
+		}
+		haystack := strings.ToLower(item.QueryResult.Path + " " + content)
+		score := 0
+		for _, term := range terms {
+			score += strings.Count(haystack, term)
+		}
+		if score == 0 {
+			continue
+		}
+		// The stored chunk is already secret-masked, so it is returned as it is.
+		item.QueryResult.Snippet = content
+		candidates = append(candidates, scored{result: item, score: score})
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
+	out := make([]SourceResult, 0, min(limit, len(candidates)))
+	seen := map[string]bool{}
+	for _, item := range candidates {
+		key := item.result.LibraryID + "\x00" + item.result.Ref + "\x00" + item.result.QueryResult.Path
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, item.result)
+		if len(out) == limit {
+			break
+		}
+	}
+	return out, nil
+}
+
 // FileResult is one path returned by filename search.
 type FileResult struct {
 	LibraryID, SourceType, ProjectKey, RepositorySlug, Ref, Path, BaseName string
@@ -2682,12 +2774,39 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 	} else {
 		sourceSpan.End(statusFor(len(hits)), len(hits), len(hits), "indexed and remote per-repository search")
 	}
+	// Whatever the source servers could not answer, the index may already hold.
+	indexedFallback, answeredFromIndex := "", false
+	if len(hits) == 0 {
+		indexSpan := calltrace.Start(ctx, "indexed-content", sourceType)
+		indexed, indexErr := s.indexedSourceHits(ctx, principals, normalized, sourceType, project, repository, ref, limit)
+		if indexErr != nil {
+			indexSpan.Fail(indexErr)
+		} else {
+			indexSpan.End(statusFor(len(indexed)), len(indexed), len(indexed), "answered from the local index")
+			if len(indexed) > 0 {
+				hits = indexed
+				indexedFallback = fmt.Sprintf("index: the source query returned nothing, so %d match(es) come from the indexed content. They are as recent as the last index run.", len(indexed))
+				// The live path's failure is still reported below — it explains
+				// why the answer is index-aged — but it no longer decides the
+				// call, because the call now has an answer.
+				answeredFromIndex = true
+			}
+		}
+	}
 	result := CodeSearchResult{Query: normalized, Repositories: repositories, Hits: hits}
+	if indexedFallback != "" {
+		result.Diagnostics = append(result.Diagnostics, indexedFallback)
+	}
 	if Unrestricted(principals) {
 		result.Diagnostics = append(result.Diagnostics, "acl: platform, source or search administrator role - repository ACL checks are bypassed for this search.")
 	}
 	if sourceErr != nil {
 		result.Warning = "The remote source query API was unavailable; repository matches are still shown."
+		if answeredFromIndex {
+			// Saying "unavailable" over an answer that has file contents in it
+			// reads as a failure. The live path did fail; the call did not.
+			result.Warning = "The remote source query API was unavailable, so these matches come from the indexed content."
+		}
 		result.Diagnostics = append(result.Diagnostics, "indexed-source: "+sourceErr.Error())
 		if errors.Is(sourceErr, source.ErrCodeSearchRefUnsupported) {
 			result.Warning = "Bitbucket code search covers only the repository default branch; the requested ref was not searched."
@@ -2721,8 +2840,11 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 		calltrace.From(ctx).Count("limit", "hits", calltrace.StatusOK, len(result.Hits), limit, "trimmed to the requested limit")
 		result.Hits = result.Hits[:limit]
 	}
-	if repoErr != nil && sourceErr != nil {
+	if repoErr != nil && sourceErr != nil && !answeredFromIndex {
 		return CodeSearchResult{}, sourceErr
+	}
+	if answeredFromIndex {
+		return result, nil
 	}
 	return result, repoErr
 }

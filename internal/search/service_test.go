@@ -1995,3 +1995,59 @@ func hasDiagnostic(diagnostics []string, want string) bool {
 	}
 	return false
 }
+
+// The content leg of search-code queries the source servers because the index
+// can lag a push. When that query cannot run — a paused connector, a Bitbucket
+// without code search, an outage — the answer used to be empty even though the
+// file was sitting in this platform's own index, and an agent reads an empty
+// answer as "the code does not exist".
+func TestSearchCodeAnswersFromTheIndexWhenTheSourceQueryCannot(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:code-index-fallback?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.DB.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,enabled) VALUES('gitlab:1','core','api','api','payments','gitlab','1','/core/api','main',1)`)
+	exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('gitlab:1','alice','read')`)
+	exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('c1','gitlab:1','main','abc123','README.md',1,4,'Payments','document','DCGM exporter collects the metrics.','h1')`)
+	exec(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id) VALUES('gitlab:1','main','abc123')`)
+
+	service := New(db)
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) {
+		return nil, errors.New("gitlab search API is unavailable")
+	})
+	result, err := service.SearchCode(ctx, []string{"alice"}, "DCGM exporter", "gitlab", "", "", "", 10)
+	if err != nil {
+		t.Fatalf("a failing source query must not fail the call when the index can answer: %v", err)
+	}
+	if len(result.Hits) != 1 || result.Hits[0].Path != "README.md" || result.Hits[0].LibraryID != "/core/api" {
+		t.Fatalf("the indexed content was not returned: %#v diagnostics=%v", result.Hits, result.Diagnostics)
+	}
+	if result.Hits[0].Ref != "main" || result.Hits[0].CommitID != "abc123" {
+		t.Fatalf("the answer must cite the indexed ref and commit: %#v", result.Hits[0])
+	}
+	joined := strings.Join(result.Diagnostics, " ")
+	// The reader has to be told both that this came from the index and why the
+	// live path did not run — the answer is only as fresh as the last run.
+	if !strings.Contains(joined, "index:") || !strings.Contains(joined, "unavailable") {
+		t.Fatalf("diagnostics must explain the path taken: %v", result.Diagnostics)
+	}
+
+	// A query that matches nothing stays empty rather than inventing hits.
+	empty, err := service.SearchCode(ctx, []string{"alice"}, "kubernetes operator", "gitlab", "", "", "", 10)
+	if err == nil && len(empty.Hits) != 0 {
+		t.Fatalf("unrelated query matched: %#v", empty.Hits)
+	}
+	// The ACL still applies to the fallback.
+	denied, err := service.SearchCode(ctx, []string{"mallory"}, "DCGM exporter", "gitlab", "", "", "", 10)
+	if err == nil && len(denied.Hits) != 0 {
+		t.Fatalf("the index fallback leaked past the ACL: %#v", denied.Hits)
+	}
+}

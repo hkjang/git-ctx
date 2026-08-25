@@ -966,3 +966,43 @@ func TestInventoryIsBoundedPerRef(t *testing.T) {
 	}
 	t.Logf("job warning: %q", warning)
 }
+
+// A project that takes over a path another project used to hold — a rename or
+// a transfer, both routine at the source — used to fail with a bare database
+// constraint string naming an index and no repository. The job then retried
+// itself to exhaustion against an error nobody could act on.
+func TestATakenRepositoryPathIsExplainedNotDumped(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file:path-conflict?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+	idx := New(s, DefaultPolicy())
+
+	// The path is first indexed by one project.
+	older := source.Repository{ID: 11, ProjectKey: "core", Slug: "api", Name: "api", DefaultBranch: "main"}
+	if err = idx.SyncRepository(ctx, fakeSource{}, "gitlab", older, []source.Reference{{Name: "main", LatestCommit: "abc123"}}); err != nil {
+		t.Fatal(err)
+	}
+	// A different project now claims it at the source.
+	newer := source.Repository{ID: 4242, ProjectKey: "core", Slug: "api", Name: "api", DefaultBranch: "main"}
+	err = idx.SyncRepository(ctx, fakeSource{}, "gitlab", newer, []source.Reference{{Name: "main", LatestCommit: "def456"}})
+	if err == nil {
+		t.Fatal("a taken path must not be silently overwritten")
+	}
+	message := err.Error()
+	for _, expected := range []string{"core/api", "gitlab:11", "gitlab:4242", "11"} {
+		if !strings.Contains(message, expected) {
+			t.Fatalf("the operator cannot act on this: %q", message)
+		}
+	}
+	if strings.Contains(message, "UNIQUE constraint") || strings.Contains(message, "SQLSTATE") {
+		t.Fatalf("the raw database error leaked: %q", message)
+	}
+	// The repository that already held the path keeps its row untouched.
+	var name string
+	if err = s.DB.QueryRow(`SELECT name FROM repositories WHERE id='gitlab:11'`).Scan(&name); err != nil {
+		t.Fatalf("the existing repository was disturbed: %v", err)
+	}
+}
