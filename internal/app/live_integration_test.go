@@ -211,6 +211,37 @@ func mcpCall(t *testing.T, a *App, tool, arguments string) string {
 	return response.Result.Content[0].Text
 }
 
+// mcpCallWithKey drives one tool with an MCP API key, which is what the
+// administrative tools require.
+func mcpCallWithKey(t *testing.T, a *App, secret, tool, arguments string) string {
+	t.Helper()
+	body := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":%q,"arguments":%s}}`, tool, arguments)
+	request := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+	request.Header.Set("X-API-Key", secret)
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	a.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("%s status=%d body=%s", tool, recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Result struct {
+			Content []struct{ Text string } `json:"content"`
+			IsError bool                    `json:"isError"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("%s: %v", tool, err)
+	}
+	if len(response.Result.Content) == 0 {
+		t.Fatalf("%s returned no content: %s", tool, recorder.Body.String())
+	}
+	if response.Result.IsError {
+		t.Fatalf("%s failed: %s", tool, response.Result.Content[0].Text)
+	}
+	return response.Result.Content[0].Text
+}
+
 // waitFor polls until the condition holds, and fails with what it was waiting
 // for rather than with a bare timeout.
 func waitFor(t *testing.T, limit time.Duration, what string, condition func() bool) {
@@ -225,8 +256,15 @@ func waitFor(t *testing.T, limit time.Duration, what string, condition func() bo
 	t.Fatalf("timed out after %s waiting for %s", limit, what)
 }
 
-// newFakeGitLab serves the parts of the GitLab API the platform reads.
+// newFakeGitLab serves the parts of the GitLab API the platform reads. When
+// breakSearch is set, only the search endpoint fails — the shape of a server
+// whose code search is not enabled, which is common and used to empty answers
+// that the index could have filled.
 func newFakeGitLab(files map[string]string) *httptest.Server {
+	return newFakeGitLabWithSearch(files, nil)
+}
+
+func newFakeGitLabWithSearch(files map[string]string, breakSearch *bool) *httptest.Server {
 	project := map[string]any{"id": 4242, "path_with_namespace": "core/api", "default_branch": "main",
 		"name": "api", "description": "payment api", "visibility": "internal", "repository_access_level": "enabled"}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -234,6 +272,8 @@ func newFakeGitLab(files map[string]string) *httptest.Server {
 		path := strings.TrimSuffix(r.URL.EscapedPath(), "/")
 		write := func(value any) { _ = json.NewEncoder(w).Encode(value) }
 		switch {
+		case breakSearch != nil && *breakSearch && strings.HasSuffix(path, "/search"):
+			http.Error(w, `{"message":"search is not enabled"}`, http.StatusForbidden)
 		case r.Method == http.MethodPost || r.Method == http.MethodPut:
 			write(map[string]any{"id": 77})
 		case strings.HasSuffix(path, "/repository/branches"):
@@ -288,6 +328,10 @@ func newFakeModelServer() *fakeModel {
 			model.mu.Lock()
 			model.embeds++
 			model.mu.Unlock()
+			if model.broken("embeddings") {
+				http.Error(w, `{"error":"model unavailable"}`, http.StatusServiceUnavailable)
+				return
+			}
 			var texts []string
 			switch value := payload.Input.(type) {
 			case string:
@@ -307,6 +351,10 @@ func newFakeModelServer() *fakeModel {
 			model.mu.Lock()
 			model.reranks++
 			model.mu.Unlock()
+			if model.broken("rerank") {
+				http.Error(w, `{"error":"reranker unavailable"}`, http.StatusServiceUnavailable)
+				return
+			}
 			results := make([]map[string]any, len(payload.Documents))
 			base := fakeVector(payload.Query)
 			for index, document := range payload.Documents {
@@ -329,6 +377,30 @@ type fakeModel struct {
 	*httptest.Server
 	mu              sync.Mutex
 	embeds, reranks int
+	// failEmbeddings and failReranking make the model unavailable without
+	// stopping the server, which is what an outage looks like to this platform.
+	failEmbeddings, failReranking bool
+}
+
+func (m *fakeModel) breakEmbeddings(broken bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failEmbeddings = broken
+}
+
+func (m *fakeModel) breakReranking(broken bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failReranking = broken
+}
+
+func (m *fakeModel) broken(kind string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if kind == "embeddings" {
+		return m.failEmbeddings
+	}
+	return m.failReranking
 }
 
 func (m *fakeModel) embedCalls() int {
@@ -391,4 +463,144 @@ func (r *fakeReceiver) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.received
+}
+
+// The defects worth catching were never in the happy path. They were in what
+// the platform does when a part of it is missing: a search that returned
+// nothing while its own index held the answer, an embedding outage reported as
+// a source error, a reranker that failed without saying so, alerts that gave up
+// unseen. This drives the same chain with those parts taken away one at a time
+// and checks the answer says what happened.
+func TestPlatformDegradationIntegration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("the degradation chain waits on the background worker")
+	}
+	ctx := context.Background()
+
+	searchBroken := false
+	files := map[string]string{
+		"README.md":       "# Payment API\n\n결제 처리 서비스. settlement 배치를 운영한다.\n",
+		"service.go":      "package main\n\nfunc settleInvoice() error { return nil }\n",
+		"config/app.yaml": "database:\n  host: db.internal\n",
+	}
+	source := newFakeGitLabWithSearch(files, &searchBroken)
+	defer source.Close()
+	model := newFakeModelServer()
+	defer model.Close()
+	receiver := newFailingReceiver()
+	defer receiver.Close()
+
+	directory := t.TempDir()
+	a, err := New(ctx, config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(directory, "degraded.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
+		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer bootstrap")
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+	if saved := call(http.MethodPut, "/api/v1/admin/settings/gitlab",
+		fmt.Sprintf(`{"baseUrl":%q,"token":"t","webhookSecret":"s3cret"}`, source.URL)); saved.Code != http.StatusOK {
+		t.Fatalf("gitlab settings status=%d body=%s", saved.Code, saved.Body.String())
+	}
+	if saved := call(http.MethodPut, "/api/v1/admin/settings/model",
+		fmt.Sprintf(`{"provider":"openai-compatible","baseUrl":"%s/v1","model":"fake-embed","apiKey":"none","dimensions":16,"timeoutSeconds":5,"rerankerEnabled":true,"rerankerProvider":"openai-compatible","rerankerBaseUrl":"%s/v1","rerankerModel":"fake-rerank","rerankerApiKey":"none","rerankerTimeoutSeconds":5}`,
+			model.URL, model.URL)); saved.Code != http.StatusOK {
+		t.Fatalf("model settings status=%d body=%s", saved.Code, saved.Body.String())
+	}
+	if saved := call(http.MethodPut, "/api/v1/admin/settings/notifications",
+		fmt.Sprintf(`{"externalEnabled":true,"webhookUrl":%q,"webhookAuthorization":"Bearer hook-token","maxAttempts":1}`, receiver.URL+"/hook")); saved.Code != http.StatusOK {
+		t.Fatalf("notification settings status=%d body=%s", saved.Code, saved.Body.String())
+	}
+	registered := call(http.MethodPost, "/api/v1/admin/repositories",
+		`{"sourceType":"gitlab","repository":{"id":4242,"projectKey":"core","slug":"api","name":"api","description":"payment api","defaultBranch":"main"}}`)
+	if registered.Code != http.StatusCreated {
+		t.Fatalf("register status=%d body=%s", registered.Code, registered.Body.String())
+	}
+	var repository struct{ ID, LibraryID string }
+	if err = json.Unmarshal(registered.Body.Bytes(), &repository); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 60*time.Second, "the repository to finish indexing", func() bool {
+		var completed int
+		_ = a.store.DB.QueryRow(`SELECT COUNT(*) FROM index_jobs WHERE repository_id=? AND status='completed' AND files_processed>0`, repository.ID).Scan(&completed)
+		return completed > 0
+	})
+
+	// The source's search API stops working. The index still holds the answer,
+	// and an empty answer here is what an agent reads as "the code does not
+	// exist" — the failure this platform exists to prevent.
+	searchBroken = true
+	answer := mcpCall(t, a, "search-code", `{"query":"settleInvoice"}`)
+	if !strings.Contains(answer, "service.go") {
+		t.Fatalf("the index did not answer while the source search was down:\n%s", answer)
+	}
+	if !strings.Contains(answer, "index:") {
+		t.Fatalf("the answer must say it came from the index:\n%s", answer)
+	}
+
+	// The reranker stops answering. The order is no longer its own, and that has
+	// to be visible rather than assumed.
+	model.breakReranking(true)
+	docs := mcpCall(t, a, "query-docs", fmt.Sprintf(`{"libraryId":%q,"query":"결제 처리"}`, repository.LibraryID))
+	if !strings.Contains(docs, "재순위 모델을 호출하지 못해") {
+		t.Fatalf("a failed reranking must be reported:\n%s", docs)
+	}
+
+	// The embedding model stops answering. A query the index can serve still
+	// returns, and says which path produced it.
+	model.breakEmbeddings(true)
+	semantic := mcpCall(t, a, "search-semantic", `{"query":"settleInvoice"}`)
+	if !strings.Contains(semantic, "service.go") {
+		t.Fatalf("the lexical path did not answer without embeddings:\n%s", semantic)
+	}
+
+	// Alerts that give up must be visible in the platform status, because the
+	// thing that would have reported them is the thing that broke.
+	if _, err = a.store.DB.Exec(`INSERT INTO users(id,subject,username,email,status) VALUES('u-ops','u-ops','ops','ops@example.com','active') ON CONFLICT(id) DO NOTHING`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.store.DB.Exec(`INSERT INTO notifications(id,user_id,notification_type,resource_id,title,message) VALUES('n-dead','u-ops','api_key_expiring','k-dead','MCP API key expires soon','곧 만료됩니다.')`); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 90*time.Second, "the delivery to give up", func() bool {
+		var dead int
+		_ = a.store.DB.QueryRow(`SELECT COUNT(*) FROM notification_deliveries WHERE notification_id='n-dead' AND status='dead'`).Scan(&dead)
+		return dead > 0
+	})
+	// Administrative tools require an MCP API key by design, so the status is
+	// asked for the way an operator's agent would ask for it.
+	created := call(http.MethodPost, "/api/v1/me/api-keys", `{"name":"ops","scopes":["get-platform-status"]}`)
+	if created.Code != http.StatusCreated && created.Code != http.StatusOK {
+		t.Fatalf("key creation status=%d body=%s", created.Code, created.Body.String())
+	}
+	var key struct {
+		Secret string `json:"secret"`
+	}
+	if err = json.Unmarshal(created.Body.Bytes(), &key); err != nil || key.Secret == "" {
+		t.Fatalf("no key was issued: %v body=%s", err, created.Body.String())
+	}
+	status := mcpCallWithKey(t, a, key.Secret, "get-platform-status", `{}`)
+	if !strings.Contains(status, "gave up after their retries") {
+		t.Fatalf("undelivered alerts must reach the platform status:\n%s", status)
+	}
+}
+
+// newFailingReceiver refuses every delivery, which is how an outbox reaches its
+// attempt limit.
+func newFailingReceiver() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"unavailable"}`, http.StatusServiceUnavailable)
+	}))
 }
