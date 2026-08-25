@@ -40,7 +40,7 @@ jobs:
           fi
 
       - name: Build
-        run: go build ./...
+        run: go build -tags sqlite_fts5 ./...
 
       - name: Version metadata sync
         run: |
@@ -51,12 +51,12 @@ jobs:
         run: go vet ./...
 
       - name: Unit tests
-        run: go test ./...
+        run: go test -tags sqlite_fts5 ./...
 
       # The race detector found a real one during this repository's own test
       # work, so it runs on every change rather than on request.
       - name: Unit tests with the race detector
-        run: go test -race ./...
+        run: go test -tags sqlite_fts5 -race ./...
 
   vulnerabilities:
     name: Known vulnerabilities
@@ -118,7 +118,7 @@ jobs:
           GIT_CTX_TEST_PGVECTOR_DSN: postgres://gitctx:gitctx@127.0.0.1:5432/gitctx?sslmode=disable
           GIT_CTX_TEST_VAULT_URL: http://127.0.0.1:8200
           GIT_CTX_TEST_VAULT_TOKEN: ci-root
-        run: go test -count=1 ./... -run Integration
+        run: go test -tags sqlite_fts5 -count=1 ./... -run Integration
 
   console:
     name: Admin console

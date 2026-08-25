@@ -19,7 +19,7 @@ RUN set -eu; \
     if [ -n "$VERSION" ] && [ "${VERSION#v}" != "$source_version" ]; then \
       echo "이미지 태그($VERSION)와 소스 버전($source_version)이 다릅니다" >&2; exit 1; \
     fi
-RUN CGO_ENABLED=1 go test ./... && CGO_ENABLED=1 go build -trimpath \
+RUN CGO_ENABLED=1 go test -tags sqlite_fts5 ./... && CGO_ENABLED=1 go build -tags sqlite_fts5 -trimpath \
       -ldflags="-s -w -X git-ctx/internal/version.Commit=${COMMIT} -X git-ctx/internal/version.BuildTime=${BUILD_TIME}" \
       -o /out/git-ctx ./cmd/git-ctx
 

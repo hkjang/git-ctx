@@ -35,6 +35,25 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.56.0 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./... (FTS5 빌드)      PASS
+go test -race -count=1 ./... (태그 없음)      PASS
+go vet ./... && go build ./...               PASS
+전문 인덱스 트리거 동기화 시험                 PASS
+두 검색 경로 동등성 시험                       PASS
+20만 청크 지연·분포 실측                       PASS
+오프라인 이미지 빌드(태그 적용) 전체 시험       PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.56.0 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.56.0 빌드      PASS
+```
+
+이번 검증은 색인 내용 검색을 훑기에서 조회로 바꿨다. 인덱스는 선택 사항으로 두어
+FTS5 없이 빌드한 바이너리와 PostgreSQL 은 기존 경로로 답하고, 단어 안쪽 일치는
+보충 훑기로 회수율을 유지한다.
+
 2026-08-25 v0.55.1 릴리스 전 검증 결과:
 
 ```text

@@ -19,6 +19,10 @@ var migrations embed.FS
 type Store struct {
 	DB     *sql.DB
 	driver string
+	// fullText records whether this store has a usable full-text index. It is a
+	// property of the build and the database, not of the query, so it is probed
+	// once when the store opens.
+	fullText bool
 }
 
 type migrationExecutor interface {
@@ -82,6 +86,7 @@ func Open(ctx context.Context, driver, dsn string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	s.prepareFullText(ctx)
 	return s, nil
 }
 

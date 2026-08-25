@@ -2123,3 +2123,55 @@ INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_s
 		t.Fatalf("a complete scan must not claim to be partial: %v", complete.Diagnostics)
 	}
 }
+
+// The indexed lookup and the scan it replaces have to answer the same question.
+// This test runs whichever path the build provides, so it holds on a binary
+// built without FTS5 as well — and on one built with it, it is the proof that
+// switching to the index did not change what a caller gets.
+func TestIndexedSearchFindsTheSameContentThroughEitherPath(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:fulltext-parity?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.DB.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,enabled) VALUES('gitlab:1','core','api','api','','gitlab','1','/core/api','main',1)`)
+	exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('gitlab:1','alice','read')`)
+	exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES
+('c1','gitlab:1','main','abc','internal/settlement/handler.go',1,20,'Settlement','code','func settleInvoice() error { return nil }','h1'),
+('c2','gitlab:1','main','abc','internal/cache/warm.go',1,20,'Cache','code','func warmCache() error { return nil }','h2')`)
+
+	service := New(db)
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) {
+		return nil, errors.New("gitlab search API is unavailable")
+	})
+	// An exact word, a prefix, a path fragment, and a fragment inside a
+	// camel-case identifier all have to reach the file. The last one is what a
+	// word index cannot do on its own: "invoice" is not a prefix of
+	// settleInvoice, and someone searching for it still means that function.
+	for _, query := range []string{"settleInvoice", "settlement", "settle", "invoice"} {
+		result, err := service.SearchCode(ctx, []string{"alice"}, query, "gitlab", "", "", "", 10)
+		if err != nil {
+			t.Fatalf("%q: %v", query, err)
+		}
+		if len(result.Hits) == 0 || result.Hits[0].Path != "internal/settlement/handler.go" {
+			t.Fatalf("%q found %#v (full text: %v)", query, result.Hits, db.FullTextAvailable())
+		}
+	}
+	// A term that appears nowhere must stay empty on either path.
+	absent, err := service.SearchCode(ctx, []string{"alice"}, "kubernetes", "gitlab", "", "", "", 10)
+	if err == nil && len(absent.Hits) != 0 {
+		t.Fatalf("unrelated term matched: %#v", absent.Hits)
+	}
+	// The ACL applies to the lookup exactly as it does to the scan.
+	denied, err := service.SearchCode(ctx, []string{"mallory"}, "settleInvoice", "gitlab", "", "", "", 10)
+	if err == nil && len(denied.Hits) != 0 {
+		t.Fatalf("the lookup leaked past the ACL: %#v", denied.Hits)
+	}
+}

@@ -1279,6 +1279,85 @@ func (s *Service) indexedSourceHits(ctx context.Context, principals []string, qu
 	if len(terms) == 0 {
 		return nil, false, nil
 	}
+	type scored struct {
+		result SourceResult
+		score  int
+	}
+	var candidates []scored
+	seen := map[string]bool{}
+	capped := false
+	gather := func(statement string, args []any) error {
+		rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		read := 0
+		for rows.Next() {
+			read++
+			var item SourceResult
+			var content string
+			if err = rows.Scan(&item.LibraryID, &item.SourceType, &item.ProjectKey, &item.RepositorySlug,
+				&item.Ref, &item.QueryResult.CommitID, &item.QueryResult.Path, &content,
+				&item.QueryResult.LineStart, &item.QueryResult.LineEnd); err != nil {
+				return err
+			}
+			haystack := strings.ToLower(item.QueryResult.Path + " " + content)
+			score := 0
+			for _, term := range terms {
+				score += strings.Count(haystack, term)
+			}
+			if score == 0 {
+				continue
+			}
+			key := item.LibraryID + "\x00" + item.Ref + "\x00" + item.QueryResult.Path
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			// The stored chunk is already secret-masked, so it is returned as it is.
+			item.QueryResult.Snippet = content
+			candidates = append(candidates, scored{result: item, score: score})
+		}
+		if read >= indexedScanLimit {
+			capped = true
+		}
+		return rows.Err()
+	}
+
+	// The index answers first when there is one: it reads matching rows instead
+	// of reading rows to find out whether they match.
+	usedIndex := false
+	if statement, args, ok := s.fullTextCandidates(terms, sourceType, project, repository, ref, principals); ok {
+		if err := gather(statement, args); err != nil {
+			return nil, false, err
+		}
+		usedIndex = true
+	}
+	// The index matches whole words and their prefixes, and the scan it replaced
+	// matched anywhere inside a word — so "invoice" found settleInvoice. Rather
+	// than lose that, the scan still runs when the lookup did not fill the
+	// answer, which for a term the index knows well is never.
+	if !usedIndex || len(candidates) < limit {
+		if err := gather(s.scanCandidates(terms, sourceType, project, repository, ref, principals)); err != nil {
+			return nil, false, err
+		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
+	out := make([]SourceResult, 0, min(limit, len(candidates)))
+	for _, item := range candidates {
+		out = append(out, item.result)
+		if len(out) == limit {
+			break
+		}
+	}
+	return out, capped, nil
+}
+
+// scanCandidates builds the substring-scan form of the candidate query, which
+// is both the fallback for a store without an index and the way a match inside
+// a word is still found.
+func (s *Service) scanCandidates(terms []string, sourceType, project, repository, ref string, principals []string) (string, []any) {
 	join, predicate, args := repositoryACL(principals)
 	statement := `SELECT r.library_id,r.source_type,r.project_key,r.slug,c.ref_name,c.commit_id,c.file_path,c.content,c.line_start,c.line_end
 FROM document_chunks c JOIN repositories r ON r.id=c.repository_id ` + join + `
@@ -1309,56 +1388,49 @@ WHERE r.enabled=1 AND ` + predicate
 	}
 	statement += `) LIMIT ?`
 	args = append(args, indexedScanLimit)
-	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
-	if err != nil {
-		return nil, false, err
+	return statement, args
+}
+
+// fullTextCandidates builds the indexed-lookup form of the candidate query. It
+// returns ok=false whenever the store has no index or the terms cannot be
+// expressed as a lookup, and the caller then scans as before.
+func (s *Service) fullTextCandidates(terms []string, sourceType, project, repository, ref string, principals []string) (string, []any, bool) {
+	if !s.store.FullTextAvailable() {
+		return "", nil, false
 	}
-	defer rows.Close()
-	type scored struct {
-		result SourceResult
-		score  int
+	match := store.FullTextQuery(terms)
+	if match == "" {
+		return "", nil, false
 	}
-	var candidates []scored
-	scanned := 0
-	for rows.Next() {
-		scanned++
-		var item SourceResult
-		var content string
-		if err = rows.Scan(&item.LibraryID, &item.SourceType, &item.ProjectKey, &item.RepositorySlug,
-			&item.Ref, &item.QueryResult.CommitID, &item.QueryResult.Path, &content,
-			&item.QueryResult.LineStart, &item.QueryResult.LineEnd); err != nil {
-			return nil, false, err
-		}
-		haystack := strings.ToLower(item.QueryResult.Path + " " + content)
-		score := 0
-		for _, term := range terms {
-			score += strings.Count(haystack, term)
-		}
-		if score == 0 {
-			continue
-		}
-		// The stored chunk is already secret-masked, so it is returned as it is.
-		item.QueryResult.Snippet = content
-		candidates = append(candidates, scored{result: item, score: score})
+	join, predicate, args := repositoryACL(principals)
+	statement := `SELECT r.library_id,r.source_type,r.project_key,r.slug,c.ref_name,c.commit_id,c.file_path,c.content,c.line_start,c.line_end
+FROM document_chunks_fts f JOIN document_chunks c ON c.rowid=f.rowid JOIN repositories r ON r.id=c.repository_id ` + join + `
+WHERE r.enabled=1 AND ` + predicate + ` AND document_chunks_fts MATCH ?`
+	args = append(args, match)
+	if sourceType != "" {
+		statement += ` AND r.source_type=?`
+		args = append(args, sourceType)
 	}
-	if err = rows.Err(); err != nil {
-		return nil, false, err
+	if project != "" {
+		statement += ` AND LOWER(r.project_key)=LOWER(?)`
+		args = append(args, project)
 	}
-	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
-	out := make([]SourceResult, 0, min(limit, len(candidates)))
-	seen := map[string]bool{}
-	for _, item := range candidates {
-		key := item.result.LibraryID + "\x00" + item.result.Ref + "\x00" + item.result.QueryResult.Path
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, item.result)
-		if len(out) == limit {
-			break
-		}
+	if repository != "" {
+		statement += ` AND (LOWER(r.slug)=LOWER(?) OR LOWER(r.library_id)=LOWER(?))`
+		args = append(args, repository, repository)
 	}
-	return out, scanned >= indexedScanLimit, nil
+	if ref != "" {
+		statement += ` AND c.ref_name=?`
+		args = append(args, ref)
+	}
+	// No global ranking: ordering by bm25 makes the engine score every matching
+	// row before the cap applies, which on a term that matches most of the
+	// corpus costs a second where the scan cost milliseconds. The cap now falls
+	// on rows that all genuinely match — already a better sample than the scan
+	// it replaces — and the caller re-ranks what it receives.
+	statement += ` LIMIT ?`
+	args = append(args, indexedScanLimit)
+	return statement, args, true
 }
 
 // FileResult is one path returned by filename search.

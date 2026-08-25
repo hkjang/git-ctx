@@ -93,3 +93,66 @@ ALTER TABLE repositories_legacy RENAME TO repositories;`
 		t.Fatalf("migrated uniqueness still conflicts: %v", err)
 	}
 }
+
+// The index is only useful if it tracks the table. Chunks are replaced wholesale
+// when a ref is re-indexed, so an index that missed deletes would answer with
+// files that no longer exist — worse than having no index at all.
+func TestFullTextIndexTracksTheChunkTable(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, "sqlite", "file:fts-sync?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	if !db.FullTextAvailable() {
+		t.Skip("this build has no full-text index")
+	}
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.DB.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	exec(`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,enabled) VALUES('r1','core','api','api','','gitlab','1','/core/api','main',1)`)
+	exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('c1','r1','main','abc','internal/settlement.go',1,9,'Settlement','code','func settleInvoice() error { return nil }','h1')`)
+
+	matches := func(query string) int {
+		t.Helper()
+		var count int
+		if err := db.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks_fts WHERE document_chunks_fts MATCH ?`, query).Scan(&count); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+		return count
+	}
+	if matches(FullTextQuery([]string{"settleinvoice"})) != 1 {
+		t.Fatal("an inserted chunk must be searchable")
+	}
+	exec(`UPDATE document_chunks SET content='func settleRefund() error { return nil }' WHERE id='c1'`)
+	if matches(FullTextQuery([]string{"settleinvoice"})) != 0 || matches(FullTextQuery([]string{"settlerefund"})) != 1 {
+		t.Fatal("an updated chunk must be re-indexed, not duplicated")
+	}
+	exec(`DELETE FROM document_chunks WHERE id='c1'`)
+	if matches(FullTextQuery([]string{"settlerefund"})) != 0 {
+		t.Fatal("a deleted chunk must leave the index")
+	}
+
+	// A database upgraded from a build without the index has chunks the index
+	// has never seen. Opening the store must make them searchable, or the
+	// upgrade would quietly leave the estate unsearchable.
+	exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('c2','r1','main','abc','internal/ledger.go',1,9,'Ledger','code','func postLedger() error { return nil }','h2')`)
+	exec(`DROP TRIGGER document_chunks_fts_insert`)
+	exec(`DROP TRIGGER document_chunks_fts_update`)
+	exec(`DROP TRIGGER document_chunks_fts_delete`)
+	exec(`DROP TABLE document_chunks_fts`)
+	exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('c3','r1','main','abc','internal/quota.go',1,9,'Quota','code','func applyQuota() error { return nil }','h3')`)
+	reopened := &Store{DB: db.DB, driver: "sqlite"}
+	reopened.prepareFullText(ctx)
+	if !reopened.FullTextAvailable() {
+		t.Fatal("the index must be created on open")
+	}
+	for _, term := range []string{"postledger", "applyquota"} {
+		if matches(FullTextQuery([]string{term})) != 1 {
+			t.Fatalf("%q was not indexed by the rebuild", term)
+		}
+	}
+}

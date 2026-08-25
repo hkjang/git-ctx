@@ -28,7 +28,14 @@ func (s *Server) platformStatus(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	status := fmt.Sprintf("## git-ctx Platform Status\n\n- Version: %s\n- Metadata Database: connected\n- Enabled Repositories: %d\n- Bitbucket Repositories: %d\n- GitLab Repositories: %d\n- Index Jobs Pending: %d\n- Index Jobs Running: %d\n- Index Jobs Failed: %d\n", version.Full(), repositories, bitbucket, gitlab, pending, running, failed)
+	// Which retrieval path the searches on this instance take is an operational
+	// fact, not an implementation detail: without the index a large catalogue is
+	// searched by scanning, and that is what an operator sees in the latency.
+	lexical := "scan (no full-text index)"
+	if s.store.FullTextAvailable() {
+		lexical = "full-text index"
+	}
+	status := fmt.Sprintf("## git-ctx Platform Status\n\n- Version: %s\n- Metadata Database: connected\n- Indexed Content Search: %s\n- Enabled Repositories: %d\n- Bitbucket Repositories: %d\n- GitLab Repositories: %d\n- Index Jobs Pending: %d\n- Index Jobs Running: %d\n- Index Jobs Failed: %d\n", version.Full(), lexical, repositories, bitbucket, gitlab, pending, running, failed)
 	// Connector health belongs in the status an operator asks an agent for: a
 	// paused source is the difference between "nothing matched" and "we are not
 	// currently able to look".
