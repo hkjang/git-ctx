@@ -3303,6 +3303,8 @@ function setupOps(capabilities) {
   refreshBackups(capabilities);
   setupIndexPolicyDialog();
   $("#refresh-index-diagnostics").onclick = () => refreshIndexDiagnostics(capabilities);
+  $("#refresh-webhooks").onclick = () => refreshWebhookEvents(capabilities);
+  refreshWebhookEvents(capabilities);
   $("#refresh-inventory").onclick = () => refreshDependencyInventory(capabilities);
   $("#inventory-ecosystem").onchange = () => refreshDependencyInventory(capabilities);
   refreshDependencyInventory(capabilities);
@@ -4195,6 +4197,40 @@ async function refreshSourceHealth(capabilities = activeCapabilities) {
     );
   } catch (error) {
     target.innerHTML = `<div class="notice error">${esc(error.message)}</div>`;
+  }
+}
+
+// refreshWebhookEvents 는 소스 서버가 보낸 이벤트를 보여 줍니다. "자동 색인이 안 된다"
+// 를 진단할 때 훅 미설정·다른 저장소를 가리키는 훅·색인 실패는 완전히 다른 문제인데,
+// 앞의 둘은 화면에 흔적이 없었습니다.
+async function refreshWebhookEvents(capabilities = activeCapabilities) {
+  if (!capabilities.source) return;
+  const summary = $("#webhook-summary");
+  const target = $("#webhook-events");
+  try {
+    const result = (await api("/api/v1/admin/webhook-events?limit=50")) || {};
+    const window = result.window || {};
+    const events = rows(result.events);
+    summary.className = `notice ${window.rejected ? "warn" : window.received ? "ok" : ""}`;
+    summary.textContent = window.received
+      ? `최근 ${window.days}일 · 수신 ${window.received}건 · 색인 예약 ${window.queued}건 · 거부 ${window.rejected}건`
+      : `최근 ${window.days || 7}일 동안 수신한 웹훅이 없습니다. 소스 저장소에 훅이 등록되어 있는지 확인하세요.`;
+    target.innerHTML = events.length
+      ? `<table><thead><tr><th>수신</th><th>소스·이벤트</th><th>대상</th><th>상태</th><th>설명</th></tr></thead><tbody>${events
+          .map(
+            (item) =>
+              `<tr><td>${date(item.receivedAt)}</td><td>${esc(item.sourceType)}<br><small>${esc(item.eventType || "-")}</small></td>
+<td>${esc(item.target || "-")}</td>
+<td><span class="state ${item.status === "rejected" ? "error" : item.status === "queued" ? "ok" : "warn"}">${esc(item.status)}</span></td>
+<td>${esc(item.detail || "")}</td></tr>`,
+          )
+          .join("")}</tbody></table>`
+      : '<p class="field-help">표시할 수신 내역이 없습니다.</p>';
+    markEmptyTables();
+  } catch (error) {
+    summary.className = "notice error";
+    summary.textContent = error.message;
+    target.innerHTML = "";
   }
 }
 

@@ -800,6 +800,56 @@ func indexState(chunks int, status, message string, files int, startedAt sql.Nul
 	}
 }
 
+// webhookEvents shows what the source servers have actually sent. Without it an
+// operator debugging "this repository does not index by itself" cannot separate
+// a hook that was never configured from one that fires against a repository
+// this platform does not have.
+func (a *App) webhookEvents(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if value, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && value > 0 && value <= 500 {
+		limit = value
+	}
+	since := time.Now().UTC().Add(-7 * 24 * time.Hour)
+	var received, queued, rejected int
+	_ = a.store.DB.QueryRowContext(r.Context(), a.store.Rebind(`SELECT COUNT(*),
+COALESCE(SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END),0),
+COALESCE(SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END),0)
+FROM webhook_events WHERE received_at>=?`), since).Scan(&received, &queued, &rejected)
+
+	rows, err := a.store.DB.QueryContext(r.Context(), a.store.Rebind(`SELECT e.id,e.source_type,e.external_event_id,e.event_type,e.status,e.detail,e.received_at,
+COALESCE(r.library_id,''),COALESCE(e.repository_id,'')
+FROM webhook_events e LEFT JOIN repositories r ON r.id=e.repository_id
+ORDER BY e.received_at DESC LIMIT ?`), limit)
+	if err != nil {
+		problem(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	defer rows.Close()
+	events := []map[string]any{}
+	for rows.Next() {
+		var id, sourceType, externalID, eventType, status, detail, libraryID, repositoryID string
+		var receivedAt time.Time
+		if err = rows.Scan(&id, &sourceType, &externalID, &eventType, &status, &detail, &receivedAt, &libraryID, &repositoryID); err != nil {
+			problem(w, http.StatusInternalServerError, "internal_error", err.Error())
+			return
+		}
+		// A rejected event has no repository row, so the identifier the sender
+		// used is shown instead — that is what has to be matched up.
+		target := libraryID
+		if target == "" {
+			target = repositoryID
+		}
+		events = append(events, map[string]any{
+			"id": id, "sourceType": sourceType, "externalEventId": externalID, "eventType": eventType,
+			"status": status, "detail": detail, "receivedAt": receivedAt, "target": target,
+		})
+	}
+	jsonOut(w, http.StatusOK, map[string]any{
+		"events": events,
+		"window": map[string]any{"days": 7, "received": received, "queued": queued, "rejected": rejected},
+	})
+}
+
 // dependencyInventory is the catalogue-wide view of what the estate depends on.
 // It is scoped to the caller's own ACL like every other search, so an operator
 // without repository access does not learn the inventory of repositories they

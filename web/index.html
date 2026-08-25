@@ -687,6 +687,12 @@
             <div id="index-queue" class="notice"></div>
             <div id="index-diagnostics" class="table-wrap"></div>
             <div class="section-title">
+              <div><h3>웹훅 수신</h3><p>소스 서버가 실제로 보낸 이벤트입니다. 자동 색인이 안 될 때 훅이 도달은 하는지, 어느 저장소를 가리키는지 확인합니다.</p></div>
+              <button id="refresh-webhooks" class="secondary" type="button">수신 내역 새로고침</button>
+            </div>
+            <div id="webhook-summary" class="notice"></div>
+            <div id="webhook-events" class="table-wrap"></div>
+            <div class="section-title">
               <div><h3>의존성 인벤토리</h3><p>매니페스트에서 만든 카탈로그 전체 목록입니다. 저장소마다 버전이 갈린 패키지를 먼저 보여 줍니다.</p></div>
               <div class="button-row">
                 <label class="inline-field">생태계<select id="inventory-ecosystem">

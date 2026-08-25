@@ -34,12 +34,19 @@ func (s *Service) Enqueue(ctx context.Context, sourceType, eventID, eventType st
 	}
 	externalRepo, refs, err := parse(sourceType, payload)
 	if err != nil {
+		// A rejected event is recorded before the error is returned. Silently
+		// dropping it is what made a misdirected hook invisible: the sender sees
+		// an error, the operator sees nothing at all.
+		s.reject(ctx, sourceType, eventID, eventType, payloadHash, "", err.Error())
 		return Result{}, err
 	}
 	var repoID string
 	err = s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT id FROM repositories WHERE source_type=? AND source_external_id=? AND enabled=1`), sourceType, externalRepo).Scan(&repoID)
 	if err != nil {
-		return Result{}, errors.New("webhook repository is not registered")
+		rejection := errors.New("webhook repository is not registered")
+		s.reject(ctx, sourceType, eventID, eventType, payloadHash, externalRepo,
+			"this platform has no enabled repository with source id "+externalRepo)
+		return Result{}, rejection
 	}
 	tx, err := s.store.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -73,6 +80,32 @@ func (s *Service) Enqueue(ctx context.Context, sourceType, eventID, eventType st
 		return Result{}, err
 	}
 	return Result{EventID: eventID, Jobs: jobs}, nil
+}
+
+// reject records an event that could not be turned into indexing work, so the
+// operations screen can show that hooks are arriving and why they go nowhere.
+// It is best effort: failing to record a rejection must not change what the
+// sender is told.
+func (s *Service) reject(ctx context.Context, sourceType, eventID, eventType, payloadHash, externalRepo, detail string) {
+	if eventID == "" {
+		eventID = payloadHash
+	}
+	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`INSERT INTO webhook_events(id,source_type,external_event_id,repository_id,event_type,payload_hash,status,detail,processed_at)
+VALUES(?,?,?,?,?,?,'rejected',?,?) ON CONFLICT DO NOTHING`),
+		sourceType+":"+eventID, sourceType, eventID, externalRepo, eventType, payloadHash, truncate(detail, 500), time.Now().UTC())
+}
+
+// truncate bounds a stored reason; a webhook body can put an arbitrary string
+// into an error message.
+func truncate(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	cut := limit
+	for cut > 0 && value[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return value[:cut] + "…"
 }
 
 func parse(sourceType string, payload []byte) (string, []string, error) {
