@@ -267,20 +267,51 @@ jobs:
           # releases. Search the authenticated, paginated release collection so
           # a newly-created draft can be found immediately and a rerun can
           # safely resume it.
-          find_release_by_tag() {
-            /usr/bin/gh api --paginate \
-              "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
-              /usr/bin/jq -cse --arg tag "$TAG" '
-                [.[][] | select(.tag_name == $tag)] as $matches
-                | if ($matches | length) == 1 then $matches[0]
-                  elif ($matches | length) == 0 then empty
-                  else error("multiple releases found for tag " + $tag)
-                  end
-              '
+          lookup_release_by_tag() {
+            local pages_file lookup
+            pages_file=$(mktemp "$RUNNER_TEMP/gitctx-releases.XXXXXX")
+            if ! /usr/bin/gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$pages_file"; then
+              rm -f "$pages_file"
+              return 1
+            fi
+            if ! lookup=$(/usr/bin/jq -cs --arg tag "$TAG" '
+              [.[][] | select(.tag_name == $tag)] as $matches
+              | if ($matches | length) == 1 then
+                  {found: true, release: $matches[0]}
+                elif ($matches | length) == 0 then
+                  {found: false}
+                else
+                  error("multiple releases found for tag " + $tag)
+                end
+            ' "$pages_file"); then
+              rm -f "$pages_file"
+              return 1
+            fi
+            rm -f "$pages_file"
+            printf '%s\n' "$lookup"
           }
 
-          if release_json=$(find_release_by_tag); then
+          wait_for_release_by_tag() {
+            local attempt lookup
+            for attempt in 1 2 3 4 5 6; do
+              lookup=$(lookup_release_by_tag)
+              if /usr/bin/jq -e '.found == true' <<<"$lookup" >/dev/null; then
+                /usr/bin/jq -c '.release' <<<"$lookup"
+                return 0
+              fi
+              if [[ $attempt -lt 6 ]]; then
+                sleep "$attempt"
+              fi
+            done
+            echo "release $TAG was not visible after bounded retries" >&2
+            return 1
+          }
+
+          lookup=$(lookup_release_by_tag)
+          if /usr/bin/jq -e '.found == true' <<<"$lookup" >/dev/null; then
             release_exists=true
+            release_json=$(/usr/bin/jq -c '.release' <<<"$lookup")
             release_is_draft=$(/usr/bin/jq -r '.draft' <<<"$release_json")
           fi
 
@@ -296,7 +327,7 @@ jobs:
               --generate-notes \
               "${prerelease[@]}"
             release_is_draft=true
-            release_json=$(find_release_by_tag)
+            release_json=$(wait_for_release_by_tag)
           fi
 
           required_assets_present() {
@@ -327,8 +358,26 @@ jobs:
             uploaded=true
           fi
 
-          release_json=$(find_release_by_tag)
-          required_assets_present "$release_json"
+          wait_for_required_assets() {
+            local attempt candidate lookup
+            for attempt in 1 2 3 4 5 6; do
+              lookup=$(lookup_release_by_tag)
+              if /usr/bin/jq -e '.found == true' <<<"$lookup" >/dev/null; then
+                candidate=$(/usr/bin/jq -c '.release' <<<"$lookup")
+                if required_assets_present "$candidate"; then
+                  printf '%s\n' "$candidate"
+                  return 0
+                fi
+              fi
+              if [[ $attempt -lt 6 ]]; then
+                sleep "$attempt"
+              fi
+            done
+            echo "required assets for $TAG were not visible after bounded retries" >&2
+            return 1
+          }
+
+          release_json=$(wait_for_required_assets)
           rm -rf "$verify_dir"
           mkdir -p "$verify_dir"
           /usr/bin/gh release download "$TAG" \
