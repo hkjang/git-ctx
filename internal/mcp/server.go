@@ -185,6 +185,7 @@ Choosing a tool:
 - "Why is this like this", "when did this change": get-file-history for commits, search-merge-requests for the reasoning behind them.
 - Exact identifier: find-symbol, then get-symbol-context.
 - Before changing shared code: find-dependents shows every repository that uses it.
+- Third-party library questions ("who uses this package", "which version are we on", an advisory): find-dependency-usage reads the manifests and groups repositories by declared version. find-dependents cannot answer it — an import line has no version and a transitive dependency has no import line.
 - Documentation for a known library id: query-docs.
 - search-repositories returns repository names only, never file contents.
 

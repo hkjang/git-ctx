@@ -26,6 +26,7 @@ Context7과 같은 두 단계 MCP 흐름으로 제공하는 온프레미스 개�
 - 검색어 일치 근거·retrieval 모드·embedding 버전을 보여주는 `explain-search-result`
 - 질문 하나에서 코드·심볼·의존성·관련 파일을 응답 예산에 맞춰 조립하는 `build-context`
 - 파일 기여자를 근거와 함께 찾는 `find-code-owner`, 실제 참조와 이름 후보를 구분하는 `find-tests`
+- 매니페스트에서 만든 의존성 인벤토리 `find-dependency-usage` — 어느 저장소가 어떤 버전을 쓰는지 버전별로 묶어 응답(보안 공지·업그레이드 대응)
 - 저장소 간 구조·변경 위험·색인 건강도를 근거 중심으로 설명하는 `get-architecture-map`, `assess-change-risk`, `get-repository-health`
 - 검색 후보 단계의 저장소 ACL 적용과 브랜치·태그별 조회
 - 카탈로그 운영 역할(platform-admin·source-admin·search-admin)의 ACL 무관 전체 검색

@@ -753,3 +753,100 @@ func TestCodeSymbolsAndRepositoryMapFollowIncrementalChanges(t *testing.T) {
 		t.Fatalf("removed code intelligence survived incremental activation: symbols=%d dependencies=%d", symbols, dependencies)
 	}
 }
+
+// manifestSource serves a repository whose dependency manifests are not all
+// accepted by the content policy, which is the normal case: a policy tuned for
+// source code rarely lists .xml or .json.
+type manifestSource struct{ fakeSource }
+
+func (manifestSource) ListFiles(context.Context, source.RepositoryRef, string) ([]source.File, error) {
+	return []source.File{
+		{Path: "README.md"},
+		{Path: "go.mod"},
+		{Path: "web/package.json"},
+		{Path: "service/pom.xml"},
+	}, nil
+}
+
+func (manifestSource) GetFile(_ context.Context, _ source.RepositoryRef, _ string, path string) ([]byte, error) {
+	switch path {
+	case "go.mod":
+		return []byte("module svc\n\nrequire (\n\tgithub.com/gin-gonic/gin v1.10.0\n\tgolang.org/x/sync v0.10.0 // indirect\n)\n"), nil
+	case "web/package.json":
+		return []byte(`{"dependencies":{"lodash":"4.17.21"},"devDependencies":{"vitest":"^1.0.0"}}`), nil
+	case "service/pom.xml":
+		return []byte(`<project><dependencies><dependency><groupId>org.apache.logging.log4j</groupId><artifactId>log4j-core</artifactId><version>2.17.1</version></dependency></dependencies></project>`), nil
+	default:
+		return []byte("# Guide\nUse the service.\n"), nil
+	}
+}
+
+// The inventory is only trustworthy if it covers manifests the content policy
+// excluded, and if it is replaced rather than accumulated on every run.
+func TestSyncBuildsDependencyInventoryIncludingExcludedManifests(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(ctx, "sqlite", "file:manifest-index?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.DB.Close()
+	// A policy that only accepts Markdown: go.mod, package.json and pom.xml are
+	// all outside it, and must still be inventoried.
+	policy := DefaultPolicy()
+	policy.IncludeExtensions = []string{".md"}
+	idx := New(s, policy)
+	repo := source.Repository{ID: 11, ProjectKey: "core", Slug: "svc", Name: "svc", DefaultBranch: "main"}
+	if err = idx.SyncRepository(ctx, manifestSource{}, "gitlab", repo, []source.Reference{{Name: "main", LatestCommit: "abc123"}}); err != nil {
+		t.Fatal(err)
+	}
+	type row struct{ ecosystem, name, version, scope, path string }
+	read := func() []row {
+		t.Helper()
+		rows, err := s.DB.Query(`SELECT ecosystem,name,version,scope,manifest_path FROM repository_packages WHERE repository_id='gitlab:11' AND ref_name='main' ORDER BY ecosystem,name`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []row
+		for rows.Next() {
+			var item row
+			if err := rows.Scan(&item.ecosystem, &item.name, &item.version, &item.scope, &item.path); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, item)
+		}
+		return out
+	}
+	packages := read()
+	if len(packages) != 5 {
+		t.Fatalf("packages=%#v", packages)
+	}
+	found := map[string]row{}
+	for _, item := range packages {
+		found[item.name] = item
+	}
+	if item := found["github.com/gin-gonic/gin"]; item.version != "v1.10.0" || item.scope != "direct" || item.path != "go.mod" {
+		t.Fatalf("go dependency=%#v", item)
+	}
+	if item := found["golang.org/x/sync"]; item.scope != "transitive" {
+		t.Fatalf("the indirect marker must survive indexing: %#v", item)
+	}
+	if item := found["org.apache.logging.log4j:log4j-core"]; item.version != "2.17.1" || item.path != "service/pom.xml" {
+		t.Fatalf("maven dependency=%#v", item)
+	}
+	if item := found["vitest"]; item.scope != "dev" {
+		t.Fatalf("npm scope=%#v", item)
+	}
+
+	// A second run must replace the inventory, not double it.
+	if err = idx.SyncRepository(ctx, manifestSource{}, "gitlab", repo, []source.Reference{{Name: "main", LatestCommit: "def456"}}); err != nil {
+		t.Fatal(err)
+	}
+	if again := read(); len(again) != 5 {
+		t.Fatalf("re-index must replace the inventory, got %d rows", len(again))
+	}
+	var staging int
+	if err = s.DB.QueryRow(`SELECT COUNT(*) FROM repository_packages_staging`).Scan(&staging); err != nil || staging != 0 {
+		t.Fatalf("staging must be cleaned up: %d err=%v", staging, err)
+	}
+}

@@ -18,6 +18,7 @@ import (
 	"git-ctx/internal/codeintel"
 	"git-ctx/internal/contentsecurity"
 	"git-ctx/internal/embedding"
+	"git-ctx/internal/manifest"
 	"git-ctx/internal/source"
 	"git-ctx/internal/store"
 )
@@ -219,6 +220,7 @@ func (i *Indexer) syncRef(ctx context.Context, adapter source.RepositorySource, 
 		_, _ = i.store.DB.ExecContext(cleanupCtx, i.store.Rebind(`DELETE FROM document_chunks_staging WHERE generation_id=?`), generationID)
 		_, _ = i.store.DB.ExecContext(cleanupCtx, i.store.Rebind(`DELETE FROM code_symbols_staging WHERE generation_id=?`), generationID)
 		_, _ = i.store.DB.ExecContext(cleanupCtx, i.store.Rebind(`DELETE FROM code_dependencies_staging WHERE generation_id=?`), generationID)
+		_, _ = i.store.DB.ExecContext(cleanupCtx, i.store.Rebind(`DELETE FROM repository_packages_staging WHERE generation_id=?`), generationID)
 		if trackJob {
 			_, _ = i.store.DB.ExecContext(cleanupCtx, i.store.Rebind(`UPDATE index_jobs SET status='failed',error_message=?,completed_at=? WHERE id=?`), truncate(e.Error(), 1000), time.Now().UTC(), jobID)
 		}
@@ -430,6 +432,8 @@ VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET comm
 	// file is accepted by policy, failing to read it makes this generation
 	// incomplete, so it must never replace the active ref index.
 	candidates := 0
+	manifests := map[string]string{}
+	var manifestWarnings []string
 	for _, file := range files {
 		if !i.allowed(file) {
 			continue
@@ -458,6 +462,11 @@ VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET comm
 			if safeContent == "" {
 				continue
 			}
+		}
+		// A manifest states the versions an import line never carries, so the
+		// dependency inventory is built from the same read as the chunks.
+		if _, isManifest := manifest.Recognize(file.Path); isManifest {
+			manifests[filepath.ToSlash(file.Path)] = safeContent
 		}
 		contentLines := strings.Split(strings.ReplaceAll(safeContent, "\r\n", "\n"), "\n")
 		for _, symbol := range codeintel.Extract(file.Path, safeContent) {
@@ -505,6 +514,44 @@ VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET comm
 	}
 	if flushErr := flush(); flushErr != nil {
 		return fail(flushErr)
+	}
+	// Manifests the content policy excluded are still read: they are small, named
+	// exactly, and an inventory that silently omits the repositories whose policy
+	// happens to exclude .json or .xml would be worse than none. The count is
+	// bounded so a monorepo of a thousand packages cannot turn one index run into
+	// a thousand extra round trips.
+	for _, file := range files {
+		if len(manifests) >= maxManifestsPerRef {
+			break
+		}
+		path := filepath.ToSlash(file.Path)
+		if _, already := manifests[path]; already {
+			continue
+		}
+		if _, isManifest := manifest.Recognize(path); !isManifest {
+			continue
+		}
+		if file.Size > manifest.MaxManifestBytes {
+			continue
+		}
+		raw, readErr := adapter.GetFile(ctx, repo, snapshotRef, file.Path)
+		if readErr != nil {
+			// A manifest that cannot be read leaves the inventory incomplete for
+			// this repository, which is recorded as a warning rather than failing a
+			// generation that is otherwise complete.
+			manifestWarnings = append(manifestWarnings, fmt.Sprintf("manifest %s: %v", path, readErr))
+			continue
+		}
+		safeManifest, _ := sanitize(string(raw))
+		manifests[path] = safeManifest
+	}
+	packages := collectPackages(manifests)
+	for _, item := range packages {
+		if _, err = i.store.DB.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_packages_staging(generation_id,repository_id,ref_name,ecosystem,name,name_lower,version,scope,manifest_path,commit_id) VALUES(?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(generation_id,repository_id,ref_name,ecosystem,name,manifest_path) DO UPDATE SET version=excluded.version,scope=excluded.scope`),
+			generationID, repoID, ref.Name, item.Ecosystem, item.Name, strings.ToLower(item.Name), item.Version, item.Scope, item.ManifestPath, ref.LatestCommit); err != nil {
+			return fail(err)
+		}
 	}
 	tx, err := i.store.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -597,6 +644,20 @@ FROM code_dependencies_staging WHERE generation_id=?`), generationID); err != ni
 		_ = tx.Rollback()
 		return fail(err)
 	}
+	// The inventory is replaced for the whole ref even on an incremental run: a
+	// manifest that stopped declaring a package must stop reporting it, and the
+	// manifest set is small enough that a full replace is cheaper than tracking
+	// which files changed.
+	if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM repository_packages WHERE repository_id=? AND ref_name=?`), repoID, ref.Name); err != nil {
+		_ = tx.Rollback()
+		return fail(err)
+	}
+	if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO repository_packages(repository_id,ref_name,ecosystem,name,name_lower,version,scope,manifest_path,commit_id,indexed_at)
+SELECT repository_id,ref_name,ecosystem,name,name_lower,version,scope,manifest_path,commit_id,indexed_at
+FROM repository_packages_staging WHERE generation_id=?`), generationID); err != nil {
+		_ = tx.Rollback()
+		return fail(err)
+	}
 	for _, event := range securityEvents {
 		if _, err = tx.ExecContext(ctx, i.store.Rebind(`INSERT INTO index_security_events(id,repository_id,ref_name,file_path,finding_type,action) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`), event.id, repoID, ref.Name, event.path, event.finding, event.action); err != nil {
 			_ = tx.Rollback()
@@ -612,6 +673,10 @@ FROM code_dependencies_staging WHERE generation_id=?`), generationID); err != ni
 		return fail(err)
 	}
 	if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM code_dependencies_staging WHERE generation_id=?`), generationID); err != nil {
+		_ = tx.Rollback()
+		return fail(err)
+	}
+	if _, err = tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM repository_packages_staging WHERE generation_id=?`), generationID); err != nil {
 		_ = tx.Rollback()
 		return fail(err)
 	}
@@ -681,6 +746,15 @@ VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET comm
 	warning := ""
 	if len(embeddingWarnings) > 0 {
 		warning += strings.Join(embeddingWarnings[:min(len(embeddingWarnings), 3)], "; ")
+	}
+	// An unreadable manifest leaves the dependency inventory incomplete for this
+	// repository. The generation is otherwise sound, so it is reported rather
+	// than failed — a silent gap would make an advisory search look clean.
+	if len(manifestWarnings) > 0 {
+		if warning != "" {
+			warning += "; "
+		}
+		warning += strings.Join(manifestWarnings[:min(len(manifestWarnings), 3)], "; ")
 	}
 	// A completed job with nothing indexed is the most confusing outcome of all,
 	// so name the reason instead of leaving a silent zero.
@@ -788,6 +862,37 @@ func isKeyFile(path string) bool {
 
 // recordFiles refreshes the searchable file listing of a ref. A full sync
 // replaces the ref, an incremental sync applies only the changed paths.
+// maxManifestsPerRef bounds the extra reads one index run may spend on
+// manifests the content policy excluded.
+const maxManifestsPerRef = 60
+
+// inventoryPackage is one parsed dependency with the manifest it came from.
+type inventoryPackage struct {
+	manifest.Package
+	ManifestPath string
+}
+
+// collectPackages parses every manifest of a ref. A package declared by two
+// manifests is kept once per manifest, because "which file declares this" is
+// what an upgrade has to edit.
+func collectPackages(manifests map[string]string) []inventoryPackage {
+	paths := make([]string, 0, len(manifests))
+	for path := range manifests {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	var out []inventoryPackage
+	for _, path := range paths {
+		for _, item := range manifest.Parse(path, manifests[path]) {
+			if strings.TrimSpace(item.Name) == "" {
+				continue
+			}
+			out = append(out, inventoryPackage{Package: item, ManifestPath: path})
+		}
+	}
+	return out
+}
+
 func (i *Indexer) recordFiles(ctx context.Context, tx *sql.Tx, repoID string, ref source.Reference, files []source.File, incremental bool, removed map[string]bool) error {
 	if !incremental {
 		if _, err := tx.ExecContext(ctx, i.store.Rebind(`DELETE FROM repository_files WHERE repository_id=? AND ref_name=?`), repoID, ref.Name); err != nil {

@@ -36,7 +36,7 @@ var tables = []string{
 	"users", "roles", "user_identities", "user_roles",
 	"api_keys", "api_key_restrictions", "api_key_usage_buckets",
 	"repositories", "repository_permissions", "repository_index_policies", "repository_files", "document_chunks", "repository_ref_states", "repository_ref_changes", "search_projection_states",
-	"code_symbols", "code_dependencies", "repository_maps",
+	"code_symbols", "code_dependencies", "repository_maps", "repository_packages",
 	"context_packs", "context_pack_items",
 	"quality_benchmark_cases", "quality_benchmark_runs", "quality_benchmark_results",
 	"system_settings", "setting_versions", "audit_logs", "mcp_calls", "mcp_call_steps", "index_jobs",

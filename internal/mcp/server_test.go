@@ -710,3 +710,47 @@ FROM mcp_calls WHERE tool='search-code' ORDER BY occurred_at DESC LIMIT 1`).Scan
 		t.Errorf("an untruncated call recorded produced=%d sent=%d, which should be equal", produced, sent)
 	}
 }
+
+// An advisory asks "who is on the affected version", which no import graph can
+// answer. The tool must group by version and must never report a repository the
+// key is not allowed to see, including inside that grouping.
+func TestFindDependencyUsageGroupsVersionsAndHonoursKeyRestrictions(t *testing.T) {
+	s := fixture(t)
+	must := func(query string, args ...any) {
+		t.Helper()
+		if _, err := s.store.DB.Exec(query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(`INSERT INTO repositories(id,project_key,slug,name,description,library_id,default_branch) VALUES('r2','KCB','billing','Billing','Billing service','/kcb/billing','main')`)
+	must(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r2','alice','read')`)
+	add := func(repository, name, version, path string) {
+		t.Helper()
+		must(`INSERT INTO repository_packages(repository_id,ref_name,ecosystem,name,name_lower,version,scope,manifest_path,commit_id) VALUES(?,'main','maven',?,?,?,'direct',?,'4fa21bd')`,
+			repository, name, strings.ToLower(name), version, path)
+	}
+	add("r1", "org.apache.logging.log4j:log4j-core", "2.14.1", "pom.xml")
+	add("r2", "org.apache.logging.log4j:log4j-core", "2.17.1", "pom.xml")
+
+	out := call(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"find-dependency-usage","arguments":{"name":"org.apache.logging.log4j:log4j-core"}}}`)
+	text := out["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	for _, expected := range []string{"2.14.1", "2.17.1", "/kcb/clustara", "/kcb/billing", "pom.xml"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("response is missing %q:\n%s", expected, text)
+		}
+	}
+
+	// A key restricted to one repository must not learn that the other one exists.
+	restricted := auth.Principal{
+		UserID: "u1", Subject: "alice", ACLPrincipal: "alice", KeyID: "k1", KeyPrefix: "KEY123",
+		Scopes: []string{"find-dependency-usage"}, AllowedRepositories: []string{"/kcb/billing"},
+	}
+	scoped := callAs(t, s, restricted, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"find-dependency-usage","arguments":{"name":"org.apache.logging.log4j:log4j-core"}}}`)
+	text = scoped["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if strings.Contains(text, "/kcb/clustara") || strings.Contains(text, "2.14.1") {
+		t.Fatalf("a restricted key saw another repository's inventory:\n%s", text)
+	}
+	if !strings.Contains(text, "Repositories: 1") {
+		t.Fatalf("the summary must be recounted after the restriction:\n%s", text)
+	}
+}

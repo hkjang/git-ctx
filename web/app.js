@@ -1180,6 +1180,34 @@ function setupKnowledgeSearch() {
       reportError(error, "사용처 역추적");
     }
   };
+  $("#dependency-usage-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(event.currentTarget));
+    output.textContent = "의존성 인벤토리를 조회하는 중…";
+    try {
+      const result = await api("/api/v1/tools/dependency-usage/test", { method: "POST", body: JSON.stringify({ ...data, limit: 200 }) });
+      const users = rows(result.Users);
+      const versions = rows(result.Versions);
+      // 버전별 묶음을 먼저 보여 줍니다. 업그레이드·보안 공지 대응에서 정작 필요한
+      // 판단은 "어느 버전 그룹이 있는가" 이기 때문입니다.
+      const lines = [`패키지: ${result.Query} · 저장소 ${result.Repositories}개 · 버전 ${versions.length}종`, ""];
+      for (const version of versions) {
+        lines.push(`── ${version.Version} · ${version.Repositories.length}개 저장소 ──`);
+        lines.push(`  ${version.Repositories.join(", ")}`);
+      }
+      if (users.length) {
+        lines.push("", "── 선언 위치 ──");
+        for (const user of users) {
+          lines.push(`  ${user.LibraryID} ${user.ManifestPath}  ${user.Name} ${user.Version || "(미지정)"} [${user.Scope}, ${user.Ecosystem}]`);
+        }
+      }
+      for (const diagnostic of rows(result.Diagnostics)) lines.push(`· ${diagnostic}`);
+      output.textContent = lines.join("\n");
+    } catch (error) {
+      output.textContent = error.message;
+      reportError(error, "의존성 인벤토리");
+    }
+  };
   $("#repository-map-form").onsubmit = async (event) => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(event.currentTarget));
@@ -1318,7 +1346,7 @@ const userMCPScopes = [
   "search-code", "find-file", "read-file", "get-file-history", "list-directory", "search-merge-requests", "find-dependents", "search-semantic", "get-repository-map", "find-symbol", "get-symbol-context",
   "trace-dependencies", "compare-refs", "get-change-impact", "get-context-pack",
   "find-runbook", "export-context", "explain-search-result", "build-context",
-  "find-code-owner", "find-tests", "get-architecture-map", "assess-change-risk",
+  "find-code-owner", "find-tests", "find-dependency-usage", "get-architecture-map", "assess-change-risk",
   "get-repository-health",
 ];
 const managementMCPScopes = ["get-platform-status", "list-index-jobs", "reindex-repository"];

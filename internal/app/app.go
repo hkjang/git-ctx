@@ -357,6 +357,7 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/tools/read-file/test", a.authenticate(http.HandlerFunc(a.testReadFile)))
 	a.mux.Handle("POST /api/v1/tools/semantic/test", a.authenticate(http.HandlerFunc(a.testSemanticSearch)))
 	a.mux.Handle("POST /api/v1/tools/dependents/test", a.authenticate(http.HandlerFunc(a.testDependents)))
+	a.mux.Handle("POST /api/v1/tools/dependency-usage/test", a.authenticate(http.HandlerFunc(a.testDependencyUsage)))
 	a.mux.Handle("POST /api/v1/tools/merge-requests/test", a.authenticate(http.HandlerFunc(a.testMergeRequests)))
 	a.mux.Handle("POST /api/v1/tools/file-history/test", a.authenticate(http.HandlerFunc(a.testFileHistory)))
 	a.mux.Handle("POST /api/v1/tools/directory/test", a.authenticate(http.HandlerFunc(a.testDirectory)))

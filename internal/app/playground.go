@@ -206,6 +206,41 @@ func (a *App) testSemanticSearch(w http.ResponseWriter, r *http.Request) {
 	jsonOut(w, http.StatusOK, result)
 }
 
+// testDependencyUsage answers the inventory question from the console, so an
+// operator handling an advisory does not have to reach for an MCP client.
+func (a *App) testDependencyUsage(w http.ResponseWriter, r *http.Request) {
+	p, _ := auth.FromContext(r.Context())
+	if p.KeyID != "" && !stringContains(p.Scopes, "find-dependency-usage") {
+		problem(w, http.StatusForbidden, "forbidden", "API key is not allowed to call find-dependency-usage")
+		return
+	}
+	var in struct {
+		Name       string `json:"name"`
+		Ecosystem  string `json:"ecosystem"`
+		SourceType string `json:"sourceType"`
+		Limit      int    `json:"limit"`
+	}
+	if decode(r, &in) != nil || strings.TrimSpace(in.Name) == "" {
+		problem(w, http.StatusBadRequest, "invalid_request", "name is required")
+		return
+	}
+	result, err := a.search.FindDependencyUsage(r.Context(), searchPrincipals(p), in.Name, in.Ecosystem, in.SourceType, in.Limit)
+	if err != nil {
+		problem(w, http.StatusBadRequest, "search_failed", err.Error())
+		return
+	}
+	if p.KeyID != "" && len(p.AllowedRepositories) > 0 {
+		users := result.Users[:0]
+		for _, item := range result.Users {
+			if repositoryAllowed(item.LibraryID, p.AllowedRepositories) {
+				users = append(users, item)
+			}
+		}
+		result.Users = users
+	}
+	jsonOut(w, http.StatusOK, result)
+}
+
 func (a *App) testDependents(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
 	if p.KeyID != "" && !stringContains(p.Scopes, "find-dependents") {

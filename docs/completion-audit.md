@@ -27,12 +27,34 @@
 | 관리자 연동 설정 | 완료 | Keycloak·Bitbucket·GitLab·Confluence·Jira·Embedding·Reranker 전용 필드, Bitbucket/GitLab 실제 Query Search 진단과 결과 표시, 일반값 자동 재조회, 버전·수정자·시각과 비밀 필드별 마스킹·암호화 저장 |
 | OpenSearch | 완료(계약 시험) | 관리자 연결·index mapping 시험, ref별 delete/bulk projection, repository·ref·principal 선필터, DB 청크 hydration, Worker 재시도 |
 | 최초·복구 관리자 세션 | 완료 | 최초 일회용 토큰을 30분 HttpOnly·SameSite 세션으로 교환하고 실제 `platform-admin` SSO 로그인 성공 시 전역 폐기. 이후 CLI 서명 복구 토큰의 1회 소비·만료·Origin 검증·영구 MCP 키 생성 차단 |
+| 의존성 인벤토리 | 완료 | 색인 시 go.mod·package.json·pom.xml·build.gradle·requirements.txt·pyproject.toml·Cargo.toml 파싱, 내용 정책 제외 매니페스트 포함, ref 단위 교체, `find-dependency-usage` 버전 묶음과 저장소 제한 키 비노출 계약 시험 |
 | 버전 표시 | 완료 | 공개 설정과 `/api/v1/me` 버전 제공, 로그인 전 상단·안내와 로그인 후 프로필 표시 |
 | 비밀정보 관리 | 완료(계약 시험) | 암호화 DB/Vault KV v2 backend, 등록·회전·중지, 원문 비노출, `secret://` 동적 참조와 Fail Closed |
 | 관리자 UI 구조 | 완료 | 개인화 영역과 분리된 권한 기반 관리자 진입, 역할별 대메뉴, 설정 종류별 탭, 저장 진행·오류 상태 |
 | Keycloak 설정 안정성 | 완료 | 4개 필드 UI, 자동 Issuer·Redirect·표준 Scope/Claim·동일 이름 역할/그룹, 저장값 자동 재조회, Discovery/JWKS/token exchange, PKCE callback·세션 E2E, Access Token 역할 병합, 실제 platform-admin 로그인 뒤 Bootstrap 폐기 |
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
+
+2026-08-25 v0.52.0 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./...                 PASS
+go vet ./... && go build ./...               PASS
+매니페스트 파서 회귀(7종 생태계)               PASS
+색인 인벤토리 통합(정책 제외·재색인 교체)       PASS
+MCP 종단(버전 묶음·저장소 제한 키)             PASS
+사용자·관리자 UI JavaScript parse·계약 시험    PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.52.0 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.52.0 빌드      PASS
+```
+
+이번 검증에는 의존성 매니페스트 인벤토리가 포함된다. 내용 색인 정책이 제외한
+매니페스트도 읽어 인벤토리를 만들고, 재색인 시 ref 단위로 교체하며, staging 을
+정리하는 것을 확인했다. `find-dependency-usage` 는 버전별 저장소 묶음을 먼저
+제시하고, 저장소가 제한된 API 키에는 묶음과 저장소 수까지 재계산해 허용되지 않은
+저장소를 노출하지 않는다. 아직 인벤토리가 비어 있는 상태와 실제 사용처가 없는
+상태를 응답에서 구분하는 것도 회귀 시험으로 고정했다.
 
 2026-08-25 v0.51.1 릴리스 전 검증 결과:
 

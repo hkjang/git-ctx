@@ -297,6 +297,16 @@ var registry = []tool{
 		handler:       handleFindTests,
 	},
 	{
+		name:        toolcatalog.FindDependencyUsage,
+		description: "Reports which repositories declare a third-party package and at which versions, read from their manifests (go.mod, package.json, pom.xml, build.gradle, requirements.txt, pyproject.toml, Cargo.toml). Use it for an advisory (\"who is on the affected version\") or an upgrade plan; find-dependents answers the different question of who imports a symbol, and cannot see versions or transitive dependencies at all.",
+		schema: map[string]any{"type": "object", "additionalProperties": false, "required": []string{"name"}, "properties": map[string]any{
+			"name":       map[string]string{"type": "string", "description": "Package name as its ecosystem writes it: github.com/gin-gonic/gin, lodash, org.apache.logging.log4j:log4j-core"},
+			"ecosystem":  map[string]string{"type": "string", "description": "Optional filter: go, npm, maven, gradle, pypi, cargo"},
+			"sourceType": map[string]string{"type": "string", "description": "Optional filter: bitbucket or gitlab"},
+			"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 500}}},
+		handler: handleFindDependencyUsage,
+	},
+	{
 		name:        toolcatalog.GetArchitectureMap,
 		description: "Reports what each accessible repository appears to be -- HTTP service, database user, message consumer, scheduler -- inferred from what it imports, and which repositories reference one another. Every claim carries the imports behind it. Endpoint paths, topic names and SQL embedded in application code are not indexed and are not reported.",
 		schema: map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{

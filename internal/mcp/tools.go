@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 
 	"git-ctx/internal/auth"
 	"git-ctx/internal/search"
@@ -417,6 +419,62 @@ func handleFindCodeOwner(s *Server, r *http.Request, p auth.Principal, args map[
 		return "", false, errors.New("path is unavailable or access is denied")
 	}
 	return search.FormatOwners(result), len(result.Owners) == 0, nil
+}
+
+func handleFindDependencyUsage(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
+	var result search.DependencyUsage
+	result, err = s.search.FindDependencyUsage(r.Context(), principalACLs(p), stringArg(args, "name"),
+		stringArg(args, "ecosystem"), stringArg(args, "sourceType"), intArg(args, "limit", 100))
+	if err != nil {
+		return "", false, err
+	}
+	// A key restricted to certain repositories must not learn the inventory of
+	// the others, including through the version grouping.
+	if len(p.AllowedRepositories) > 0 {
+		users := result.Users[:0]
+		for _, user := range result.Users {
+			if libraryAllowed(user.LibraryID, p.AllowedRepositories) {
+				users = append(users, user)
+			}
+		}
+		result.Users = users
+		result = rebuildDependencyVersions(result)
+	}
+	return search.FormatDependencyUsage(result), len(result.Users) == 0, nil
+}
+
+// rebuildDependencyVersions recomputes the version grouping after a key's
+// repository restriction removed declarations, so the summary counts never
+// describe repositories the caller may not see.
+func rebuildDependencyVersions(result search.DependencyUsage) search.DependencyUsage {
+	versions := map[string]map[string]bool{}
+	repositories := map[string]bool{}
+	for _, user := range result.Users {
+		declared := user.Version
+		if strings.TrimSpace(declared) == "" {
+			declared = "(선언 없음)"
+		}
+		if versions[declared] == nil {
+			versions[declared] = map[string]bool{}
+		}
+		versions[declared][user.LibraryID] = true
+		repositories[user.LibraryID] = true
+	}
+	rebuilt := result
+	rebuilt.Repositories = len(repositories)
+	rebuilt.Versions = rebuilt.Versions[:0]
+	for version, libraries := range versions {
+		list := make([]string, 0, len(libraries))
+		for library := range libraries {
+			list = append(list, library)
+		}
+		sort.Strings(list)
+		rebuilt.Versions = append(rebuilt.Versions, search.DependencyVersion{Version: version, Repositories: list})
+	}
+	sort.SliceStable(rebuilt.Versions, func(i, j int) bool {
+		return len(rebuilt.Versions[i].Repositories) > len(rebuilt.Versions[j].Repositories)
+	})
+	return rebuilt
 }
 
 func handleFindTests(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {

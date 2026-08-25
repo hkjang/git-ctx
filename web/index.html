@@ -187,6 +187,8 @@
                   <dd>작업 목적에 맞는 컨텍스트와 저장소 아키텍처 구성</dd>
                   <dt>find-code-owner / find-tests</dt>
                   <dd>코드 담당자와 변경 관련 테스트 탐색</dd>
+                  <dt>find-dependency-usage</dt>
+                  <dd>매니페스트 기반 의존성 인벤토리 — 어느 저장소가 어떤 버전을 쓰는지</dd>
                   <dt>assess-change-risk / get-repository-health</dt>
                   <dd>변경 위험과 저장소의 색인·의존성 상태 진단</dd>
                 </dl>
@@ -241,6 +243,7 @@
                   <label><input type="checkbox" name="scope" value="build-context" /> build-context</label>
                   <label><input type="checkbox" name="scope" value="find-code-owner" /> find-code-owner</label>
                   <label><input type="checkbox" name="scope" value="find-tests" /> find-tests</label>
+                  <label><input type="checkbox" name="scope" value="find-dependency-usage" /> find-dependency-usage</label>
                   <label><input type="checkbox" name="scope" value="get-architecture-map" /> get-architecture-map</label>
                   <label><input type="checkbox" name="scope" value="assess-change-risk" /> assess-change-risk</label>
                   <label><input type="checkbox" name="scope" value="get-repository-health" /> get-repository-health</label>
@@ -357,6 +360,15 @@
                   <label class="wide">대상 심볼·모듈·테이블<input name="target" required placeholder="Service.GetGPU, internal/auth, users 테이블" /></label>
                   <label>소스<select name="sourceType"><option value="">전체</option><option value="bitbucket">Bitbucket</option><option value="gitlab">GitLab</option></select></label>
                   <div class="wide button-row"><button type="submit">사용처 역추적</button></div>
+                </form>
+              </article>
+              <article class="card" data-tool-category="analyze" data-tool-search="dependency package version library advisory upgrade 의존성 버전 라이브러리 취약점">
+                <h3>Dependency Usage</h3>
+                <form id="dependency-usage-form" class="form-row">
+                  <label class="wide">패키지 이름<input name="name" required placeholder="org.apache.logging.log4j:log4j-core, lodash, github.com/gin-gonic/gin" /></label>
+                  <label>생태계<select name="ecosystem"><option value="">전체</option><option value="go">go</option><option value="npm">npm</option><option value="maven">maven</option><option value="gradle">gradle</option><option value="pypi">pypi</option><option value="cargo">cargo</option></select></label>
+                  <label>소스<select name="sourceType"><option value="">전체</option><option value="bitbucket">Bitbucket</option><option value="gitlab">GitLab</option></select></label>
+                  <div class="wide button-row"><button type="submit">사용 저장소·버전 조회</button></div>
                 </form>
               </article>
               <article class="card" data-tool-category="explore" data-tool-search="repository map structure languages entrypoints">

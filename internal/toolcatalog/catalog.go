@@ -28,6 +28,7 @@ const (
 	ExportContext       = "export-context"
 	ExplainSearchResult = "explain-search-result"
 	BuildContext        = "build-context"
+	FindDependencyUsage = "find-dependency-usage"
 	FindCodeOwner       = "find-code-owner"
 	FindTests           = "find-tests"
 	GetArchitectureMap  = "get-architecture-map"
@@ -64,6 +65,7 @@ var names = []string{
 	BuildContext,
 	FindCodeOwner,
 	FindTests,
+	FindDependencyUsage,
 	GetArchitectureMap,
 	AssessChangeRisk,
 	GetRepositoryHealth,
