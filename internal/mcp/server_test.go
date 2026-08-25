@@ -754,3 +754,126 @@ func TestFindDependencyUsageGroupsVersionsAndHonoursKeyRestrictions(t *testing.T
 		t.Fatalf("the summary must be recounted after the restriction:\n%s", text)
 	}
 }
+
+// An API key's repository restriction narrows access below the user's own ACL,
+// and every other tool honours it. A context pack bundles several repositories,
+// so a pack is exactly where an unfiltered read hands a restricted key the
+// content it was restricted away from.
+func TestContextPackHonoursKeyRepositoryRestriction(t *testing.T) {
+	s := fixture(t)
+	must := func(query string, args ...any) {
+		t.Helper()
+		if _, err := s.store.DB.Exec(query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(`INSERT INTO repositories(id,project_key,slug,name,description,library_id,default_branch) VALUES('r3','KCB','payments','Payments','Payment service','/kcb/payments','main')`)
+	must(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r3','alice','read')`)
+	must(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('p1','r3','main','9ab','settlement.go',1,20,'Settlement','code','func Settle() { /* GPU billing secret sauce */ }','ph1')`)
+	must(`INSERT INTO context_pack_items(pack_id,library_id,ref_name,query_hint,position) VALUES('p1','/kcb/payments','main','GPU',1)`)
+
+	// Without a key restriction the pack spans both repositories.
+	full := call(t, s, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get-context-pack","arguments":{"pack":"gpu-platform","query":"GPU"}}}`)
+	text := full["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "/kcb/payments") && !strings.Contains(text, "settlement.go") {
+		t.Skipf("pack fixture did not include the second repository: %s", text)
+	}
+
+	restricted := auth.Principal{
+		UserID: "u1", Subject: "alice", ACLPrincipal: "alice", KeyID: "k1", KeyPrefix: "KEY123",
+		Scopes: []string{"get-context-pack"}, AllowedRepositories: []string{"/kcb/clustara"},
+	}
+	scoped := callAs(t, s, restricted, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get-context-pack","arguments":{"pack":"gpu-platform","query":"GPU"}}}`)
+	text = scoped["result"].(map[string]any)["content"].([]any)[0].(map[string]any)["text"].(string)
+	if strings.Contains(text, "/kcb/payments") || strings.Contains(text, "settlement.go") || strings.Contains(text, "billing secret sauce") {
+		t.Fatalf("a restricted key received content from a repository outside its allowlist:\n%s", text)
+	}
+	if !strings.Contains(text, "clustara") && !strings.Contains(text, "GPU") {
+		t.Fatalf("the allowed repository must still be returned:\n%s", text)
+	}
+}
+
+// A key's repository allowlist is enforced tool by tool, which is exactly the
+// kind of rule a new tool forgets. This guard calls every non-administrative
+// tool with a restricted key against a repository holding a distinctive marker
+// and fails if the marker comes back — and it fails just as loudly when a tool
+// is missing from the table, so adding a tool forces a decision about it.
+func TestNoToolLeaksOutsideTheKeyAllowlist(t *testing.T) {
+	s := fixture(t)
+	must := func(query string, args ...any) {
+		t.Helper()
+		if _, err := s.store.DB.Exec(query, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const marker = "ZZTOPSECRETMARKER"
+	must(`INSERT INTO repositories(id,project_key,slug,name,description,library_id,default_branch) VALUES('r9','KCB','vault','Vault','GPU ` + marker + `','/kcb/vault','main')`)
+	must(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r9','alice','read')`)
+	must(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('z1','r9','main','9ab','` + marker + `.go',1,9,'GPU ` + marker + `','code','func GPU() { // ` + marker + ` }','zh1')`)
+	must(`INSERT INTO repository_files(repository_id,ref_name,path,base_name,size_bytes,content_indexed,commit_id) VALUES('r9','main','` + marker + `.go','` + marker + `.go',20,1,'9ab')`)
+	must(`INSERT INTO code_symbols(id,repository_id,ref_name,commit_id,file_path,name,qualified_name,symbol_kind,language,signature,documentation,line_start,line_end,content_hash) VALUES('zs1','r9','main','9ab','` + marker + `.go','GPU','GPU','function','go','func GPU()','` + marker + `',1,9,'zsh1')`)
+	must(`INSERT INTO code_dependencies(id,repository_id,ref_name,commit_id,file_path,from_symbol,target,dependency_kind,line_number) VALUES('zd1','r9','main','9ab','` + marker + `.go','GPU','Service.GetGPU','call',3)`)
+	must(`INSERT INTO repository_packages(repository_id,ref_name,ecosystem,name,name_lower,version,scope,manifest_path,commit_id) VALUES('r9','main','npm','gpu-lib','gpu-lib','1.0.0','direct','` + marker + `/package.json','9ab')`)
+	must(`INSERT INTO repository_maps(repository_id,ref_name,commit_id,summary_json) VALUES('r9','main','9ab','{"languages":{"go":1},"keyFiles":["` + marker + `.go"]}')`)
+	must(`INSERT INTO context_pack_items(pack_id,library_id,ref_name,query_hint,position) VALUES('p1','/kcb/vault','main','GPU',2)`)
+	must(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id) VALUES('r9','main','9ab')`)
+
+	// Every non-administrative tool, with arguments that would surface the marked
+	// repository if the allowlist were ignored.
+	calls := map[string]string{
+		"resolve-library-id":    `{"libraryName":"vault","query":"GPU"}`,
+		"query-docs":            `{"libraryId":"/kcb/vault","query":"GPU"}`,
+		"search-repositories":   `{"query":"GPU"}`,
+		"search-source":         `{"query":"GPU"}`,
+		"search-code":           `{"query":"GPU"}`,
+		"find-file":             `{"pattern":"*.go"}`,
+		"read-file":             `{"libraryId":"/kcb/vault","path":"` + marker + `.go"}`,
+		"search-semantic":       `{"query":"GPU"}`,
+		"find-dependents":       `{"target":"Service.GetGPU"}`,
+		"search-merge-requests": `{"query":"GPU"}`,
+		"get-file-history":      `{"libraryId":"/kcb/vault","path":"` + marker + `.go"}`,
+		"list-directory":        `{"libraryId":"/kcb/vault","path":""}`,
+		"get-repository-map":    `{"libraryId":"/kcb/vault"}`,
+		"find-symbol":           `{"query":"GPU"}`,
+		"get-symbol-context":    `{"libraryId":"/kcb/vault","symbol":"GPU"}`,
+		"trace-dependencies":    `{"libraryId":"/kcb/vault","symbol":"GPU"}`,
+		"compare-refs":          `{"libraryId":"/kcb/vault","baseRef":"main","headRef":"main"}`,
+		"get-change-impact":     `{"libraryId":"/kcb/vault","baseRef":"main","headRef":"main"}`,
+		"get-context-pack":      `{"pack":"gpu-platform","query":"GPU"}`,
+		"find-runbook":          `{"query":"GPU"}`,
+		"export-context":        `{"libraryIds":["/kcb/vault"],"query":"GPU"}`,
+		"explain-search-result": `{"libraryId":"/kcb/vault","query":"GPU"}`,
+		"build-context":         `{"task":"GPU"}`,
+		"find-code-owner":       `{"path":"` + marker + `.go"}`,
+		"find-tests":            `{"symbol":"GPU"}`,
+		"find-dependency-usage": `{"name":"gpu-lib"}`,
+		"get-architecture-map":  `{}`,
+		"assess-change-risk":    `{"libraryId":"/kcb/vault","paths":["` + marker + `.go"]}`,
+		"get-repository-health": `{}`,
+	}
+	restricted := auth.Principal{
+		UserID: "u1", Subject: "alice", ACLPrincipal: "alice", KeyID: "k1", KeyPrefix: "KEY123",
+		AllowedRepositories: []string{"/kcb/clustara"},
+	}
+	for index := range registry {
+		entry := &registry[index]
+		if len(entry.adminRoles) > 0 {
+			continue
+		}
+		arguments, ok := calls[entry.name]
+		if !ok {
+			t.Fatalf("tool %q is not covered by the allowlist leak guard; add it with arguments that would surface a foreign repository", entry.name)
+		}
+		restricted.Scopes = []string{entry.name}
+		body := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":%q,"arguments":%s}}`, entry.name, arguments)
+		out := callAs(t, s, restricted, body)
+		result, ok := out["result"].(map[string]any)
+		if !ok {
+			continue // an error answer cannot leak content
+		}
+		text := result["content"].([]any)[0].(map[string]any)["text"].(string)
+		if strings.Contains(text, marker) {
+			t.Fatalf("%s returned content from a repository outside the key allowlist:\n%s", entry.name, text)
+		}
+	}
+}

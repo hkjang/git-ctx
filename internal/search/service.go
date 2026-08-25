@@ -686,7 +686,21 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 // concatenated. A ten-repository pack therefore spent the agent's context on
 // whichever repositories happened to be first, and an agent joining a codebase
 // got search results without ever seeing the README that explains them.
+// ContextPack renders a pack for a caller whose access is bounded only by the
+// repository ACL.
 func (s *Service) ContextPack(ctx context.Context, principals []string, slug, query string) (ContextPackResult, error) {
+	return s.ContextPackFor(ctx, principals, nil, slug, query)
+}
+
+// ContextPackFor renders a pack for a caller whose API key additionally narrows
+// which repositories it may read.
+//
+// A pack deliberately bundles several repositories, so it is the one place
+// where honouring the ACL alone is not enough: a key restricted to one
+// repository would otherwise receive the contents of every other repository in
+// the pack that its user can read. allowed is the key's repository allowlist;
+// an empty list means the key adds no restriction.
+func (s *Service) ContextPackFor(ctx context.Context, principals, allowed []string, slug, query string) (ContextPackResult, error) {
 	slug, query = strings.TrimSpace(slug), strings.TrimSpace(query)
 	if slug == "" || query == "" {
 		return ContextPackResult{}, errors.New("pack and query are required")
@@ -717,6 +731,7 @@ func (s *Service) ContextPack(ctx context.Context, principals []string, slug, qu
 	if err != nil {
 		return ContextPackResult{}, err
 	}
+	items, entrypoints = restrictPack(items, entrypoints, allowed)
 
 	gathered := map[string]sectionData{
 		"conventions": {},
@@ -767,6 +782,38 @@ func (s *Service) packItems(ctx context.Context, packID string) ([]packItem, err
 }
 
 type packEntrypoint struct{ symbol, libraryID string }
+
+// restrictPack drops the pack members a key may not read. Filtering here rather
+// than at render time keeps the restriction ahead of every gather step, so no
+// query is issued for a repository the key is not allowed to see.
+func restrictPack(items []packItem, entrypoints []packEntrypoint, allowed []string) ([]packItem, []packEntrypoint) {
+	if len(allowed) == 0 {
+		return items, entrypoints
+	}
+	permitted := func(libraryID string) bool {
+		for _, candidate := range allowed {
+			if strings.EqualFold(strings.TrimSpace(candidate), strings.TrimSpace(libraryID)) {
+				return true
+			}
+		}
+		return false
+	}
+	keptItems := items[:0]
+	for _, item := range items {
+		if permitted(item.libraryID) {
+			keptItems = append(keptItems, item)
+		}
+	}
+	keptEntrypoints := entrypoints[:0]
+	for _, entrypoint := range entrypoints {
+		// An entrypoint without a library is answered from whatever the caller can
+		// read, so it stays; the gather step applies the ACL to it.
+		if entrypoint.libraryID == "" || permitted(entrypoint.libraryID) {
+			keptEntrypoints = append(keptEntrypoints, entrypoint)
+		}
+	}
+	return keptItems, keptEntrypoints
+}
 
 func (s *Service) packEntrypoints(ctx context.Context, packID string) ([]packEntrypoint, error) {
 	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(

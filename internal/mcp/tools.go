@@ -320,7 +320,7 @@ func handleGetChangeImpact(s *Server, r *http.Request, p auth.Principal, args ma
 
 func handleGetContextPack(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
 	var item search.ContextPackResult
-	item, err = s.search.ContextPack(r.Context(), principalACLs(p), stringArg(args, "pack"), stringArg(args, "query"))
+	item, err = s.search.ContextPackFor(r.Context(), principalACLs(p), p.AllowedRepositories, stringArg(args, "pack"), stringArg(args, "query"))
 	if err == nil {
 		text = fmt.Sprintf("# Context Pack: %s\n\n%s\n\n%s", item.Name, item.Description, item.Content)
 	}

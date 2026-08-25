@@ -35,6 +35,25 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-25 v0.52.6 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./...                 PASS
+go vet ./... && go build ./...               PASS
+Context Pack 키 저장소 제한 회귀 시험          PASS
+전 도구 허용 목록 누출 가드(29종)              PASS
+사용자·관리자 UI JavaScript parse·계약 시험    PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.52.6 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.52.6 빌드      PASS
+```
+
+이번 검증은 API 키 저장소 제한이 모든 도구에서 지켜지는지를 고정한다.
+`get-context-pack` 만 제한을 확인하지 않아 팩에 포함된 다른 저장소 내용을
+반환했고, 이제 수집 이전 단계에서 구성원을 거른다. 표식 저장소를 이용한 전 도구
+가드는 표에 없는 도구가 레지스트리에 추가되어도 실패하므로, 새 도구가 같은 검사를
+건너뛸 수 없다.
+
 2026-08-25 v0.52.5 릴리스 전 검증 결과:
 
 ```text

@@ -542,7 +542,7 @@ func (a *App) testContextPack(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "pack and query are required")
 		return
 	}
-	item, err := a.search.ContextPack(r.Context(), searchPrincipals(p), in.Pack, in.Query)
+	item, err := a.search.ContextPackFor(r.Context(), searchPrincipals(p), p.AllowedRepositories, in.Pack, in.Query)
 	if err != nil {
 		problem(w, 400, "search_failed", err.Error())
 		return
