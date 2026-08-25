@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"git-ctx/internal/store"
 )
@@ -344,5 +345,45 @@ func TestResolvedVersionsDecideTheAdvisory(t *testing.T) {
 	}
 	if strings.Join(affected.Affected, ",") != "/core/api" {
 		t.Fatalf("a locked affected version must win over the range: %#v", affected)
+	}
+}
+
+// An advisory answer is only as current as the index behind it. A repository
+// reported safe may have taken the affected version after its last index run,
+// so the age has to be stated rather than assumed.
+func TestFindDependencyUsageStatesIndexAge(t *testing.T) {
+	db := inventoryFixture(t, "dependency-freshness")
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.DB.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	stale := time.Now().UTC().Add(-40 * 24 * time.Hour)
+	exec(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,indexed_at) VALUES('api','main','abc',?)`, stale)
+	exec(`INSERT INTO repository_ref_states(repository_id,ref_name,commit_id,indexed_at) VALUES('worker','main','abc',?)`, time.Now().UTC())
+
+	result, err := New(db).FindDependencyUsage(context.Background(), []string{"alice"},
+		"org.apache.logging.log4j:log4j-core", "", "", "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(result.Diagnostics, " ")
+	if !strings.Contains(joined, "freshness:") || !strings.Contains(joined, "/core/api") {
+		t.Fatalf("a stale index must be named: %v", result.Diagnostics)
+	}
+	if strings.Contains(joined, "/core/worker") {
+		t.Fatalf("a freshly indexed repository must not be listed as stale: %v", result.Diagnostics)
+	}
+
+	// With every repository freshly indexed the answer carries no freshness note.
+	exec(`UPDATE repository_ref_states SET indexed_at=? WHERE repository_id='api'`, time.Now().UTC())
+	fresh, err := New(db).FindDependencyUsage(context.Background(), []string{"alice"},
+		"org.apache.logging.log4j:log4j-core", "", "", "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(fresh.Diagnostics, " "), "freshness:") {
+		t.Fatalf("a current index needs no note: %v", fresh.Diagnostics)
 	}
 }

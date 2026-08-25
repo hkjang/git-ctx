@@ -35,6 +35,23 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-25 v0.52.7 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./...                 PASS
+go vet ./... && go build ./...               PASS
+의존성 답변 색인 최신성 시험                   PASS
+콘솔 REST 20종 키 제한 감사                    PASS(수정 없음)
+사용자·관리자 UI JavaScript parse·계약 시험    PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.52.7 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.52.7 빌드      PASS
+```
+
+이번 검증에는 의존성 답변의 색인 최신성이 포함된다. 오래된 색인에 근거한 "안전"
+판정이 잘못된 안심으로 읽히지 않도록, 답변이 참조한 저장소 중 오래된 것을 지목한다.
+콘솔 REST 경로의 키 저장소 제한은 20종 모두 적용되어 있어 수정이 필요 없었다.
+
 2026-08-25 v0.52.6 릴리스 전 검증 결과:
 
 ```text

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"git-ctx/internal/calltrace"
 	"git-ctx/internal/manifest"
@@ -171,6 +172,17 @@ WHERE r.enabled=1 AND ` + predicate + ` AND (pkg.name_lower=LOWER(?) OR pkg.name
 	if fixedIn != "" {
 		result = classifyAgainstFix(result, fixedIn)
 	}
+	// An advisory answer is only as current as the index behind it. A repository
+	// indexed a month ago may have upgraded since, and — the direction that
+	// matters — one reported as safe may have taken the affected version after
+	// the last index run. The age is stated rather than left to be assumed.
+	if libraries := usedLibraries(result.Users); len(libraries) > 0 {
+		if ages, ageErr := s.IndexAges(ctx, principals, libraries, time.Now().UTC()); ageErr == nil {
+			if note := FreshnessNote(ages); note != "" {
+				result.Diagnostics = append(result.Diagnostics, "freshness: "+note)
+			}
+		}
+	}
 	span.End(statusFor(len(result.Users)), scanned, len(result.Users), fmt.Sprintf("%d repositories, %d distinct versions", result.Repositories, len(result.Versions)))
 
 	if len(result.Users) == 0 {
@@ -301,6 +313,15 @@ func regroupPreferringResolved(result DependencyUsage, resolved map[string]bool)
 		return regrouped.Versions[i].Version > regrouped.Versions[j].Version
 	})
 	return regrouped
+}
+
+// usedLibraries lists the repositories an answer drew on, in a stable order.
+func usedLibraries(users []DependencyUser) []string {
+	seen := map[string]bool{}
+	for _, user := range users {
+		seen[user.LibraryID] = true
+	}
+	return sortedLibraries(seen)
 }
 
 // countResolved reports how many repositories were judged from a lock file.
