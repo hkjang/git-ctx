@@ -7,7 +7,7 @@ AMD64 환경으로 반입할 수 있는 Docker/OCI 이미지 보관 파일이다
 ## 무결성 확인과 Docker 로드
 
 ```bash
-VERSION=0.74.2
+VERSION=0.75.0
 sha256sum -c "git-ctx-v${VERSION}.tar.gz.sha256"
 gzip -dc "git-ctx-v${VERSION}.tar.gz" | docker load
 docker image inspect "git-ctx:v${VERSION}" --format '{{.Id}} {{.Architecture}} {{.Os}}'
@@ -19,7 +19,7 @@ docker image inspect "git-ctx:v${VERSION}" --format '{{.Id}} {{.Architecture}} {
 Secret Store에서 계속 주입한다.
 
 ```bash
-VERSION=0.74.2
+VERSION=0.75.0
 # 최초 한 번만 생성하고 이후에는 Secret Store의 같은 값을 주입한다.
 # 이 키는 복구 토큰 서명, 저장된 설정 암호화 키, 백업 아카이브 봉인의 뿌리다.
 # 백업 볼륨과 분리해 보관한다.
@@ -48,7 +48,7 @@ Secret Store 항목으로 주입한다. 두 값은 DB와 백업 볼륨 외부의
 같다.
 
 ```bash
-VERSION=0.74.2
+VERSION=0.75.0
 gzip -dc "git-ctx-v${VERSION}.tar.gz" \
   | sudo ctr --namespace k8s.io images import -
 sudo ctr --namespace k8s.io images list | grep git-ctx
@@ -83,11 +83,11 @@ docker inspect <container> --format '{{.Config.Image}}'
 ```
 
 `build` 값에는 커밋과 빌드 시각이 포함되므로, 같은 버전 문자열이라도 다른 빌드인지
-구분할 수 있습니다. 이미지 빌드 시 `--build-arg VERSION=v0.74.2` 을 주면 소스의
+구분할 수 있습니다. 이미지 빌드 시 `--build-arg VERSION=v0.75.0` 을 주면 소스의
 버전과 다를 때 빌드가 실패하므로, 태그와 코드가 어긋난 이미지가 만들어지지 않습니다.
 
-릴리스 아카이브에는 정식 태그 `git-ctx:v0.74.2`와 호환 태그
-`git-ctx:0.74.2`가 함께 들어 있습니다. 신규 배포 구성에는 정식 태그를 사용합니다.
+릴리스 아카이브에는 정식 태그 `git-ctx:v0.75.0`와 호환 태그
+`git-ctx:0.75.0`가 함께 들어 있습니다. 신규 배포 구성에는 정식 태그를 사용합니다.
 
 ## 릴리스 자산 보증
 
@@ -102,6 +102,6 @@ checksum, Docker archive, 버전, 커밋, 플랫폼, 비루트 UID를 모두 재
 운영 반입 전에도 저장소에 포함된 검증 스크립트로 같은 계약을 확인할 수 있습니다.
 
 ```bash
-scripts/verify-offline-image.sh 0.74.2 \
-  git-ctx-v0.74.2.tar.gz <릴리스-커밋-SHA>
+scripts/verify-offline-image.sh 0.75.0 \
+  git-ctx-v0.75.0.tar.gz <릴리스-커밋-SHA>
 ```
