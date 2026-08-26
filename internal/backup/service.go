@@ -42,13 +42,27 @@ var tables = []string{
 	"system_settings", "setting_versions", "audit_logs", "mcp_calls", "mcp_call_steps", "index_jobs",
 	"webhook_events", "index_security_events", "mcp_tools", "notifications", "notification_deliveries",
 	"managed_secrets", "managed_secret_versions",
+	// The keys this platform seals its own data with, and the bootstrap token
+	// sealed by them. Without these a migrated or restored database carries
+	// settings and API keys that nothing on the other side can open: the
+	// database migration endpoint reported success and left a database the
+	// platform could not start on. They are wrapped by a key derived from
+	// GIT_CTX_RECOVERY_KEY and the archive is encrypted, so carrying them adds
+	// no secret the archive did not already hold.
+	"platform_keys", "platform_bootstrap",
 }
 
 // legacyV1Tables is the exact table set written by releases before
 // repository_files and mcp_call_steps were added to logical backups. Those
 // tables already existed in the database, so restoring such an archive safely
 // leaves them empty rather than rejecting an otherwise compatible backup.
-var legacyV1Tables = withoutTables(tables, "repository_files", "mcp_call_steps")
+var legacyV1Tables = withoutTables(tables, "repository_files", "mcp_call_steps", "platform_keys", "platform_bootstrap")
+
+// legacyV2Tables is what releases up to v0.66.0 wrote: everything except the
+// key material. Such an archive still restores; the settings in it can only be
+// opened by an installation that already holds the same keys, which is the
+// situation those releases were always in.
+var legacyV2Tables = withoutTables(tables, "platform_keys", "platform_bootstrap")
 
 func withoutTables(input []string, omitted ...string) []string {
 	out := make([]string, 0, len(input))
@@ -719,7 +733,9 @@ func (s *Service) validateArchive(ctx context.Context, a archive) error {
 		actualTables[index] = a.Tables[index].Name
 	}
 	actualSet := strings.Join(actualTables, "\n")
-	if actualSet != strings.Join(tables, "\n") && actualSet != strings.Join(legacyV1Tables, "\n") {
+	if actualSet != strings.Join(tables, "\n") &&
+		actualSet != strings.Join(legacyV2Tables, "\n") &&
+		actualSet != strings.Join(legacyV1Tables, "\n") {
 		return errors.New("backup table set does not match this git-ctx version")
 	}
 	for _, data := range a.Tables {

@@ -35,6 +35,24 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.66.1 릴리스 전 검증 결과:
+
+```text
+SQLite→PostgreSQL 이전 후 기동·설정·API 키     PASS
+키 테이블 없는 구버전 아카이브 복원              PASS
+go test -race (FTS5/태그 없음/PostgreSQL)       PASS
+빌드 모드 교차 시험·릴리스 업그레이드 시험        PASS
+go vet ./... && go build ./...                 PASS
+버전 메타데이터·GitHub Actions 정합성            PASS
+Kubernetes Kustomize·:4747·v0.66.1 렌더링        PASS
+Docker linux/amd64·UID 10001·v0.66.1 빌드        PASS
+```
+
+직전 릴리스에서 키를 데이터베이스에 저장하게 만들었으니, 그 바로 아래쪽 — 데이터베이스를
+옮기는 기능 — 을 확인했다. 이전은 키가 보호하는 것을 전부 옮기면서 키를 옮기지 않았고,
+성공을 보고한 뒤 재시작에서 실패했다. v0.66.0 이전에도 같았지만 그때는 알고리즘 이름만
+말했다.
+
 2026-08-26 v0.66.0 릴리스 전 검증 결과:
 
 ```text

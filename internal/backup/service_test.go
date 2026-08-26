@@ -266,9 +266,13 @@ func TestRestoreAcceptsLegacyV1WithoutNewlyCoveredTables(t *testing.T) {
 	if err = json.Unmarshal(raw, &legacy); err != nil {
 		t.Fatal(err)
 	}
+	// A genuine V1 archive predates repository_files and mcp_call_steps, and
+	// also the key tables, which arrived later still.
 	filtered := legacy.Tables[:0]
 	for _, data := range legacy.Tables {
-		if data.Name != "repository_files" && data.Name != "mcp_call_steps" {
+		switch data.Name {
+		case "repository_files", "mcp_call_steps", "platform_keys", "platform_bootstrap":
+		default:
 			filtered = append(filtered, data)
 		}
 	}
@@ -350,5 +354,54 @@ func TestRunOnceDoesNotDuplicateCurrentSchedule(t *testing.T) {
 	}
 	if len(records) != 1 || records[0].TriggerType != "scheduled" {
 		t.Fatalf("records=%#v", records)
+	}
+}
+
+// An archive written by a release up to v0.66.0 carries everything except the
+// key material, because those releases had no key material to carry: the keys
+// were derived from the connection string. Such an archive still restores.
+func TestRestoreAcceptsAnArchiveWithoutTheKeyTables(t *testing.T) {
+	ctx := context.Background()
+	service, db, _ := fixture(t, 5)
+	_, _ = db.DB.Exec(`INSERT INTO users(id,subject,username,email) VALUES('u1','s','u','')`)
+
+	compressed, _, err := service.snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(compressed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := io.ReadAll(reader)
+	if closeErr := reader.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var older archive
+	if err = json.Unmarshal(raw, &older); err != nil {
+		t.Fatal(err)
+	}
+	filtered := older.Tables[:0]
+	for _, data := range older.Tables {
+		if data.Name != "platform_keys" && data.Name != "platform_bootstrap" {
+			filtered = append(filtered, data)
+		}
+	}
+	older.Tables = filtered
+	if len(older.Tables) != len(legacyV2Tables) {
+		t.Fatalf("table count=%d want=%d", len(older.Tables), len(legacyV2Tables))
+	}
+	if err = service.restoreArchive(ctx, older); err != nil {
+		t.Fatalf("an archive from before the key tables was rejected: %v", err)
+	}
+	var users int
+	if err = db.DB.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&users); err != nil {
+		t.Fatal(err)
+	}
+	if users != 1 {
+		t.Fatalf("the restore did not carry its rows: users=%d", users)
 	}
 }
