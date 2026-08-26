@@ -35,6 +35,24 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.68.0 릴리스 전 검증 결과:
+
+```text
+릴리스 이미지 기동·응답(읽기 전용 루트)         PASS
+스모크 검사가 기동 실패 이미지를 거부            PASS
+콘솔 중복 사본 제거 후 정상 서빙                PASS
+go test -race (FTS5/태그 없음/PostgreSQL)       PASS
+빌드 모드 교차 시험·릴리스 업그레이드 시험        PASS
+go vet ./... && go build ./...                 PASS
+버전 메타데이터·GitHub Actions 정합성            PASS
+Kubernetes Kustomize·:4747·v0.68.0 렌더링        PASS
+Docker linux/amd64·UID 10001·v0.68.0 빌드        PASS
+```
+
+릴리스 검증이 이미지를 띄워 본 적이 없다는 것을 발견했다. 오늘 이미지는 띄워도 정상이었지만,
+`-version` 한 줄만 보고 내보내는 것 자체가 결함이다. 배포 매니페스트가 선언한 보안 설정으로
+띄워 보다가, 이미지가 아무도 읽지 않는 콘솔 사본을 담고 있다는 것도 함께 나왔다.
+
 2026-08-26 v0.67.1 릴리스 전 검증 결과:
 
 ```text

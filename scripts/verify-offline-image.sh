@@ -95,4 +95,79 @@ if [ "$image_user" != "10001" ]; then
   exit 1
 fi
 
-echo "verified $archive ($platform, $canonical_id, revision $label_commit)"
+# 여기까지는 이미지의 메타데이터와 바이너리 한 줄만 확인한다. 빌드되지만 뜨지 않는
+# 이미지는 고객에게 도달하는 릴리스 실패의 전형이므로, 배포 매니페스트가 선언한 조건
+# 그대로 — 읽기 전용 루트, 모든 capability 제거, 권한 상승 금지, 비루트 사용자 —
+# 실제로 기동시켜 응답을 받는다. 그 조건에서 쓸 수 있는 곳은 /tmp 와 백업 볼륨뿐이다.
+container="git-ctx-verify-$$"
+volume="git-ctx-verify-$$-backups"
+smoke_cleanup() {
+  docker rm -f "$container" >/dev/null 2>&1 || true
+  docker volume rm -f "$volume" >/dev/null 2>&1 || true
+}
+trap smoke_cleanup EXIT INT TERM
+
+recovery_key=$(head -c 48 /dev/urandom | base64 | tr -d '\n')
+docker volume create "$volume" >/dev/null
+if ! docker run -d --name "$container" \
+    --read-only --tmpfs /tmp \
+    --cap-drop ALL --security-opt no-new-privileges \
+    -v "$volume:/var/lib/git-ctx/backups" \
+    -p 127.0.0.1::4747 \
+    -e "GIT_CTX_DB_DSN=file:/var/lib/git-ctx/backups/verify.db?_foreign_keys=on&_busy_timeout=5000" \
+    -e "GIT_CTX_RECOVERY_KEY=$recovery_key" \
+    "$canonical" >/dev/null; then
+  echo "archive image could not be started" >&2
+  exit 1
+fi
+
+published=$(docker port "$container" 4747/tcp | head -1)
+port=${published##*:}
+if [ -z "$port" ]; then
+  echo "archive image published no port for 4747" >&2
+  docker logs "$container" >&2 2>&1 || true
+  exit 1
+fi
+
+ready=0
+i=0
+while [ "$i" -lt 60 ]; do
+  if curl -fsS --max-time 2 "http://127.0.0.1:$port/readyz" >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" != "true" ]; then
+    break
+  fi
+  i=$((i + 1))
+  sleep 1
+done
+if [ "$ready" -ne 1 ]; then
+  echo "archive image did not become ready under the security settings the deployment manifest declares" >&2
+  docker logs "$container" >&2 2>&1 || true
+  exit 1
+fi
+
+for path in /readyz /api/v1/public/status / /app.js; do
+  if ! curl -fsS --max-time 5 "http://127.0.0.1:$port$path" >/dev/null 2>&1; then
+    echo "archive image is running but does not serve $path" >&2
+    docker logs "$container" >&2 2>&1 || true
+    exit 1
+  fi
+done
+
+served_version=$(curl -fsS --max-time 5 "http://127.0.0.1:$port/api/v1/public/status" 2>/dev/null || true)
+case $served_version in
+  *'"status":"connected"'*) ;;
+  *)
+    echo "archive image serves a status without a connected database: $served_version" >&2
+    docker logs "$container" >&2 2>&1 || true
+    exit 1
+    ;;
+esac
+
+docker rm -f "$container" >/dev/null 2>&1 || true
+docker volume rm -f "$volume" >/dev/null 2>&1 || true
+trap - EXIT INT TERM
+
+echo "verified $archive ($platform, $canonical_id, revision $label_commit); started read-only and served /readyz, the status endpoint and the console"
