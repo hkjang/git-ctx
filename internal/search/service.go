@@ -2116,7 +2116,21 @@ WHERE r.enabled=1 AND ` + predicate + ` AND LOWER(f.path)=LOWER(?)`
 	content, origin, diagnostics := s.fileBody(ctx, selected.repositoryID, selected.sourceType, selected.project, selected.slug, selected.refName, selected.path, selected.indexed)
 	out.Origin, out.Diagnostics = origin, diagnostics
 	if content == "" {
-		return out, fmt.Errorf("%q could not be read from the index or the %s API", filePath, selected.sourceType)
+		// fileBody already worked out why — the source is not configured, the
+		// adapter would not start, the server refused the connection — and that
+		// reason was being dropped on the floor while the caller was told only
+		// that the read did not work. A file that is in the ref's listing and
+		// has no indexed content is the ordinary case here, so the answer says
+		// that too: it separates "this file is not in the repository" from "this
+		// file was never indexed and the source is unreachable right now".
+		reason := strings.Join(diagnostics, " ")
+		if reason == "" {
+			reason = "no reason was reported."
+		}
+		if !selected.indexed {
+			reason = "This file is in the ref's file listing but its content was never indexed, so it can only be read live. " + reason
+		}
+		return out, fmt.Errorf("%q could not be read from the index or the %s API: %s", filePath, selected.sourceType, reason)
 	}
 	safe, finding := contentsecurity.Sanitize(content)
 	if finding == "private_key" || safe == "" {
@@ -2156,46 +2170,66 @@ WHERE r.enabled=1 AND ` + predicate + ` AND LOWER(f.path)=LOWER(?)`
 
 // fileBody reassembles the stored chunks and falls back to a live read for files
 // whose content the index policy skipped.
+// fileBody returns the text of one file, and says where it came from.
+//
+// The stored chunks are a search index, not a copy of the file. The chunker
+// emits one chunk per symbol for code, so a package clause, the imports and
+// every comment outside a symbol are never stored; for Markdown it lifts the
+// heading lines into a column of their own and trims the blank lines. Read back
+// and joined, a four-line Go file came out as one line and an eleven-line
+// README as three, and read-file presented that as the file, with line numbers.
+//
+// So the source is asked first: it is the only place the file exists. The index
+// stays as the answer when the source cannot be reached — an on-premises
+// platform has to keep answering through an outage — and says what it is rather
+// than claiming to be the file.
 func (s *Service) fileBody(ctx context.Context, repositoryID, sourceType, project, slug, ref, filePath string, indexed bool) (string, string, []string) {
-	if indexed {
-		span := calltrace.Start(ctx, "read-index", filePath)
-		rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(
-			`SELECT content FROM document_chunks WHERE repository_id=? AND ref_name=? AND file_path=? ORDER BY line_start`), repositoryID, ref, filePath)
-		if err == nil {
-			var parts []string
-			for rows.Next() {
-				var content string
-				if rows.Scan(&content) == nil {
-					parts = append(parts, content)
-				}
-			}
-			rows.Close()
-			if len(parts) > 0 {
-				span.End(calltrace.StatusOK, len(parts), len(parts), "reassembled from stored chunks")
-				return strings.Join(parts, "\n"), "index", []string{"index: reassembled from the stored chunks of this ref."}
+	var remoteProblem string
+	if s.sources == nil {
+		remoteProblem = "no source connector is configured"
+	} else if adapter, _, adapterErr := s.remoteSource(ctx, sourceType); adapterErr != nil {
+		remoteProblem = adapterErr.Error()
+	} else {
+		remoteSpan := calltrace.Start(ctx, "read-remote", filePath)
+		raw, readErr := adapter.GetFile(ctx, source.RepositoryRef{ProjectKey: project, Slug: slug}, ref, filePath)
+		s.reportRemote(sourceType, readErr)
+		switch {
+		case readErr != nil:
+			remoteSpan.Fail(readErr)
+			remoteProblem = readErr.Error()
+		case len(raw) == 0:
+			remoteSpan.End(calltrace.StatusEmpty, 0, 0, "the source returned an empty body")
+			remoteProblem = "the source returned an empty body"
+		default:
+			remoteSpan.End(statusFor(len(raw)), len(raw), len(raw), "live read from the source server")
+			return string(raw), "remote", []string{"remote: read live from the source server, so this is the whole file as it stands on that ref."}
+		}
+	}
+	if !indexed {
+		return "", "remote", []string{"remote: " + remoteProblem}
+	}
+	span := calltrace.Start(ctx, "read-index", filePath)
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(
+		`SELECT content FROM document_chunks WHERE repository_id=? AND ref_name=? AND file_path=? ORDER BY line_start`), repositoryID, ref, filePath)
+	if err == nil {
+		var parts []string
+		for rows.Next() {
+			var content string
+			if rows.Scan(&content) == nil {
+				parts = append(parts, content)
 			}
 		}
-		span.End(calltrace.StatusEmpty, 0, 0, "no stored chunks for this ref; falling back to a live read")
+		rows.Close()
+		if len(parts) > 0 {
+			span.End(calltrace.StatusOK, len(parts), len(parts), "reassembled from stored chunks")
+			return strings.Join(parts, "\n"), "index", []string{
+				"remote: " + remoteProblem,
+				"index: the source could not be read, so this was reassembled from the indexed fragments of the file. It is not the whole file — headings, package declarations, imports and comments outside an indexed fragment are not stored — and the line numbers are of the reassembled text, not of the file.",
+			}
+		}
 	}
-	if s.sources == nil {
-		return "", "index", []string{"remote: no source connector is configured, so an unindexed file cannot be read."}
-	}
-	adapter, _, adapterErr := s.remoteSource(ctx, sourceType)
-	if adapterErr != nil {
-		return "", "remote", []string{"remote: " + adapterErr.Error()}
-	}
-	remoteSpan := calltrace.Start(ctx, "read-remote", filePath)
-	raw, readErr := adapter.GetFile(ctx, source.RepositoryRef{ProjectKey: project, Slug: slug}, ref, filePath)
-	s.reportRemote(sourceType, readErr)
-	if readErr != nil {
-		remoteSpan.Fail(readErr)
-	} else {
-		remoteSpan.End(statusFor(len(raw)), len(raw), len(raw), "live read from the source server")
-	}
-	if readErr != nil {
-		return "", "remote", []string{"remote: " + readErr.Error()}
-	}
-	return string(raw), "remote", []string{"remote: read live from the source server because this file has no indexed content."}
+	span.End(calltrace.StatusEmpty, 0, 0, "no stored chunks for this ref")
+	return "", "index", []string{"remote: " + remoteProblem, "index: no stored chunks for this file on this ref."}
 }
 
 // SemanticHit is one chunk found by meaning rather than by wording.

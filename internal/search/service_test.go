@@ -1423,9 +1423,11 @@ func TestRepositoryMapListsProjectConventions(t *testing.T) {
 	}
 }
 
-// Finding a file only helps if the agent can then read it. Indexed files come
-// from the stored chunks, everything else is read live, and both paths mask
-// credentials and bound the response.
+// Finding a file only helps if the agent can then read it. Every file is read
+// from the source, because the stored chunks are a search index and not a copy
+// of the file — they hold no package clause, no import, no Markdown heading.
+// The chunks answer when the source cannot, and say what they are. Both paths
+// mask credentials and bound the response.
 func TestReadFileServesIndexedAndUnindexedFiles(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(ctx, "sqlite", "file:read-file?mode=memory&cache=shared&_foreign_keys=on")
@@ -1443,19 +1445,30 @@ func TestReadFileServesIndexedAndUnindexedFiles(t *testing.T) {
 	service := New(db)
 	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) { return remote, nil })
 
-	indexed, err := service.ReadFile(ctx, []string{"alice"}, "", "", "docs/gpu.md", "", 0, 0)
-	if err != nil || indexed.Origin != "index" || !strings.Contains(indexed.Content, "second chunk") {
-		t.Fatalf("indexed read=%#v err=%v", indexed, err)
-	}
-	if indexed.TotalLines != 2 || indexed.StartLine != 1 {
-		t.Fatalf("line accounting=%#v", indexed)
+	fromSource, err := service.ReadFile(ctx, []string{"alice"}, "", "", "docs/gpu.md", "", 0, 0)
+	if err != nil || fromSource.Origin != "remote" || !strings.Contains(fromSource.Content, "replicaCount") {
+		t.Fatalf("indexed read=%#v err=%v", fromSource, err)
 	}
 
 	// A line range must narrow the response.
 	ranged, err := service.ReadFile(ctx, []string{"alice"}, "", "", "docs/gpu.md", "", 2, 2)
-	if err != nil || ranged.StartLine != 2 || ranged.EndLine != 2 || strings.Contains(ranged.Content, "# GPU") {
+	if err != nil || ranged.StartLine != 2 || ranged.EndLine != 2 || strings.Contains(ranged.Content, "replicaCount") {
 		t.Fatalf("ranged read=%#v err=%v", ranged, err)
 	}
+
+	// With the source unreachable the chunks answer, and say they are not the
+	// file. Their line numbers are of the reassembled text.
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) {
+		return nil, errors.New("the source server is unreachable")
+	})
+	indexed, err := service.ReadFile(ctx, []string{"alice"}, "", "", "docs/gpu.md", "", 0, 0)
+	if err != nil || indexed.Origin != "index" || !strings.Contains(indexed.Content, "second chunk") {
+		t.Fatalf("index fallback=%#v err=%v", indexed, err)
+	}
+	if !strings.Contains(strings.Join(indexed.Diagnostics, " "), "not the whole file") {
+		t.Fatalf("the fallback did not say what it is: %v", indexed.Diagnostics)
+	}
+	service.SetSourceLoader(func(context.Context, string) (source.RepositorySource, error) { return remote, nil })
 
 	// A file the policy skipped is read live and marked as such.
 	live, err := service.ReadFile(ctx, []string{"alice"}, "", "", "charts/values.yaml", "", 0, 0)

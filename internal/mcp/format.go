@@ -120,9 +120,13 @@ func formatFileResults(result search.FileSearchResult) string {
 				current = item.LibraryID
 				fmt.Fprintf(&b, "\n### %s (%s, ref `%s`)\n", item.LibraryID, item.SourceType, item.Ref)
 			}
-			readable := "content not indexed; use search-code or the source UI"
+			// The advice for an unindexed file used to send the reader to
+			// search-code, which searches indexed content and so is the one tool
+			// that cannot answer for it. read-file fetches it live from the
+			// source, which is what the platform actually does.
+			readable := "content not indexed; read-file fetches it live from the source"
 			if item.ContentIndexed {
-				readable = "content indexed; query-docs and get-symbol-context can read it"
+				readable = "content indexed; read-file, query-docs and get-symbol-context can read it"
 			}
 			// Bitbucket reports file sizes, GitLab tree listings do not; only print
 			// a size when the source actually gave one.
