@@ -1086,6 +1086,7 @@ func parse(path, content string) []chunk {
 		out := make([]chunk, 0, len(symbols))
 		for _, symbol := range symbols {
 			start, end := max(1, symbol.LineStart), min(len(lines), max(symbol.LineStart, symbol.LineEnd))
+			start = commentStart(lines, start)
 			out = append(out, chunk{Heading: symbol.QualifiedName, Content: strings.TrimSpace(strings.Join(lines[start-1:end], "\n")), Start: start, End: end})
 		}
 		return out
@@ -1113,6 +1114,45 @@ func parse(path, content string) []chunk {
 	flush(len(lines))
 	return out
 }
+
+// commentStart walks back from a symbol over the comment lines written directly
+// above it and returns the first of them.
+//
+// A chunk that began at the declaration left the doc comment out of the index
+// entirely: "reconciles", in "// Handle reconciles one order.", was stored in
+// the symbol table, printed by find-symbol, and findable by nothing. A comment
+// above a function is usually the only prose about it in the whole repository,
+// and it is what somebody searching for behaviour rather than for a name types.
+//
+// The chunk's first line moves with it, so the line numbers still describe the
+// text. Only lines that are unambiguously a comment count, and only while they
+// run without a gap, so a chunk cannot swallow the declaration above it.
+func commentStart(lines []string, declaration int) int {
+	const mostCommentLines = 40
+	start := declaration
+	for n := declaration - 1; n >= 1 && declaration-n <= mostCommentLines; n-- {
+		trimmed := strings.TrimSpace(lines[n-1])
+		if !isCommentLine(trimmed) {
+			break
+		}
+		start = n
+	}
+	return start
+}
+
+func isCommentLine(trimmed string) bool {
+	switch {
+	case trimmed == "":
+		return false
+	case strings.HasPrefix(trimmed, "//"), strings.HasPrefix(trimmed, "#"),
+		strings.HasPrefix(trimmed, "/*"), strings.HasPrefix(trimmed, "*"),
+		strings.HasPrefix(trimmed, "--"), strings.HasPrefix(trimmed, "\"\"\""):
+		return true
+	default:
+		return false
+	}
+}
+
 func sanitize(content string) (string, string) {
 	return contentsecurity.Sanitize(content)
 }

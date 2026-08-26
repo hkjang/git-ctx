@@ -587,10 +587,14 @@ WHERE r.enabled=1 AND ` + predicate
 		statement += ` AND s.symbol_kind=?`
 		args = append(args, kind)
 	}
-	statement += ` AND (LOWER(s.name) LIKE LOWER(?) OR LOWER(s.qualified_name) LIKE LOWER(?) OR LOWER(s.signature) LIKE LOWER(?))
+	// The documentation is searched too. The parser extracts it, the indexer
+	// stores it and find-symbol prints it, and until now nothing looked in it —
+	// so "reconciles", a word that exists only in the comment above a function,
+	// found neither the symbol nor the code.
+	statement += ` AND (LOWER(s.name) LIKE LOWER(?) OR LOWER(s.qualified_name) LIKE LOWER(?) OR LOWER(s.signature) LIKE LOWER(?) OR LOWER(s.documentation) LIKE LOWER(?))
 ORDER BY match_rank,sort_name,sort_path LIMIT ?`
 	like := "%" + query + "%"
-	args = append(args, like, like, like, limit)
+	args = append(args, like, like, like, like, limit)
 	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
 	if err != nil {
 		return nil, err
@@ -1430,13 +1434,19 @@ func (s *Service) indexedSourceHits(ctx context.Context, principals []string, qu
 		for rows.Next() {
 			read++
 			var item SourceResult
-			var content string
+			var heading, content string
 			if err = rows.Scan(&item.LibraryID, &item.SourceType, &item.ProjectKey, &item.RepositorySlug,
-				&item.Ref, &item.QueryResult.CommitID, &item.QueryResult.Path, &content,
+				&item.Ref, &item.QueryResult.CommitID, &item.QueryResult.Path, &heading, &content,
 				&item.QueryResult.LineStart, &item.QueryResult.LineEnd); err != nil {
 				return err
 			}
-			haystack := strings.ToLower(item.QueryResult.Path + " " + content)
+			// The heading counts. It is indexed — the full-text index covers
+			// path, heading and content, and the scan clause reads all three —
+			// and then it was not scored, so a chunk the index had found by its
+			// heading scored zero and was thrown away. A word that appears only
+			// in a heading is exactly the word a document is about: "## Rollback
+			// procedure", "## Settlement". Searching for it found nothing.
+			haystack := strings.ToLower(item.QueryResult.Path + " " + heading + " " + content)
 			score := 0
 			for _, term := range terms {
 				score += strings.Count(haystack, term)
@@ -1449,8 +1459,13 @@ func (s *Service) indexedSourceHits(ctx context.Context, principals []string, qu
 				continue
 			}
 			seen[key] = true
-			// The stored chunk is already secret-masked, so it is returned as it is.
+			// The stored chunk is already secret-masked, so it is returned as it
+			// is — but a section matched by its heading has to show the heading,
+			// or the snippet carries no occurrence of what was searched for.
 			item.QueryResult.Snippet = content
+			if heading != "" && !strings.Contains(strings.ToLower(content), strings.ToLower(heading)) {
+				item.QueryResult.Snippet = heading + "\n" + content
+			}
 			candidates = append(candidates, scored{result: item, score: score})
 		}
 		if read >= indexedScanLimit {
@@ -1531,7 +1546,7 @@ func (s *Service) fullTextRestriction(alias string, terms []string) (string, []a
 // a word is still found.
 func (s *Service) scanCandidates(terms []string, sourceType, project, repository, ref string, principals []string) (string, []any) {
 	join, predicate, args := repositoryACL(principals)
-	statement := `SELECT r.library_id,r.source_type,r.project_key,r.slug,c.ref_name,c.commit_id,c.file_path,c.content,c.line_start,c.line_end
+	statement := `SELECT r.library_id,r.source_type,r.project_key,r.slug,c.ref_name,c.commit_id,c.file_path,c.heading,c.content,c.line_start,c.line_end
 FROM document_chunks c JOIN repositories r ON r.id=c.repository_id ` + join + `
 WHERE r.enabled=1 AND ` + predicate
 	if sourceType != "" {
@@ -1583,7 +1598,7 @@ func (s *Service) fullTextCandidates(terms []string, sourceType, project, reposi
 		source = `document_chunks_fts f JOIN document_chunks c ON c.rowid=f.rowid`
 		lookup = `document_chunks_fts MATCH ?`
 	}
-	statement := `SELECT r.library_id,r.source_type,r.project_key,r.slug,c.ref_name,c.commit_id,c.file_path,c.content,c.line_start,c.line_end
+	statement := `SELECT r.library_id,r.source_type,r.project_key,r.slug,c.ref_name,c.commit_id,c.file_path,c.heading,c.content,c.line_start,c.line_end
 FROM ` + source + ` JOIN repositories r ON r.id=c.repository_id ` + join + `
 WHERE r.enabled=1 AND ` + predicate + ` AND ` + lookup
 	args = append(args, match)
