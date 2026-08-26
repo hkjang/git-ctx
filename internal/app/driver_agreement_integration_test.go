@@ -101,6 +101,23 @@ func agreementFixture() map[string]string {
 // fixture into it, and returns what each tool answered.
 func answerEachTool(t *testing.T, driver, dsn string, source *httptest.Server, modelURL string) map[string]string {
 	t.Helper()
+	a := indexedAppOn(t, driver, dsn, source.URL, modelURL)
+	answers := map[string]string{}
+	for _, ask := range agreementTools {
+		answers[ask.tool+" "+ask.arguments] = normaliseAnswer(mcpCall(t, a, ask.tool, ask.arguments))
+	}
+	return answers
+}
+
+// indexedApp brings up an installation with the fixture repository indexed.
+func indexedApp(t *testing.T, sourceURL, modelURL, name string) *App {
+	t.Helper()
+	return indexedAppOn(t, "sqlite",
+		"file:"+filepath.Join(t.TempDir(), name+".db")+"?_foreign_keys=on&_busy_timeout=5000", sourceURL, modelURL)
+}
+
+func indexedAppOn(t *testing.T, driver, dsn, sourceURL, modelURL string) *App {
+	t.Helper()
 	ctx := context.Background()
 	directory := t.TempDir()
 	a, err := New(ctx, config.Config{
@@ -123,7 +140,7 @@ func answerEachTool(t *testing.T, driver, dsn string, source *httptest.Server, m
 		return recorder
 	}
 	if saved := call(http.MethodPut, "/api/v1/admin/settings/gitlab",
-		fmt.Sprintf(`{"baseUrl":%q,"token":"t","webhookSecret":"s3cret"}`, source.URL)); saved.Code != http.StatusOK {
+		fmt.Sprintf(`{"baseUrl":%q,"token":"t","webhookSecret":"s3cret"}`, sourceURL)); saved.Code != http.StatusOK {
 		t.Fatalf("%s gitlab settings status=%d body=%s", driver, saved.Code, saved.Body.String())
 	}
 	if saved := call(http.MethodPut, "/api/v1/admin/settings/model",
@@ -142,11 +159,7 @@ func answerEachTool(t *testing.T, driver, dsn string, source *httptest.Server, m
 		return completed > 0
 	})
 
-	answers := map[string]string{}
-	for _, ask := range agreementTools {
-		answers[ask.tool+" "+ask.arguments] = normaliseAnswer(mcpCall(t, a, ask.tool, ask.arguments))
-	}
-	return answers
+	return a
 }
 
 func TestBothDatabasesAnswerTheSameToolsIntegration(t *testing.T) {

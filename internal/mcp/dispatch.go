@@ -9,6 +9,8 @@ import (
 
 	"git-ctx/internal/auth"
 	"git-ctx/internal/calltrace"
+	"git-ctx/internal/search"
+	"git-ctx/internal/toolcatalog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -132,6 +134,10 @@ func (s *Server) finishCall(w http.ResponseWriter, r *http.Request, req request,
 	case empty:
 		outcome = "empty"
 		mode = retrievalMode(text)
+		// An empty answer is where the age matters most: "this directory holds
+		// nothing" and "this file has no history" read as facts about the
+		// repository when they may be facts about a month-old index.
+		text += s.freshnessNote(r.Context(), p, tool, libraryID)
 	default:
 		// The cache holds the whole answer, so a later call with a larger budget
 		// still gets everything; only what is sent now is bounded.
@@ -139,6 +145,10 @@ func (s *Server) finishCall(w http.ResponseWriter, r *http.Request, req request,
 		results, mode = sectionCount(text), retrievalMode(text)
 		text = clampResponse(text, budget)
 		truncated = len(text) != produced
+		// Added here rather than inside each tool, for two reasons: the age is
+		// read now rather than when a cached answer was first built, and a note
+		// about the answer must not be what the budget cuts off.
+		text += s.freshnessNote(r.Context(), p, tool, libraryID)
 	}
 	// The audit row is written with the server context: a call that timed out
 	// must still be recorded, and its request context is already cancelled.
@@ -164,6 +174,47 @@ func (s *Server) finishCall(w http.ResponseWriter, r *http.Request, req request,
 		_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`INSERT INTO mcp_call_steps(call_id,sequence,stage,target,status,detail,candidates,results,duration_ms,offset_ms) VALUES `+strings.Join(values, ",")), args...)
 	}
 	write(w, response{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{"content": []map[string]string{{"type": "text", "text": text}}, "isError": err != nil}})
+}
+
+// freshnessNote says how old the index behind this answer is, when that is old
+// enough to matter.
+//
+// Four tools said it and the ones an agent reads code with did not: read-file
+// returned a month-old function body and said only that it came from the index,
+// and find-symbol, query-docs, list-directory and the rest said nothing at all.
+// An answer that does not carry its own age is read as current.
+func (s *Server) freshnessNote(ctx context.Context, p auth.Principal, tool, libraryID string) string {
+	if libraryID == "" || !contentTools[tool] {
+		return ""
+	}
+	ages, err := s.search.IndexAges(ctx, principalACLs(p), []string{libraryID}, time.Now().UTC())
+	if err != nil || len(ages) == 0 {
+		return ""
+	}
+	note := search.FreshnessNote(ages)
+	if note == "" {
+		return ""
+	}
+	return "\n\n> " + note + "\n"
+}
+
+// contentTools are the tools whose answer is indexed content, or a fact read
+// out of it. The ones that already carry the note themselves are not repeated
+// here, and neither are the administrative tools, whose subject is the
+// installation rather than the code.
+var contentTools = map[string]bool{
+	toolcatalog.ReadFile:            true,
+	toolcatalog.QueryDocs:           true,
+	toolcatalog.FindSymbol:          true,
+	toolcatalog.GetSymbolContext:    true,
+	toolcatalog.FindTests:           true,
+	toolcatalog.TraceDependencies:   true,
+	toolcatalog.ListDirectory:       true,
+	toolcatalog.GetRepositoryMap:    true,
+	toolcatalog.ExplainSearchResult: true,
+	toolcatalog.GetFileHistory:      true,
+	toolcatalog.CompareRefs:         true,
+	toolcatalog.GetChangeImpact:     true,
 }
 
 func write(w http.ResponseWriter, v response) {

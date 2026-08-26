@@ -98,7 +98,8 @@ var registry = []tool{
 			"repository": map[string]string{"type": "string", "description": "Optional repository slug or library ID"},
 			"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"},
 			"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 200}}},
-		handler: handleFindFile,
+		usesLibraryID: true,
+		handler:       handleFindFile,
 	},
 	{
 		name:        toolcatalog.ReadFile,
@@ -110,7 +111,8 @@ var registry = []tool{
 			"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"},
 			"startLine":  map[string]any{"type": "integer", "minimum": 1, "description": "Optional first line, 1-based"},
 			"endLine":    map[string]any{"type": "integer", "minimum": 1, "description": "Optional last line, inclusive"}}},
-		handler: handleReadFile,
+		usesLibraryID: true,
+		handler:       handleReadFile,
 	},
 	{
 		name:        toolcatalog.SearchSemantic,
@@ -120,7 +122,8 @@ var registry = []tool{
 			"libraryId":  map[string]string{"type": "string", "description": "Optional library scope"},
 			"sourceType": map[string]any{"type": "string", "enum": []string{"bitbucket", "gitlab", "confluence", "jira"}},
 			"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 50}}},
-		handler: handleSearchSemantic,
+		usesLibraryID: true,
+		handler:       handleSearchSemantic,
 	},
 	{
 		name:        toolcatalog.FindDependents,
@@ -140,7 +143,8 @@ var registry = []tool{
 			"repository": map[string]string{"type": "string", "description": "Optional repository slug or library ID"},
 			"state":      map[string]any{"type": "string", "enum": []string{"all", "open", "merged", "closed"}},
 			"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}},
-		handler: handleSearchMergeRequests,
+		usesLibraryID: true,
+		handler:       handleSearchMergeRequests,
 	},
 	{
 		name:        toolcatalog.GetFileHistory,
@@ -151,7 +155,8 @@ var registry = []tool{
 			"repository": map[string]string{"type": "string", "description": "Optional repository slug or library ID"},
 			"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"},
 			"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 100}}},
-		handler: handleGetFileHistory,
+		usesLibraryID: true,
+		handler:       handleGetFileHistory,
 	},
 	{
 		name:        toolcatalog.ListDirectory,
@@ -161,7 +166,8 @@ var registry = []tool{
 			"libraryId":  map[string]string{"type": "string", "description": "Library ID; required when several repositories are accessible"},
 			"repository": map[string]string{"type": "string", "description": "Optional repository slug or library ID"},
 			"ref":        map[string]string{"type": "string", "description": "Optional branch or tag"}}},
-		handler: handleListDirectory,
+		usesLibraryID: true,
+		handler:       handleListDirectory,
 	},
 	{
 		name:        toolcatalog.GetRepositoryMap,

@@ -35,6 +35,24 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.63.0 릴리스 전 검증 결과:
+
+```text
+색인 30일 노후화 조사(읽기 도구 전체)           PASS
+신선/노후 각각의 문구·빈 답 포함                PASS
+libraryId 를 받는 모든 도구가 감사에 기록        PASS
+go test -race (FTS5/태그 없음/PostgreSQL)       PASS
+빌드 모드 교차 시험                             PASS
+go vet ./... && go build ./...                 PASS
+버전 메타데이터·GitHub Actions 정합성            PASS
+Kubernetes Kustomize·:4747·v0.63.0 렌더링        PASS
+Docker linux/amd64·UID 10001·v0.63.0 빌드        PASS
+```
+
+이 플랫폼은 색인 나이를 아는 도구를 따로 갖고 있으면서, 코드를 실제로 읽는 도구들에는 그것을
+말하지 않았다. 조사하다 보니 감사 쪽 누락도 같은 자리에서 나왔다 — 나이를 붙이려면 어느
+색인에서 온 답인지 알아야 하는데, 그걸 아는 표시가 여섯 도구에 빠져 있었다.
+
 2026-08-26 v0.62.1 릴리스 전 검증 결과:
 
 ```text

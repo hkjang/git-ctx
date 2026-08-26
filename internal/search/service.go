@@ -3143,7 +3143,14 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 				added++
 			}
 			if added > 0 {
-				indexedFallback = fmt.Sprintf("index: %d match(es) come from the indexed content, which is where a source that answers no live query — a wiki page, an issue — can be found. They are as recent as the last index run.", added)
+				// "As recent as the last index run" is only useful with the date
+				// of that run: a month-old answer and an answer from a minute ago
+				// were saying the same thing about themselves.
+				when := "They are as recent as the last index run."
+				if note := s.freshnessFor(ctx, principals, indexed); note != "" {
+					when = note
+				}
+				indexedFallback = fmt.Sprintf("index: %d match(es) come from the indexed content, which is where a source that answers no live query — a wiki page, an issue — can be found. %s", added, when)
 				if caveat != "" {
 					indexedFallback += " " + caveat
 				}
@@ -3277,6 +3284,28 @@ FROM repositories WHERE enabled=1 AND library_id IN (`+placeholders+`)`), args..
 		}
 	}
 	return out
+}
+
+// freshnessFor is the staleness note for whatever libraries these results came
+// from, or empty when every one of them is recent.
+func (s *Service) freshnessFor(ctx context.Context, principals []string, hits []SourceResult) string {
+	seen := map[string]bool{}
+	libraries := make([]string, 0, 4)
+	for _, hit := range hits {
+		if hit.LibraryID == "" || seen[hit.LibraryID] {
+			continue
+		}
+		seen[hit.LibraryID] = true
+		libraries = append(libraries, hit.LibraryID)
+	}
+	if len(libraries) == 0 {
+		return ""
+	}
+	ages, err := s.IndexAges(ctx, principals, libraries, time.Now().UTC())
+	if err != nil {
+		return ""
+	}
+	return FreshnessNote(ages)
 }
 
 func scopedRepositoryResults(repositories []RepositoryResult, project, repository string) []RepositoryResult {
