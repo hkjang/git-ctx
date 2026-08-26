@@ -55,7 +55,7 @@ func clampResponse(text string, budget int) string {
 		notice += fmt.Sprintf("- %d of %d result sections are included. The rest are not lost, only unsent.\n", shown, total)
 	}
 	notice += "- Narrow the next call instead of retrying the same one: add libraryId or path, lower limit, or read a line range with read-file.\n"
-	return strings.TrimRight(kept, "\n") + notice + notes
+	return closeOpenFence(strings.TrimRight(kept, "\n")) + notice + notes
 }
 
 func boolInt(value bool) int {
@@ -78,34 +78,44 @@ func sectionCount(text string) int {
 	return strings.Count(text, "\n- ")
 }
 
-// cutAtBoundary returns the longest prefix within limit that ends on a result
-// boundary. A section start is preferred so the last result stays whole, but
-// not at any price: when the nearest section start is near the beginning — one
-// long section, or a heading right after the title — cutting there would throw
-// away most of the budget, so a paragraph or line boundary is used instead and
-// the content is kept.
+// cutAtBoundary keeps as much of the answer as the room allows, ending it
+// somewhere a reader can see the seam.
+//
+// Every candidate boundary has to keep most of the room, which the paragraph
+// and line rules used to skip. A file with no blank line after its first few —
+// a minified bundle, a CSV, densely packed code — has its last "\n\n" right
+// before the content starts, and cutting there returned a header and nothing
+// else: read-file asked for twelve thousand bytes and answered with six
+// hundred, while the notice said the answer had been cut to the budget.
 func cutAtBoundary(text string, limit int) string {
 	if limit >= len(text) {
 		return text
 	}
 	window := text[:limit]
-	best := ""
-	if at := strings.LastIndex(window, "\n### "); at > 0 {
-		best = text[:at]
-	}
-	if len(best)*10 >= limit*6 {
-		return best
-	}
-	if at := strings.LastIndex(window, "\n\n"); at > len(best) {
+	enough := func(at int) bool { return at > 0 && at*10 >= limit*6 }
+	if at := strings.LastIndex(window, "\n### "); enough(at) {
 		return text[:at]
 	}
-	if at := strings.LastIndexByte(window, '\n'); at > len(best) {
+	if at := strings.LastIndex(window, "\n\n"); enough(at) {
 		return text[:at]
 	}
-	if best != "" {
-		return best
+	if at := strings.LastIndexByte(window, '\n'); enough(at) {
+		return text[:at]
 	}
 	return runeSafeCut(window, len(window))
+}
+
+// closeOpenFence terminates a code fence the cut landed inside. Without it the
+// notice explaining the truncation, and the notes after it, are read as part of
+// the file that was being shown.
+func closeOpenFence(text string) string {
+	if strings.Count(text, "\n```")%2 == 0 && !strings.HasPrefix(text, "```") {
+		return text
+	}
+	if strings.Count(text, "```")%2 == 0 {
+		return text
+	}
+	return text + "\n```"
 }
 
 // thousands formats a byte count the way the notice reads best.
