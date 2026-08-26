@@ -64,8 +64,48 @@ func TestConnection(ctx context.Context, dsn string) (map[string]string, error) 
 	return result, nil
 }
 
+// sqliteDefaults supplies the connection parameters the schema depends on but
+// the DSN is not required to carry.
+//
+// Foreign keys are the one that matters. SQLite disables them per connection
+// unless the DSN says otherwise, and every ON DELETE CASCADE in this schema
+// then does nothing: deleting a repository leaves its permissions, files,
+// chunks and symbols; deleting a notification leaves its deliveries; a row
+// naming a parent that does not exist inserts happily.
+//
+// What made it hard to see is that it was not consistently wrong. The migration
+// that rebuilds the repositories table turns foreign keys off and back on, and
+// that PRAGMA sticks to the single pooled connection — so an installation whose
+// DSN omitted the parameter enforced its constraints on the boot that migrated
+// and stopped enforcing them on the next restart. The README documents the full
+// DSN; nothing required it, and nothing said which one was running.
+//
+// A parameter the operator did set is left exactly as they set it.
+func sqliteDefaults(dsn string) string {
+	if !strings.HasPrefix(dsn, "file:") {
+		// A bare ":memory:" or a plain path takes no query parameters in this
+		// form; rewriting it here would change which file is opened.
+		return dsn
+	}
+	separator := "?"
+	if strings.Contains(dsn, "?") {
+		separator = "&"
+	}
+	for parameter, value := range map[string]string{"_foreign_keys": "on", "_busy_timeout": "5000"} {
+		if strings.Contains(dsn, parameter+"=") {
+			continue
+		}
+		dsn += separator + parameter + "=" + value
+		separator = "&"
+	}
+	return dsn
+}
+
 func Open(ctx context.Context, driver, dsn string) (*Store, error) {
 	sqlDriver := map[string]string{"postgres": "pgx", "sqlite": "sqlite3"}[driver]
+	if driver == "sqlite" {
+		dsn = sqliteDefaults(dsn)
+	}
 	db, err := sql.Open(sqlDriver, dsn)
 	if err != nil {
 		return nil, err
