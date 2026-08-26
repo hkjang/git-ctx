@@ -144,7 +144,7 @@ func indexedAppOn(t *testing.T, driver, dsn, sourceURL, modelURL string) *App {
 		t.Fatalf("%s gitlab settings status=%d body=%s", driver, saved.Code, saved.Body.String())
 	}
 	if saved := call(http.MethodPut, "/api/v1/admin/settings/model",
-		fmt.Sprintf(`{"provider":"openai-compatible","baseUrl":"%s/v1","model":"fake-embed","apiKey":"none","dimensions":16,"timeoutSeconds":10,"rerankerEnabled":true,"rerankerProvider":"openai-compatible","rerankerBaseUrl":"%s/v1","rerankerModel":"fake-rerank","rerankerApiKey":"none","rerankerTimeoutSeconds":10}`,
+		fmt.Sprintf(`{"provider":"openai-compatible","baseUrl":"%s/v1","model":"fake-embed","apiKey":"none","timeoutSeconds":10,"rerankerEnabled":true,"rerankerProvider":"openai-compatible","rerankerBaseUrl":"%s/v1","rerankerModel":"fake-rerank","rerankerApiKey":"none","rerankerTimeoutSeconds":10}`,
 			modelURL, modelURL)); saved.Code != http.StatusOK {
 		t.Fatalf("%s model settings status=%d body=%s", driver, saved.Code, saved.Body.String())
 	}
@@ -358,7 +358,7 @@ func answerEachSource(t *testing.T, sourceType, sourceURL, modelURL, settings, r
 		t.Fatalf("%s settings status=%d body=%s", sourceType, saved.Code, saved.Body.String())
 	}
 	if saved := call(http.MethodPut, "/api/v1/admin/settings/model",
-		fmt.Sprintf(`{"provider":"openai-compatible","baseUrl":"%s/v1","model":"fake-embed","apiKey":"none","dimensions":16,"timeoutSeconds":10}`,
+		fmt.Sprintf(`{"provider":"openai-compatible","baseUrl":"%s/v1","model":"fake-embed","apiKey":"none","timeoutSeconds":10}`,
 			modelURL)); saved.Code != http.StatusOK {
 		t.Fatalf("%s model settings status=%d body=%s", sourceType, saved.Code, saved.Body.String())
 	}

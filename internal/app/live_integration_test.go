@@ -91,7 +91,7 @@ func TestPlatformChainIntegration(t *testing.T) {
 	// The base URL deliberately ends in /v1, which is how every provider
 	// documents it and what used to produce /v1/v1/embeddings.
 	if saved := call(http.MethodPut, "/api/v1/admin/settings/model",
-		fmt.Sprintf(`{"provider":"openai-compatible","baseUrl":"%s/v1","model":"fake-embed","apiKey":"none","dimensions":16,"timeoutSeconds":10,"rerankerEnabled":true,"rerankerProvider":"openai-compatible","rerankerBaseUrl":"%s/v1","rerankerModel":"fake-rerank","rerankerApiKey":"none","rerankerTimeoutSeconds":10}`,
+		fmt.Sprintf(`{"provider":"openai-compatible","baseUrl":"%s/v1","model":"fake-embed","apiKey":"none","timeoutSeconds":10,"rerankerEnabled":true,"rerankerProvider":"openai-compatible","rerankerBaseUrl":"%s/v1","rerankerModel":"fake-rerank","rerankerApiKey":"none","rerankerTimeoutSeconds":10}`,
 			model.URL, model.URL)); saved.Code != http.StatusOK {
 		t.Fatalf("model settings status=%d body=%s", saved.Code, saved.Body.String())
 	}
@@ -576,7 +576,7 @@ func TestPlatformDegradationIntegration(t *testing.T) {
 		t.Fatalf("gitlab settings status=%d body=%s", saved.Code, saved.Body.String())
 	}
 	if saved := call(http.MethodPut, "/api/v1/admin/settings/model",
-		fmt.Sprintf(`{"provider":"openai-compatible","baseUrl":"%s/v1","model":"fake-embed","apiKey":"none","dimensions":16,"timeoutSeconds":5,"rerankerEnabled":true,"rerankerProvider":"openai-compatible","rerankerBaseUrl":"%s/v1","rerankerModel":"fake-rerank","rerankerApiKey":"none","rerankerTimeoutSeconds":5}`,
+		fmt.Sprintf(`{"provider":"openai-compatible","baseUrl":"%s/v1","model":"fake-embed","apiKey":"none","timeoutSeconds":5,"rerankerEnabled":true,"rerankerProvider":"openai-compatible","rerankerBaseUrl":"%s/v1","rerankerModel":"fake-rerank","rerankerApiKey":"none","rerankerTimeoutSeconds":5}`,
 			model.URL, model.URL)); saved.Code != http.StatusOK {
 		t.Fatalf("model settings status=%d body=%s", saved.Code, saved.Body.String())
 	}

@@ -73,6 +73,22 @@ func TestASettingKeyThisBuildDoesNotReadIsNamed(t *testing.T) {
 		t.Error("the unknown field was dropped; forward compatibility is the reason it is kept")
 	}
 
+	// The same holds for the model category, where a dimension is a vector-store
+	// setting rather than a model one — a mistake this repository's own tests
+	// were making until this check existed.
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/admin/settings/model",
+		strings.NewReader(`{"provider":"local","dimensions":16}`))
+	request.Header.Set("Authorization", "Bearer bootstrap")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	a.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("model settings status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "dimensions") {
+		t.Errorf("a vector-store field sent to the model category was accepted without a word: %s", recorder.Body.String())
+	}
+
 	// A payload this build understands says nothing extra.
 	clean := save(`{"enabled":true,"otlpEndpoint":"` + collector.URL + `","serviceName":"probe","allowInsecureLocalhost":true}`)
 	if _, present := clean["ignoredFields"]; present {

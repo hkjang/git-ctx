@@ -58,7 +58,7 @@ func documentSourceApp(t *testing.T, confluenceURL, jiraURL, modelURL, name stri
 		}
 	}
 	if saved := call(http.MethodPut, "/api/v1/admin/settings/model",
-		fmt.Sprintf(`{"provider":"openai-compatible","baseUrl":"%s/v1","model":"fake-embed","apiKey":"none","dimensions":16,"timeoutSeconds":10}`, modelURL)); saved.Code != http.StatusOK {
+		fmt.Sprintf(`{"provider":"openai-compatible","baseUrl":"%s/v1","model":"fake-embed","apiKey":"none","timeoutSeconds":10}`, modelURL)); saved.Code != http.StatusOK {
 		t.Fatalf("model settings status=%d", saved.Code)
 	}
 	for _, item := range []struct{ sourceType, project, slug, name string }{

@@ -35,6 +35,26 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.73.1 릴리스 전 검증 결과:
+
+```text
+모델 범주의 읽지 않은 항목 보고(코드에서 유도)    PASS
+저장소 자신의 잘못된 payload 7곳 정리             PASS
+유지보수 모드가 /mcp 만 막고 관리자는 통과        PASS
+임베딩 차원 불일치가 0점이지 패닉이 아님          PASS
+go test -race (FTS5/태그 없음/PostgreSQL)        PASS
+빌드 모드 교차 시험·콘솔 시험                    PASS
+go vet ./... && go build ./...                  PASS
+버전 메타데이터·GitHub Actions 정합성             PASS
+Kubernetes Kustomize·:4747·v0.73.1 렌더링         PASS
+Docker linux/amd64·UID 10001·v0.73.1 빌드         PASS
+```
+
+직전 릴리스의 경고를 다른 범주로 넓히려다, 키 목록의 출처가 없다는 것을 먼저 확인했다. 모델
+범주만은 읽는 함수가 셋으로 특정되어 코드에서 유도할 수 있었고, 나머지는 손으로 만들면 정상
+필드를 오탐할 위험이 커 넣지 않았다. 넓힌 경고가 저장소 자신의 시험이 보내던 잘못된 필드를
+곧바로 잡았다.
+
 2026-08-26 v0.73.0 릴리스 전 검증 결과:
 
 ```text

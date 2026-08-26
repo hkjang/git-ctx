@@ -1385,6 +1385,15 @@ var settingKeysThisBuildReads = map[string][]string{
 	"observability": {"enabled", "otlpEndpoint", "serviceName", "sampleRatio", "timeoutSeconds",
 		"tlsVerify", "caCertificate", "proxyUrl", "headers", "allowInsecureLocalhost"},
 	"logging": {"level"},
+	// Read by embeddingProviderFromMap, rerankerProvider and searchConfig. A
+	// dimension belongs to the vector store rather than to the model here, so
+	// "dimensions" sent to this category is one of the mistakes this reports.
+	"model": {"provider", "baseUrl", "model", "apiKey", "timeoutSeconds", "tlsVerify",
+		"caCertificate", "proxyUrl", "embeddingEnabled", "retrievalMode",
+		"keywordWeight", "vectorWeight", "finalK", "candidateLimit", "rerankLimit",
+		"minimumEmbeddingCoveragePercent",
+		"rerankerEnabled", "rerankerProvider", "rerankerBaseUrl", "rerankerModel",
+		"rerankerApiKey", "rerankerTimeoutSeconds"},
 }
 
 func unreadSettingKeys(category string, value map[string]any) []string {

@@ -2421,7 +2421,7 @@ func TestVectorStatusProbeSeparatesModelFailureFromVectorFailure(t *testing.T) {
 	}
 
 	if saved := call(http.MethodPut, "/api/v1/admin/settings/model",
-		`{"provider":"openai-compatible","baseUrl":"`+model.URL+`","model":"m","dimensions":4,"timeoutSeconds":5}`); saved.Code != http.StatusOK {
+		`{"provider":"openai-compatible","baseUrl":"`+model.URL+`","model":"m","timeoutSeconds":5}`); saved.Code != http.StatusOK {
 		t.Fatalf("model save=%d body=%s", saved.Code, saved.Body.String())
 	}
 	if saved := call(http.MethodPut, "/api/v1/admin/settings/vector",

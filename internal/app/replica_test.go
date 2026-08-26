@@ -76,7 +76,7 @@ func TestTwoReplicasIndexEachJobOnceIntegration(t *testing.T) {
 		t.Fatalf("gitlab settings status=%d body=%s", saved.Code, saved.Body.String())
 	}
 	if saved := call(first, http.MethodPut, "/api/v1/admin/settings/model",
-		fmt.Sprintf(`{"provider":"openai-compatible","baseUrl":"%s/v1","model":"fake-embed","apiKey":"none","dimensions":16,"timeoutSeconds":10}`, model.URL)); saved.Code != http.StatusOK {
+		fmt.Sprintf(`{"provider":"openai-compatible","baseUrl":"%s/v1","model":"fake-embed","apiKey":"none","timeoutSeconds":10}`, model.URL)); saved.Code != http.StatusOK {
 		t.Fatalf("model settings status=%d body=%s", saved.Code, saved.Body.String())
 	}
 	// Several repositories, so the queue has depth and both workers have
