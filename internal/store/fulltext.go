@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"strings"
 )
 
@@ -45,6 +47,18 @@ func (s *Store) prepareSQLiteFullText(ctx context.Context) error {
 	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='document_chunks_fts'`).Scan(&existing); err != nil {
 		return err
 	}
+	if existing != 0 {
+		// The table is in the schema, which says nothing about whether this
+		// binary can read it: an index built by a binary with FTS5 outlives one
+		// built without. Ask the index a question, because every statement that
+		// only names the table — CREATE ... IF NOT EXISTS included — succeeds
+		// without the module and would report a capability that is not there.
+		var rowid int64
+		err := s.DB.QueryRowContext(ctx, `SELECT rowid FROM document_chunks_fts WHERE document_chunks_fts MATCH ? LIMIT 1`, `"gitctxprobe"*`).Scan(&rowid)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return s.disableSQLiteFullText(ctx, err)
+		}
+	}
 	statements := []string{
 		`CREATE VIRTUAL TABLE IF NOT EXISTS document_chunks_fts USING fts5(
 			file_path, heading, content,
@@ -56,24 +70,72 @@ func (s *Store) prepareSQLiteFullText(ctx context.Context) error {
 		`CREATE TRIGGER IF NOT EXISTS document_chunks_fts_delete AFTER DELETE ON document_chunks BEGIN
 			INSERT INTO document_chunks_fts(document_chunks_fts,rowid,file_path,heading,content) VALUES ('delete',old.rowid,old.file_path,old.heading,old.content);
 		END`,
-		`CREATE TRIGGER IF NOT EXISTS document_chunks_fts_update AFTER UPDATE ON document_chunks BEGIN
+		// Recreated rather than left alone: the first version of this trigger
+		// reacted to every update, and a database carrying it would keep doing so
+		// for as long as it lived because CREATE ... IF NOT EXISTS leaves what it
+		// finds. Dropping a trigger loses no index state.
+		`DROP TRIGGER IF EXISTS document_chunks_fts_update`,
+		// Only the indexed columns are worth reacting to. Finishing a ref stamps
+		// the new commit onto every chunk in it, including the ones the commit
+		// did not touch, and re-indexing text that did not change costs the push
+		// a second pass over the whole ref for nothing.
+		`CREATE TRIGGER IF NOT EXISTS document_chunks_fts_update AFTER UPDATE OF file_path,heading,content ON document_chunks BEGIN
 			INSERT INTO document_chunks_fts(document_chunks_fts,rowid,file_path,heading,content) VALUES ('delete',old.rowid,old.file_path,old.heading,old.content);
 			INSERT INTO document_chunks_fts(rowid,file_path,heading,content) VALUES (new.rowid,new.file_path,new.heading,new.content);
 		END`,
 	}
 	for _, statement := range statements {
 		if _, err := s.DB.ExecContext(ctx, statement); err != nil {
-			return err
+			return s.disableSQLiteFullText(ctx, err)
 		}
 	}
-	if existing == 0 {
-		// Either this is a new database or one upgraded from a build without
-		// FTS5. Both start with an empty index over a populated table.
+	// Either this is a new database, one upgraded from a build without FTS5, or
+	// one written while the triggers were dropped. All three start with an index
+	// that does not describe the table, and the only way back is a full pass.
+	if existing == 0 || s.fullTextUnmaintained(ctx) {
 		if _, err := s.DB.ExecContext(ctx, `INSERT INTO document_chunks_fts(document_chunks_fts) VALUES('rebuild')`); err != nil {
+			return s.disableSQLiteFullText(ctx, err)
+		}
+		if _, err := s.DB.ExecContext(ctx, `DELETE FROM index_maintenance WHERE name=?`, unmaintainedNote); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// unmaintainedNote records that the full-text index stopped being maintained
+// while some binary without FTS5 was writing to this database.
+const unmaintainedNote = "fulltext_unmaintained"
+
+func (s *Store) fullTextUnmaintained(ctx context.Context) bool {
+	var noted int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM index_maintenance WHERE name=?`, unmaintainedNote).Scan(&noted); err != nil {
+		return false
+	}
+	return noted != 0
+}
+
+// disableSQLiteFullText gives up the index and, more importantly, gets out of
+// the way of everything else.
+//
+// The triggers are part of the schema, so they survive the binary that created
+// them. A binary without the module cannot run them, and a trigger that cannot
+// run fails the statement that fired it — which is every insert, update and
+// delete on document_chunks. Indexing stops completely, and the error names an
+// SQLite module rather than anything an operator changed. Dropping the triggers
+// needs no module and makes the database writable again; the index it leaves
+// behind is stale, which is why that is written down for the next start.
+func (s *Store) disableSQLiteFullText(ctx context.Context, cause error) error {
+	for _, trigger := range []string{"document_chunks_fts_insert", "document_chunks_fts_delete", "document_chunks_fts_update"} {
+		if _, err := s.DB.ExecContext(ctx, `DROP TRIGGER IF EXISTS `+trigger); err != nil {
+			return cause
+		}
+	}
+	// The virtual table itself cannot be dropped without the module, so it stays
+	// in the schema, unreadable and unwritten, until a binary that has the module
+	// rebuilds it.
+	_, _ = s.DB.ExecContext(ctx, `INSERT INTO index_maintenance(name) VALUES(?) ON CONFLICT(name) DO NOTHING`, unmaintainedNote)
+	return cause
 }
 
 func (s *Store) preparePostgresFullText(ctx context.Context) error {

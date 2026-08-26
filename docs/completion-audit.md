@@ -35,6 +35,23 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.60.2 릴리스 전 검증 결과:
+
+```text
+빌드 모드 교차 시험(태그 유/무 같은 DB)         PASS
+방치된 색인 재구축·도장이 재색인하지 않음        PASS
+go test -race -count=1 ./... (FTS5/태그 없음)  PASS
+커밋 도장 20k 청크 137ms → 56ms                PASS
+go vet ./... && go build ./...               PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.60.2 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.60.2 빌드      PASS
+```
+
+이번 검증은 데이터베이스가 그것을 만든 바이너리보다 오래 산다는 사실에서 출발했다. 이 저장소는
+FTS5 있는 빌드와 없는 빌드를 둘 다 지원한다고 적어 두었는데, 그 두 빌드가 같은 데이터베이스를
+나눠 쓰는 경우를 아무도 실행해 본 적이 없었다. 실행해 보니 색인이 아니라 색인 작업 전체가 멈췄다.
+
 2026-08-26 v0.60.1 릴리스 전 검증 결과:
 
 ```text

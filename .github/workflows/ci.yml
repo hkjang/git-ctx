@@ -50,6 +50,11 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # A database outlives the binary that made it, and `go build ./...` is the
+      # command without the FTS5 tag. Both builds have to share one database.
+      - name: Build-mode crossover
+        run: sh test/store/build-mode.test.sh
+
       - name: Unit tests
         run: go test -tags sqlite_fts5 ./...
 
