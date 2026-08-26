@@ -35,6 +35,25 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.65.1 릴리스 전 검증 결과:
+
+```text
+문서 소스 조사(Confluence 공간·Jira 프로젝트)   PASS
+인용이 합성 토큰을 담지 않음                     PASS
+커넥터 설정 진단 문구가 참                       PASS
+한국어·영어 런북 모두 발견                       PASS
+go test -race (FTS5/태그 없음/PostgreSQL)       PASS
+빌드 모드 교차 시험                             PASS
+go vet ./... && go build ./...                 PASS
+버전 메타데이터·GitHub Actions 정합성            PASS
+Kubernetes Kustomize·:4747·v0.65.1 렌더링        PASS
+Docker linux/amd64·UID 10001·v0.65.1 빌드        PASS
+```
+
+지난 릴리스에서 read-file 을 소스 우선으로 바꿨으니, 그것이 문서 소스에 회귀를 냈는지부터
+확인했다(GetFile 이 제대로 있어 문제없었다). 그 김에 가장 덜 실행된 경로를 실제 질문으로
+훑었고, 답 안의 문장 셋이 각각 틀려 있었다.
+
 2026-08-26 v0.65.0 릴리스 전 검증 결과:
 
 ```text

@@ -1234,6 +1234,50 @@ func TestDocumentSourceChainIntegration(t *testing.T) {
 }
 
 // newFakeConfluence serves the space and page endpoints the connector reads.
+// searchText pulls the phrase out of a JQL or CQL text~"..." clause. Both
+// clients build the query that way, so both fakes read it the same way.
+func searchText(query string) string {
+	const marker = `text~"`
+	index := strings.Index(query, marker)
+	if index < 0 {
+		return ""
+	}
+	rest := query[index+len(marker):]
+	if end := strings.Index(rest, `"`); end >= 0 {
+		return strings.TrimSpace(rest[:end])
+	}
+	return strings.TrimSpace(rest)
+}
+
+func matchingIssues(issues []map[string]any, jql string) []map[string]any {
+	text := strings.ToLower(searchText(jql))
+	if text == "" {
+		return issues
+	}
+	out := make([]map[string]any, 0, len(issues))
+	for _, issue := range issues {
+		fields, _ := issue["fields"].(map[string]any)
+		hay := strings.ToLower(fmt.Sprint(issue["key"], " ", fields["summary"], " ", fields["description"]))
+		if strings.Contains(hay, text) {
+			out = append(out, issue)
+		}
+	}
+	return out
+}
+
+func matchingPages(pages map[string]map[string]string, cql string) []map[string]any {
+	text := strings.ToLower(searchText(cql))
+	out := make([]map[string]any, 0, len(pages))
+	for id, page := range pages {
+		if text != "" && !strings.Contains(strings.ToLower(page["title"]+" "+page["body"]), text) {
+			continue
+		}
+		out = append(out, map[string]any{"content": map[string]any{"id": id, "title": page["title"],
+			"version": map[string]any{"number": 3}}})
+	}
+	return out
+}
+
 func newFakeConfluence() *httptest.Server {
 	pages := map[string]map[string]string{
 		"101": {"title": "장애 대응 런북", "body": "<p>장애 대응 절차: 컨슈머를 재시작한다.</p>"},
@@ -1248,6 +1292,10 @@ func newFakeConfluence() *httptest.Server {
 			write(map[string]any{"results": []map[string]any{{"key": "OPS", "name": "Operations"}}})
 		case strings.Contains(path, "/rest/api/space/"):
 			write(map[string]any{"id": "1", "key": "OPS", "name": "Operations", "description": "운영 공간"})
+		case strings.HasSuffix(path, "/rest/api/search"):
+			// Likewise for CQL: a search endpoint that ignores its query tells a
+			// comparison nothing.
+			write(map[string]any{"results": matchingPages(pages, r.URL.Query().Get("cql"))})
 		case strings.HasSuffix(path, "/rest/api/content"):
 			results := make([]map[string]any, 0, len(pages))
 			for id, page := range pages {
@@ -1288,7 +1336,11 @@ func newFakeJira() *httptest.Server {
 		case strings.Contains(path, "/rest/api/2/project/"):
 			write(map[string]any{"key": "PAY", "name": "Payments", "description": "결제"})
 		case strings.HasSuffix(path, "/rest/api/2/search"):
-			write(map[string]any{"issues": issues})
+			// The real endpoint applies the JQL it is given. A fake that returns
+			// every issue whatever was asked makes this source look like it
+			// matches everything, which is a claim about the fake and not about
+			// the product.
+			write(map[string]any{"issues": matchingIssues(issues, r.URL.Query().Get("jql"))})
 		case strings.Contains(path, "/rest/api/2/issue/"):
 			key := path[strings.LastIndex(path, "/")+1:]
 			for _, issue := range issues {

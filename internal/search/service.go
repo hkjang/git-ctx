@@ -1033,9 +1033,16 @@ WHERE r.enabled=1 AND ` + predicate + ` AND ` + markers
 		return rows.Err()
 	}
 
-	const substringMarkers = `(LOWER(c.file_path) LIKE '%runbook%' OR LOWER(c.file_path) LIKE '%playbook%' OR LOWER(c.file_path) LIKE '%operations%' OR LOWER(c.heading) LIKE '%runbook%')`
+	// A runbook is not always called a runbook. This platform answers in Korean
+	// and indexes Korean documentation, and a page titled 장애 대응 런북 — the
+	// clearest runbook in the corpus — matched none of the English markers, so
+	// find-runbook said no runbooks existed.
+	const substringMarkers = `(LOWER(c.file_path) LIKE '%runbook%' OR LOWER(c.file_path) LIKE '%playbook%' OR LOWER(c.file_path) LIKE '%operations%'` +
+		` OR c.file_path LIKE '%런북%' OR c.file_path LIKE '%플레이북%' OR c.file_path LIKE '%운영%' OR c.file_path LIKE '%장애%'` +
+		` OR LOWER(c.heading) LIKE '%runbook%' OR LOWER(c.heading) LIKE '%playbook%'` +
+		` OR c.heading LIKE '%런북%' OR c.heading LIKE '%플레이북%' OR c.heading LIKE '%운영%' OR c.heading LIKE '%장애%')`
 	indexed := false
-	if clause, markerArgs, ok := s.fullTextRestriction("c", []string{"runbook", "playbook", "operations"}); ok {
+	if clause, markerArgs, ok := s.fullTextRestriction("c", []string{"runbook", "playbook", "operations", "런북", "플레이북", "운영", "장애"}); ok {
 		if err := gather(clause, markerArgs); err != nil {
 			return nil, err
 		}
@@ -3464,7 +3471,13 @@ func (s *Service) discoverRemoteCode(ctx context.Context, principals []string, q
 		}
 	}
 	if len(out.diagnostics) == 0 && len(out.repositories) == 0 && len(out.hits) == 0 {
-		out.diagnostics = append(out.diagnostics, "remote: no source connector is configured, so only the local index was searched.")
+		// Instance-wide discovery asks the Git platforms; Confluence and Jira
+		// have no such endpoint and are answered from the index alone. Saying
+		// "no source connector is configured" on an installation that runs both
+		// of them was simply untrue, and it sent the reader to the settings page
+		// to fix something that was not broken.
+		out.diagnostics = append(out.diagnostics,
+			"remote: instance-wide discovery covers Bitbucket and GitLab, and neither answered here, so this came from the local index. Confluence and Jira are always answered from the index.")
 	}
 	return out
 }

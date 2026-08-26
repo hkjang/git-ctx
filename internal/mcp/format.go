@@ -12,6 +12,30 @@ import (
 
 // Renderers that turn search results into the Markdown an agent reads.
 
+// citationRevision renders the revision part of a source citation.
+//
+// A Git source stores a commit here. Confluence and Jira have no commit, so the
+// connectors put a synthetic change-detection token in the same column — the
+// newest page's timestamp, version and id joined by colons, or the literal
+// "empty" when the space holds nothing. Both were printed straight into the
+// citation, so an answer about a runbook cited
+// confluence://OPS/OPS@empty/pages/... and one about an issue carried an ISO
+// timestamp with a stray colon in the middle of the path.
+//
+// Those tokens identify the space, not the page, so there is nothing to salvage
+// from them: the ref these sources use is "current", and saying so is both
+// readable and true.
+func citationRevision(commitID, ref string) string {
+	commitID = strings.TrimSpace(commitID)
+	if commitID != "" && commitID != "empty" && !strings.ContainsAny(commitID, ": ") {
+		return commitID
+	}
+	if ref = strings.TrimSpace(ref); ref != "" {
+		return ref
+	}
+	return "current"
+}
+
 func formatLibraries(items []search.Library) string {
 	if len(items) == 0 {
 		return "No accessible libraries matched. Check the name or use a broader query."
@@ -50,7 +74,7 @@ func formatSourceResults(items []search.SourceResult) string {
 	var b strings.Builder
 	b.WriteString("## Source Search Results\n")
 	for _, item := range items {
-		fmt.Fprintf(&b, "\n### %s · %s\n\n%s\n\nSource: %s://%s/%s@%s/%s#L%d-L%d\n", item.LibraryID, item.Path, item.Snippet, item.SourceType, item.ProjectKey, item.RepositorySlug, item.CommitID, item.Path, item.LineStart, item.LineEnd)
+		fmt.Fprintf(&b, "\n### %s · %s\n\n%s\n\nSource: %s://%s/%s@%s/%s#L%d-L%d\n", item.LibraryID, item.Path, item.Snippet, item.SourceType, item.ProjectKey, item.RepositorySlug, citationRevision(item.CommitID, item.Ref), item.Path, item.LineStart, item.LineEnd)
 	}
 	return b.String()
 }
@@ -91,7 +115,7 @@ func formatCodeSearch(result search.CodeSearchResult) string {
 		}
 	} else {
 		for _, item := range result.Hits {
-			fmt.Fprintf(&b, "\n#### %s · %s\n\n%s\n\nSource: %s://%s/%s@%s/%s#L%d-L%d\n", item.LibraryID, item.Path, item.Snippet, item.SourceType, item.ProjectKey, item.RepositorySlug, item.CommitID, item.Path, item.LineStart, item.LineEnd)
+			fmt.Fprintf(&b, "\n#### %s · %s\n\n%s\n\nSource: %s://%s/%s@%s/%s#L%d-L%d\n", item.LibraryID, item.Path, item.Snippet, item.SourceType, item.ProjectKey, item.RepositorySlug, citationRevision(item.CommitID, item.Ref), item.Path, item.LineStart, item.LineEnd)
 		}
 	}
 	// Diagnostics always ship: an agent that knows the search ran a name-only
@@ -158,7 +182,7 @@ func formatFileContent(file search.FileContent) string {
 	}
 	fmt.Fprintf(&b, "%s%s\n%s\n%s\n", fence, languageHint(file.Path), file.Content, fence)
 	fmt.Fprintf(&b, "\nSource: `%s://%s/%s@%s/%s#L%d-L%d`\n", file.SourceType, file.ProjectKey, file.RepositorySlug,
-		firstNonEmpty(file.CommitID, file.Ref), file.Path, file.StartLine, file.EndLine)
+		citationRevision(file.CommitID, file.Ref), file.Path, file.StartLine, file.EndLine)
 	if len(file.Diagnostics) > 0 {
 		b.WriteString("\n### Notes\n")
 		for _, diagnostic := range file.Diagnostics {
@@ -203,7 +227,7 @@ func formatSemanticSearch(result search.SemanticSearch) string {
 	for _, hit := range result.Hits {
 		fmt.Fprintf(&b, "\n### %s · %s (%s %.2f)\n\n%s\n\nSource: `%s://%s@%s/%s#L%d-L%d`\n",
 			hit.LibraryID, hit.FilePath, scoreLabel, hit.Score, strings.TrimSpace(hit.Content),
-			hit.SourceType, strings.TrimPrefix(hit.LibraryID, "/"), firstNonEmpty(hit.CommitID, hit.Ref), hit.FilePath, hit.LineStart, hit.LineEnd)
+			hit.SourceType, strings.TrimPrefix(hit.LibraryID, "/"), citationRevision(hit.CommitID, hit.Ref), hit.FilePath, hit.LineStart, hit.LineEnd)
 	}
 	if len(result.Hits) == 0 {
 		b.WriteString("\nNo accessible code or documentation matched. Try another term, source type, or repository scope.\n")
@@ -323,7 +347,7 @@ func formatRepositoryMap(item search.RepositoryMap) string {
 		decoded = map[string]any{}
 	}
 	pretty, _ := json.MarshalIndent(decoded, "", "  ")
-	text := fmt.Sprintf("## Repository Map\n\n- Library ID: %s\n- Ref: %s\n- Commit: %s\n\n```json\n%s\n```\n", item.LibraryID, item.Ref, item.CommitID, pretty)
+	text := fmt.Sprintf("## Repository Map\n\n- Library ID: %s\n- Ref: %s\n- Commit: %s\n\n```json\n%s\n```\n", item.LibraryID, item.Ref, citationRevision(item.CommitID, item.Ref), pretty)
 	if len(item.Stack) > 0 {
 		// The libraries a project already uses decide how new code in it should be
 		// written, so they belong in the orientation rather than a separate call.
@@ -356,7 +380,7 @@ func formatSymbols(items []search.SymbolResult) string {
 	b.WriteString("## Symbol Search Results\n")
 	for _, item := range items {
 		fmt.Fprintf(&b, "\n### %s\n\n- Kind: %s\n- Language: %s\n- Library ID: %s/%s\n- Signature: `%s`\n- Source: bitcontext://%s@%s/%s#L%d-L%d\n",
-			item.QualifiedName, item.Kind, item.Language, item.LibraryID, item.Ref, item.Signature, item.LibraryID, item.CommitID, item.FilePath, item.LineStart, item.LineEnd)
+			item.QualifiedName, item.Kind, item.Language, item.LibraryID, item.Ref, item.Signature, item.LibraryID, citationRevision(item.CommitID, item.Ref), item.FilePath, item.LineStart, item.LineEnd)
 		if item.Documentation != "" {
 			fmt.Fprintf(&b, "- Documentation: %s\n", item.Documentation)
 		}
@@ -366,7 +390,7 @@ func formatSymbols(items []search.SymbolResult) string {
 
 func formatSymbolContext(item search.SymbolResult) string {
 	return fmt.Sprintf("## %s\n\n- Kind: %s\n- Language: %s\n- Signature: `%s`\n- Source: bitcontext://%s@%s/%s#L%d-L%d\n\n%s\n\n```%s\n%s\n```\n",
-		item.QualifiedName, item.Kind, item.Language, item.Signature, item.LibraryID, item.CommitID, item.FilePath, item.LineStart, item.LineEnd, item.Documentation, item.Language, item.Content)
+		item.QualifiedName, item.Kind, item.Language, item.Signature, item.LibraryID, citationRevision(item.CommitID, item.Ref), item.FilePath, item.LineStart, item.LineEnd, item.Documentation, item.Language, item.Content)
 }
 
 func formatDependencies(items []search.DependencyResult) string {
@@ -380,7 +404,7 @@ func formatDependencies(items []search.DependencyResult) string {
 		if from == "" {
 			from = item.FilePath
 		}
-		fmt.Fprintf(&b, "\n- `%s` --%s--> `%s`\n  Source: bitcontext://%s@%s/%s#L%d\n", from, item.Kind, item.Target, item.LibraryID, item.CommitID, item.FilePath, item.LineNumber)
+		fmt.Fprintf(&b, "\n- `%s` --%s--> `%s`\n  Source: bitcontext://%s@%s/%s#L%d\n", from, item.Kind, item.Target, item.LibraryID, citationRevision(item.CommitID, item.Ref), item.FilePath, item.LineNumber)
 	}
 	return b.String()
 }
@@ -416,7 +440,7 @@ func formatChangeImpact(item search.ChangeImpact) string {
 		if from == "" {
 			from = dependency.FilePath
 		}
-		fmt.Fprintf(&b, "\n- `%s` depends on `%s` (%s)\n  Source: bitcontext://%s@%s/%s#L%d\n", from, dependency.Target, dependency.Kind, dependency.LibraryID, dependency.CommitID, dependency.FilePath, dependency.LineNumber)
+		fmt.Fprintf(&b, "\n- `%s` depends on `%s` (%s)\n  Source: bitcontext://%s@%s/%s#L%d\n", from, dependency.Target, dependency.Kind, dependency.LibraryID, citationRevision(dependency.CommitID, dependency.Ref), dependency.FilePath, dependency.LineNumber)
 	}
 	return b.String()
 }
@@ -428,7 +452,7 @@ func formatRunbooks(items []search.RunbookResult) string {
 	var b strings.Builder
 	b.WriteString("## Runbooks\n")
 	for _, item := range items {
-		fmt.Fprintf(&b, "\n### %s\n\n%s\n\nSource: bitcontext://%s@%s/%s#L%d-L%d\n", item.Heading, item.Content, item.LibraryID, item.CommitID, item.FilePath, item.LineStart, item.LineEnd)
+		fmt.Fprintf(&b, "\n### %s\n\n%s\n\nSource: bitcontext://%s@%s/%s#L%d-L%d\n", item.Heading, item.Content, item.LibraryID, citationRevision(item.CommitID, item.Ref), item.FilePath, item.LineStart, item.LineEnd)
 	}
 	return b.String()
 }
@@ -442,7 +466,7 @@ func formatSearchExplanation(item search.SearchExplanation) string {
 	}
 	for _, hit := range item.Hits {
 		fmt.Fprintf(&b, "\n### %s\n\n- Matched Terms: %d\n- Keyword Occurrences: %d\n- Reasons: %s\n- Embedding: %s / %s / %s\n- Source: bitcontext://%s@%s/%s#L%d-L%d\n",
-			hit.Heading, hit.MatchedTerms, hit.KeywordOccurrences, strings.Join(hit.Reasons, "; "), hit.EmbeddingProvider, hit.EmbeddingModel, hit.EmbeddingRevision, item.LibraryID, hit.CommitID, hit.FilePath, hit.LineStart, hit.LineEnd)
+			hit.Heading, hit.MatchedTerms, hit.KeywordOccurrences, strings.Join(hit.Reasons, "; "), hit.EmbeddingProvider, hit.EmbeddingModel, hit.EmbeddingRevision, item.LibraryID, citationRevision(hit.CommitID, item.Ref), hit.FilePath, hit.LineStart, hit.LineEnd)
 	}
 	return b.String()
 }
