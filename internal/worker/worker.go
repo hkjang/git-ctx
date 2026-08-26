@@ -2,10 +2,13 @@ package worker
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -46,6 +49,10 @@ type Worker struct {
 	lease            time.Duration
 	timeout          time.Duration
 	health           SourceHealth
+	// identity names this instance in the job it claims. Replicas share one
+	// queue, and a job stuck in 'running' used to say when it started and
+	// nothing about where.
+	identity string
 }
 
 // SetSourceHealth installs the shared circuit breaker registry.
@@ -58,7 +65,30 @@ func (w *Worker) SetRetrievalModeLoader(loader RetrievalModeLoader) {
 func (w *Worker) SetProjection(projection Projection) { w.projection = projection }
 
 func New(s *store.Store, idx *indexer.Indexer, f SourceFactory) *Worker {
-	return &Worker{store: s, indexer: idx, factory: f, poll: 2 * time.Second, maxAttempts: 5, lease: JobLeaseDuration, timeout: jobTimeout}
+	return &Worker{store: s, indexer: idx, factory: f, poll: 2 * time.Second, maxAttempts: 5,
+		lease: JobLeaseDuration, timeout: jobTimeout, identity: instanceIdentity()}
+}
+
+// instanceIdentity is what one running copy of this platform calls itself. The
+// host names the pod and the pid separates two copies on one machine; a random
+// suffix keeps two pods with the same name in a restarted deployment apart.
+func instanceIdentity() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "unknown-host"
+	}
+	suffix := make([]byte, 4)
+	if _, err := rand.Read(suffix); err != nil {
+		return fmt.Sprintf("%s/%d", host, os.Getpid())
+	}
+	return fmt.Sprintf("%s/%d/%s", host, os.Getpid(), hex.EncodeToString(suffix))
+}
+
+// SetIdentity overrides the name this worker claims jobs under.
+func (w *Worker) SetIdentity(name string) {
+	if strings.TrimSpace(name) != "" {
+		w.identity = name
+	}
 }
 
 const (
@@ -307,7 +337,7 @@ func (w *Worker) claim(ctx context.Context) (job, bool, error) {
 			return job{}, false, err
 		}
 		j.Attempts++
-		err = tx.QueryRowContext(ctx, `UPDATE index_jobs SET status='running',attempts=$1,started_at=CURRENT_TIMESTAMP WHERE id=$2 AND status='pending' RETURNING started_at`, j.Attempts, j.ID).Scan(&j.StartedAt)
+		err = tx.QueryRowContext(ctx, `UPDATE index_jobs SET status='running',attempts=$1,started_at=CURRENT_TIMESTAMP,claimed_by=$2 WHERE id=$3 AND status='pending' RETURNING started_at`, j.Attempts, w.identity, j.ID).Scan(&j.StartedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			return job{}, false, errors.New("index job claim lost")
 		}
@@ -320,7 +350,7 @@ func (w *Worker) claim(ctx context.Context) (job, bool, error) {
 		return j, true, nil
 	}
 	claimedAt := time.Now().UTC()
-	err := w.store.DB.QueryRowContext(ctx, w.store.Rebind(`UPDATE index_jobs SET status='running',attempts=attempts+1,started_at=? WHERE id=(SELECT id FROM index_jobs WHERE status='pending' AND next_run_at<=? ORDER BY created_at LIMIT 1) RETURNING id,repository_id,ref_name,attempts,started_at`), claimedAt, claimedAt).Scan(&j.ID, &j.RepositoryID, &j.RefName, &j.Attempts, &j.StartedAt)
+	err := w.store.DB.QueryRowContext(ctx, w.store.Rebind(`UPDATE index_jobs SET status='running',attempts=attempts+1,started_at=?,claimed_by=? WHERE id=(SELECT id FROM index_jobs WHERE status='pending' AND next_run_at<=? ORDER BY created_at LIMIT 1) RETURNING id,repository_id,ref_name,attempts,started_at`), claimedAt, w.identity, claimedAt).Scan(&j.ID, &j.RepositoryID, &j.RefName, &j.Attempts, &j.StartedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return job{}, false, nil
 	}

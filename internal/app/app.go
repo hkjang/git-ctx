@@ -37,13 +37,16 @@ import (
 )
 
 type App struct {
-	cfg                config.Config
-	store              *store.Store
-	keys               *apikey.Service
-	mcp                *mcp.Server
-	search             *search.Service
-	mux                *http.ServeMux
-	aead               cipher.AEAD
+	cfg    config.Config
+	store  *store.Store
+	keys   *apikey.Service
+	mcp    *mcp.Server
+	search *search.Service
+	mux    *http.ServeMux
+	aead   cipher.AEAD
+	// workerIdentity names this instance in the jobs its worker claims. Empty
+	// outside tests, where the worker names itself from the host and pid.
+	workerIdentity     string
 	oidc               *auth.OIDCVerifier
 	hooks              *webhook.Service
 	traces             *observability.Manager
@@ -206,7 +209,7 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 			slog.Warn("Keycloak is not configured; one-time bootstrap token is available", "token_file", bootstrapPath)
 		}
 	}
-	a := &App{cfg: c, store: s, keys: apikey.New(s, c.KeyPepper), aead: aead, mux: http.NewServeMux(), traces: observability.New(), rootCtx: ctx, bootstrapPath: bootstrapPath, bootstrapPersisted: bootstrapPersisted, recoveryMode: recoveryMode, databaseStartupErr: startupDBError, recoveryDatabase: recoveryPath}
+	a := &App{cfg: c, store: s, workerIdentity: c.WorkerIdentity, keys: apikey.New(s, c.KeyPepper), aead: aead, mux: http.NewServeMux(), traces: observability.New(), rootCtx: ctx, bootstrapPath: bootstrapPath, bootstrapPersisted: bootstrapPersisted, recoveryMode: recoveryMode, databaseStartupErr: startupDBError, recoveryDatabase: recoveryPath}
 	a.keys.SetRateLimitAlertLoader(a.rateLimitAlertsEnabled)
 	a.secrets = secretstore.New(s, a.seal, a.open, a.vaultClient)
 	a.notifier = outboundnotification.New(s, a.notificationDeliveryConfig)
@@ -270,6 +273,9 @@ func (a *App) startBackground() {
 	workerCtx, cancel := context.WithCancel(a.rootCtx)
 	a.cancel = cancel
 	backgroundWorker := worker.New(a.store, indexer.New(a.store, indexer.DefaultPolicy()), a.sourceAdapter)
+	if a.workerIdentity != "" {
+		backgroundWorker.SetIdentity(a.workerIdentity)
+	}
 	backgroundWorker.SetEmbeddingFactory(a.semanticEmbeddingProvider)
 	backgroundWorker.SetRetrievalModeLoader(a.retrievalMode)
 	backgroundWorker.SetProjection(a.projectSearchStores)

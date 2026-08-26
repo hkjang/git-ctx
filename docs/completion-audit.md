@@ -35,6 +35,25 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.71.1 릴리스 전 검증 결과:
+
+```text
+복제본 2개·저장소 6곳 exactly-once(first:3 second:3)  PASS
+경쟁이 일어나지 않으면 실패로 보고                     PASS
+잡 클레임 인스턴스 기록·리스 만료 메시지               PASS
+go test -race (FTS5/태그 없음/PostgreSQL)             PASS
+빌드 모드 교차 시험·릴리스 업그레이드 시험              PASS
+go vet ./... && go build ./...                       PASS
+버전 메타데이터·GitHub Actions 정합성                  PASS
+Kubernetes Kustomize·:4747·v0.71.1 렌더링              PASS
+Docker linux/amd64·UID 10001·v0.71.1 빌드              PASS
+```
+
+매니페스트가 replicas: 2 를 선언하는데 두 인스턴스를 함께 돌려 본 적이 없었다. 클레임은
+올바르게 짜여 있었고 중복 색인도 없었다. 대신 잡을 어느 인스턴스가 쥐고 있는지 아무 데도
+적히지 않아, 경쟁이 실제로 일어났는지 시험조차 확인할 수 없다는 것을 알았다 — 운영자도 같은
+처지였다.
+
 2026-08-26 v0.71.0 릴리스 전 검증 결과:
 
 ```text

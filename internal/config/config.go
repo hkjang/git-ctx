@@ -22,6 +22,10 @@ type Config struct {
 	BootstrapAdmin      string
 	PublicURL           string
 	BackupDirectory     string
+	// WorkerIdentity names this instance in the index jobs its worker claims.
+	// Empty in production, where the worker names itself from the host and
+	// process; set by tests that need to tell two replicas apart.
+	WorkerIdentity string
 }
 
 func FromEnv() (Config, error) {

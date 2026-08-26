@@ -68,7 +68,10 @@ func (s *Scheduler) RunOnce(ctx context.Context) error {
 	}
 	threshold := now.Add(-interval)
 	// Recover work abandoned by a terminated worker. Attempts are preserved.
-	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`UPDATE index_jobs SET status='pending',next_run_at=?,error_message='worker lease expired' WHERE status='running' AND started_at<?`), now, now.Add(-worker.JobLeaseDuration))
+	// The message names the instance whose lease ran out. With more than one
+	// replica sharing the queue, "worker lease expired" on its own tells an
+	// operator that something stalled and nothing about where to look.
+	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`UPDATE index_jobs SET status='pending',next_run_at=?,error_message='worker lease expired on '||CASE WHEN claimed_by='' THEN 'an unnamed instance' ELSE claimed_by END WHERE status='running' AND started_at<?`), now, now.Add(-worker.JobLeaseDuration))
 	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`DELETE FROM auth_flows WHERE expires_at<?`), now)
 	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`DELETE FROM user_sessions WHERE expires_at<?`), now)
 	_, _ = s.store.DB.ExecContext(ctx, s.store.Rebind(`DELETE FROM mcp_sessions WHERE expires_at<?`), now)

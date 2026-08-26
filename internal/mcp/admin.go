@@ -83,7 +83,7 @@ func (s *Server) indexJobs(ctx context.Context, p auth.Principal, status string,
 	if limit < 1 || limit > 100 {
 		limit = 20
 	}
-	statement := `SELECT j.id,r.library_id,j.ref_name,j.kind,j.status,j.attempts,j.files_processed,j.error_message,j.created_at
+	statement := `SELECT j.id,r.library_id,j.ref_name,j.kind,j.status,j.attempts,j.files_processed,j.error_message,j.created_at,j.claimed_by
 FROM index_jobs j JOIN repositories r ON r.id=j.repository_id`
 	var args []any
 	if status != "" {
@@ -101,16 +101,21 @@ FROM index_jobs j JOIN repositories r ON r.id=j.repository_id`
 	b.WriteString("## Recent Index Jobs\n")
 	count := 0
 	for rows.Next() {
-		var id, libraryID, ref, kind, state, message string
+		var id, libraryID, ref, kind, state, message, claimedBy string
 		var attempts, files int
 		var created time.Time
-		if err = rows.Scan(&id, &libraryID, &ref, &kind, &state, &attempts, &files, &message, &created); err != nil {
+		if err = rows.Scan(&id, &libraryID, &ref, &kind, &state, &attempts, &files, &message, &created, &claimedBy); err != nil {
 			return "", err
 		}
 		if !libraryAllowed(libraryID, p.AllowedRepositories) {
 			continue
 		}
 		fmt.Fprintf(&b, "\n- Job: %s\n  Library ID: %s\n  Ref: %s\n  Kind: %s\n  Status: %s\n  Attempts: %d\n  Files: %d\n  Created: %s\n", id, libraryID, ref, kind, state, attempts, files, created.UTC().Format(time.RFC3339))
+		// Replicas share this queue, so a job that is running or that stopped
+		// says which instance was holding it.
+		if claimedBy != "" {
+			fmt.Fprintf(&b, "  Claimed by: %s\n", claimedBy)
+		}
 		if message != "" {
 			fmt.Fprintf(&b, "  Error: %s\n", truncate(message, 300))
 		}
