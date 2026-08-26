@@ -35,6 +35,24 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.73.0 릴리스 전 검증 결과:
+
+```text
+OTLP 스팬이 수집기 /v1/traces 에 실제 도착        PASS
+읽지 않은 설정 항목을 이름으로 보고·값은 보존     PASS
+배경 워커와 경주하는 시험 전수 점검(추가 없음)    PASS
+go test -race (FTS5/태그 없음/PostgreSQL)        PASS
+빌드 모드 교차 시험                              PASS
+go vet ./... && go build ./...                  PASS
+버전 메타데이터·GitHub Actions 정합성             PASS
+Kubernetes Kustomize·:4747·v0.73.0 렌더링         PASS
+Docker linux/amd64·UID 10001·v0.73.0 빌드         PASS
+```
+
+코드 전체가 스팬을 만드는데 그것이 실제로 밖으로 나가는지 확인한 적이 없었다. 나갔다. 대신
+확인하는 과정에서 내가 필드 이름을 틀리게 보냈고, 서버가 그것을 "적용됨" 으로 받아 주는 것을
+보았다 — 앞뒤 호환성을 위한 보존이 평범한 오타를 가려 주고 있었다.
+
 2026-08-26 v0.72.2 릴리스 전 검증 결과:
 
 ```text

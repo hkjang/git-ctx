@@ -348,6 +348,16 @@ func (a *App) putSetting(w http.ResponseWriter, r *http.Request) {
 	}
 	a.audit(r, p, "settings.update", category, category, "success", map[string]any{"version": version, "validationSkipped": validationSkipped})
 	result := map[string]any{"category": category, "version": version, "secretFields": "encrypted and masked", "applied": true, "appliedAt": time.Now().UTC()}
+	// Unknown keys are kept on purpose: a newer console must be able to store a
+	// field this build does not read yet. But "applied: true" for a payload
+	// whose meaningful key was misspelled says the save worked and hides that
+	// nothing changed — sending tracingEnabled instead of enabled turns tracing
+	// off and answers 200. The keys this build did not read are named, and left
+	// where they are.
+	if ignored := unreadSettingKeys(category, value); len(ignored) > 0 {
+		result["ignoredFields"] = ignored
+		result["warning"] = fmt.Sprintf("이 버전이 읽지 않는 항목(%s)은 저장만 했습니다. 이름을 확인하세요.", strings.Join(ignored, ", "))
+	}
 	if len(unresolvedSecrets) > 0 {
 		result["missingSecrets"] = unresolvedSecrets
 		result["warning"] = fmt.Sprintf("저장된 값이 없는 비밀 항목(%s)은 비워 둔 채 저장했습니다. 실제 값을 입력해 다시 저장하세요.", strings.Join(unresolvedSecrets, ", "))
@@ -1368,6 +1378,34 @@ func (a *App) settingCategoryAllowed(p auth.Principal, category string) bool {
 // saveSettingValue persists one already normalized and validated category. It
 // exists so the import path stores settings exactly the way the HTTP handler
 // does: same encryption, same append-only version history.
+// settingKeysThisBuildReads is what each category's own code looks for. A
+// category absent from this map has no such list and reports nothing, which is
+// the safe answer for one whose shape this file does not own.
+var settingKeysThisBuildReads = map[string][]string{
+	"observability": {"enabled", "otlpEndpoint", "serviceName", "sampleRatio", "timeoutSeconds",
+		"tlsVerify", "caCertificate", "proxyUrl", "headers", "allowInsecureLocalhost"},
+	"logging": {"level"},
+}
+
+func unreadSettingKeys(category string, value map[string]any) []string {
+	known, ok := settingKeysThisBuildReads[category]
+	if !ok {
+		return nil
+	}
+	index := make(map[string]bool, len(known))
+	for _, key := range known {
+		index[key] = true
+	}
+	var ignored []string
+	for key := range value {
+		if !index[key] {
+			ignored = append(ignored, key)
+		}
+	}
+	sort.Strings(ignored)
+	return ignored
+}
+
 func (a *App) saveSettingValue(ctx context.Context, p auth.Principal, category string, value map[string]any) error {
 	raw, err := json.Marshal(value)
 	if err != nil {
