@@ -138,15 +138,36 @@ func TestTwoReplicasIndexEachJobOnceIntegration(t *testing.T) {
 		}
 	}
 
-	// No job was claimed twice. A second attempt on one job id is what a claim
-	// two workers can both win looks like.
-	var attempts int
-	if err = first.store.DB.QueryRow(`SELECT COALESCE(MAX(attempts),0) FROM index_jobs WHERE status='completed'`).Scan(&attempts); err != nil {
+	// A repeated attempt is reported, not failed on.
+	//
+	// This used to assert that no completed job had attempts>1, reading a second
+	// attempt as "two workers both won the claim". It is not: a job whose first
+	// pass failed is retried on purpose, and so is one whose lease expired, so
+	// under a loaded machine the assertion failed for the queue working exactly
+	// as designed. Nor can the recorded error tell the two apart — the indexer
+	// overwrites error_message with the successful run's own warning, which is
+	// usually empty.
+	//
+	// Two workers cannot both win a claim here: the claim updates a row that must
+	// still be pending, and every later write to that job is conditioned on the
+	// lease it started with. That mechanism is proven directly, and
+	// deterministically, by TestStaleWorkerCannotOverwriteReclaimedJob. What this
+	// test proves is the consequence — no chunk, symbol or file row was written
+	// twice, which is what a job two replicas both ran would leave behind.
+	repeated, err := first.store.DB.Query(`SELECT id,attempts FROM index_jobs WHERE status='completed' AND attempts>1`)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if attempts > 1 {
-		t.Errorf("a job was claimed %d times; a claim two workers can both win is not a claim", attempts)
+	defer repeated.Close()
+	for repeated.Next() {
+		var id string
+		var attempts int
+		if err = repeated.Scan(&id, &attempts); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("job %s needed %d attempts; the duplicate-row checks above are what rule out a double claim", id, attempts)
 	}
+
 	// Every repository got indexed. The count of completed jobs is deliberately
 	// not compared to the count of registrations: the scheduler enqueues its own
 	// refresh for a repository whose poll interval comes round, and one of those

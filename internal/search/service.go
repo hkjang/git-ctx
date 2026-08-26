@@ -1175,9 +1175,13 @@ FROM document_chunks WHERE repository_id=? AND ref_name=? ORDER BY indexed_at DE
 		// Naming the database said "application lexical" for SQLite long after
 		// SQLite grew an index of its own, and would say the same for a
 		// PostgreSQL installation whose index failed to build.
-		mode = "full-text index candidates + vector/rerank (" + cfg.RetrievalMode + ")"
+		// Reranking is not named here because it does not happen here: the
+		// reranker runs for query-docs alone. Claiming it in the tool whose job
+		// is to explain how an answer was ordered is the worst place to be
+		// approximate.
+		mode = "full-text index candidates + vector scoring (" + cfg.RetrievalMode + ")"
 		if !s.store.FullTextAvailable() {
-			mode = "lexical scan + vector (" + cfg.RetrievalMode + ")"
+			mode = "lexical scan + vector scoring (" + cfg.RetrievalMode + ")"
 		}
 		if s.vector != nil {
 			mode += " + external vector database"

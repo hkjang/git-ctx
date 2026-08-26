@@ -2999,4 +2999,24 @@ func TestAdminHealthReportsTheSearchPath(t *testing.T) {
 	if reranker, _ := read()["reranker"].(string); !strings.HasPrefix(reranker, "unusable") {
 		t.Fatalf("a reranker that cannot run must be reported as such: %q", reranker)
 	}
+
+	// A working reranker has to say which answers it reorders. It runs for
+	// query-docs alone, and the status view used to describe it as if it applied
+	// to retrieval in general — an operator who turns it on, searches, and sees
+	// an unchanged order has then been told nothing that explains it.
+	sealed, err = a.seal([]byte(`{"provider":"local","rerankerEnabled":true,"rerankerProvider":"openai-compatible","rerankerBaseUrl":"https://gateway.internal","rerankerModel":"m"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.store.DB.Exec(a.store.Rebind(`UPDATE system_settings SET value_encrypted=? WHERE category='model'`), sealed); err != nil {
+		t.Fatal(err)
+	}
+	reranker, _ := read()["reranker"].(string)
+	if !strings.Contains(reranker, "query-docs") {
+		t.Errorf("the reported reranker does not say which answers it reorders: %q", reranker)
+	}
+	markdown := a.embeddingHealthMarkdown(context.Background())
+	if !strings.Contains(markdown, "query-docs") {
+		t.Errorf("the operator status view does not say where the reranker applies:\n%s", markdown)
+	}
 }

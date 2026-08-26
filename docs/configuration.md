@@ -413,6 +413,8 @@ Circuit과 캐시 지표가 Pod별 값이므로 Prometheus에서 instance label�
 선택적으로 사내 AI Gateway가 `/v1/rerank` 계약(`query`, `documents`, `model`,
 `top_n`)을 제공하면 같은 `model` 설정에 다음 필드를 추가한다. Reranker에는 ACL을
 통과한 후보만 전달되며 장애나 불완전 응답 시 기존 하이브리드 순서를 사용한다.
+재순위는 `query-docs` 답변에만 적용된다. `search-code`와 `search-semantic`의 순서는
+바뀌지 않으므로, 재순위를 켜고 검색 결과가 그대로라고 의심할 필요는 없다.
 
 ```json
 {

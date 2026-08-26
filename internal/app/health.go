@@ -403,8 +403,11 @@ func (a *App) embeddingHealthMarkdown(ctx context.Context) string {
 		fmt.Fprintf(&b, "- Next Model Probe: %s\n", view.Circuit.RetryAt.UTC().Format(time.RFC3339))
 	}
 	// Whether results are reranked is an operational fact of the same kind: a
-	// reranker that is configured but failing changes the order of every answer
-	// and reports itself nowhere else.
+	// reranker that is configured but failing changes the order of the answers
+	// it touches and reports itself nowhere else. Which answers those are is
+	// worth saying — it runs for query-docs and for nothing else, so an operator
+	// tuning search quality does not spend a day wondering why search-code looks
+	// the same.
 	settings, err := a.loadSettingMap(ctx, "model")
 	if err != nil {
 		fmt.Fprintf(&b, "- Reranker: unknown (model settings unreadable)\n")
@@ -419,7 +422,7 @@ func (a *App) embeddingHealthMarkdown(ctx context.Context) string {
 		fmt.Fprintf(&b, "- Reranker: enabled but unusable (%s): %s\n", model, rerankErr.Error())
 		return b.String()
 	}
-	fmt.Fprintf(&b, "- Reranker: enabled (%s) · a call that fails is reported in the answer itself\n", model)
+	fmt.Fprintf(&b, "- Reranker: enabled (%s) · reorders query-docs answers only; a call that fails is reported in the answer itself\n", model)
 	a.appendVectorStoreStatus(ctx, &b)
 	return b.String()
 }
@@ -458,7 +461,7 @@ func (a *App) searchBackendHealth(ctx context.Context) map[string]any {
 			if _, rerankErr := rerankerProviderFromMap(settings); rerankErr != nil {
 				health["reranker"] = "unusable: " + rerankErr.Error()
 			} else {
-				health["reranker"] = "enabled: " + model
+				health["reranker"] = "enabled for query-docs: " + model
 			}
 		}
 	}

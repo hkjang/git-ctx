@@ -2167,6 +2167,10 @@ function renderSettingFields(category, value) {
       "Circuit이 열린 뒤 한 요청으로 모델 복구를 다시 시험할 때까지 기다리는 시간입니다.",
     embeddingCacheSeconds:
       "동일 질의·청크 벡터 재사용 시간입니다. 0이면 캐시를 사용하지 않습니다.",
+    rerankerEnabled:
+      "재순위는 query-docs 답변에만 적용됩니다. search-code와 search-semantic의 순서는 바뀌지 않습니다.",
+    rerankLimit:
+      "query-docs가 재순위 모델에 넘길 상위 후보 수입니다.",
   };
   $("#setting-fields").hidden = fields.length === 0;
   $("#test-connection").hidden = !connectionTestCategories.includes(category);
@@ -2174,8 +2178,11 @@ function renderSettingFields(category, value) {
   $("#setting-fields").innerHTML = fields
     .map(([key, label, type, fallback]) => {
       const current = value[key] ?? fallback;
+      // A toggle carries its help text like any other field: "Reranker 사용" says
+      // nothing about which answers it reorders, and an operator who turns it on
+      // and sees search-code unchanged has no way to tell that is by design.
       if (type === "boolean")
-        return `<label class="toggle-control" data-field-key="${key}"><span>${esc(label)}</span><span class="toggle-row"><input data-setting-key="${key}" data-setting-type="boolean" type="checkbox" ${current ? "checked" : ""} /><span data-toggle-state="${key}">${current ? "사용함" : "사용 안 함"}</span></span></label>`;
+        return `<label class="toggle-control" data-field-key="${key}"><span>${esc(label)}</span><span class="toggle-row"><input data-setting-key="${key}" data-setting-type="boolean" type="checkbox" ${current ? "checked" : ""} /><span data-toggle-state="${key}">${current ? "사용함" : "사용 안 함"}</span></span>${fieldHelp[key] ? `<small class="field-help">${esc(fieldHelp[key])}</small>` : ""}</label>`;
       if (type === "textarea")
         return `<label class="wide" data-field-key="${key}">${esc(label)}<textarea data-setting-key="${key}" data-setting-type="string" rows="4">${esc(current)}</textarea></label>`;
       if (type === "json")
