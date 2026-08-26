@@ -54,7 +54,12 @@ func (p Policy) Revision() string {
 	prefixes := append([]string(nil), p.ExcludePrefixes...)
 	sort.Strings(extensions)
 	sort.Strings(prefixes)
-	sum := sha256.Sum256([]byte(strings.Join(extensions, ",") + "\x00" + strings.Join(prefixes, ",") + "\x00" + strconv.FormatInt(p.MaxFileBytes, 10)))
+	// The masking rules decide what the stored text is just as much as the
+	// policy does, so a rule change is a reason to re-read for the same reason a
+	// policy change is: otherwise a credential a new rule catches stays readable
+	// in every chunk indexed before it.
+	sum := sha256.Sum256([]byte(strings.Join(extensions, ",") + "\x00" + strings.Join(prefixes, ",") + "\x00" +
+		strconv.FormatInt(p.MaxFileBytes, 10) + "\x00" + contentsecurity.Revision()))
 	return hex.EncodeToString(sum[:8])
 }
 

@@ -581,6 +581,12 @@ paths:
         summary: Administrative service status including effective embedding retrieval health,
         responses: { "200": { description: Health } },
       }
+  /api/v1/admin/freshness:
+    get:
+      {
+        summary: Index freshness per repository against the configured staleness SLO,
+        responses: { "200": { description: Freshness report } },
+      }
   /api/v1/admin/backups:
     get:
       {

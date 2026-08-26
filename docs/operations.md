@@ -197,8 +197,16 @@ API 키, Keycloak secret, Bitbucket PAT, 문서 전체 원문은 로그에 남�
 제한·비밀 등급 파일과 `.env`, 인증서, 개인키는 파싱 전에 제외한다. 검색 문서는
 비신뢰 데이터이며 문서 안의 명령문이 시스템 설정이나 권한을 변경할 수 없다.
 개인키 블록은 파일 전체를 차단하고 자격증명 대입문과 클라우드 접근 키는 청크 저장
-전에 `[REDACTED]`로 치환한다. 탐지 경로와 조치는 `index_security_events`에
-기록되지만 탐지된 원문은 기록하지 않는다.
+전에 `[REDACTED]`로 치환한다. URL에 박힌 자격증명(`https://user:token@host`,
+`mongodb://`, `sqlserver://` 등 스킴 무관), Oracle thin 서술자(`scott/tiger@`),
+XML 설정의 `<password>`·`name="password" value="..."` 쌍, `Authorization` 헤더,
+`curl -u user:pass`, `.netrc`의 `login ... password ...`도 함께 치환한다. 호스트는
+남긴다 — 어느 시스템의 자격증명인지가 조치의 출발점이기 때문이다. 탐지 경로와 조치는
+`index_security_events`에 기록되지만 탐지된 원문은 기록하지 않는다.
+
+마스킹 규칙은 지문으로 관리한다. 규칙이 바뀌면 지문이 바뀌고, 커밋이 그대로여도 모든
+ref를 다시 읽는다. 이미 저장된 청크는 저장 당시 규칙으로만 가려져 있으므로, 규칙 개선의
+효과는 재색인 뒤에 나타난다.
 
 관리 Secret은 `secret://name`으로 참조하고 목록에는 원문이 노출되지 않는다. 암호화 DB
 backend의 과거 버전은 암호문으로 백업되며 Vault backend의 원문과 버전 데이터는 Vault의
