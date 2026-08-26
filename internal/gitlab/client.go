@@ -252,27 +252,7 @@ func (h blobHit) filePath() string {
 // that run basic search only. Those reject the blobs scope with 400 or 403
 // instead of returning an empty result set.
 func globalSearchUnsupported(err error) bool {
-	status := source.StatusOf(err)
-	if status == http.StatusNotImplemented {
-		return true
-	}
-	if status != 0 && status != http.StatusBadRequest && status != http.StatusForbidden {
-		return false
-	}
-	message := strings.ToLower(err.Error())
-	feature := strings.Contains(message, "scope") ||
-		strings.Contains(message, "advanced search") ||
-		strings.Contains(message, "exact code search") ||
-		strings.Contains(message, "global search") ||
-		strings.Contains(message, "code search")
-	unavailable := strings.Contains(message, "does not have a valid value") ||
-		strings.Contains(message, "not supported") ||
-		strings.Contains(message, "unsupported") ||
-		strings.Contains(message, "not enabled") ||
-		strings.Contains(message, "unavailable") ||
-		strings.Contains(message, "disabled") ||
-		strings.Contains(message, "invalid scope")
-	return feature && unavailable
+	return source.GlobalSearchUnsupported(err)
 }
 
 func (c *Client) cacheProject(p project) {

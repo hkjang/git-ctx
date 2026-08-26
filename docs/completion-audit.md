@@ -35,6 +35,23 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.62.0 릴리스 전 검증 결과:
+
+```text
+플랫폼 차분 시험 21개 호출                      PASS
+Bitbucket 거절 4종 대체 경로·500 은 실패 유지    PASS
+내용 매치 저장소 목록화                         PASS
+go test -race (FTS5/태그 없음/PostgreSQL)       PASS
+빌드 모드 교차 시험                             PASS
+go vet ./... && go build ./...                 PASS
+버전 메타데이터·GitHub Actions 정합성            PASS
+Kubernetes Kustomize·:4747·v0.62.0 렌더링        PASS
+Docker linux/amd64·UID 10001·v0.62.0 빌드        PASS
+```
+
+두 데이터베이스에 쓴 방법을 두 플랫폼에 적용했다. 비교가 제품을 말하게 하려면 픽스처가 실제로
+동등해야 했고, 가짜 서버를 맞추는 일 자체가 검증의 절반이었다. 남은 차이 둘은 진짜였다.
+
 2026-08-26 v0.61.1 릴리스 전 검증 결과:
 
 ```text

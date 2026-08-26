@@ -3139,6 +3139,17 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 			result.Warning = discovery.warning
 		}
 	}
+	// A repository whose content matched belongs in the list of repositories,
+	// whoever found the content. Until now it was listed only when the source's
+	// own search API answered: the same repository, the same query, the same
+	// matching file was named on a platform whose search endpoint replied and
+	// left out on one whose did not — and left out whenever the answer came from
+	// the index, which is the case for every wiki page and every issue. The
+	// hits already passed the ACL, so naming their repositories reveals nothing
+	// the caller could not already read.
+	if carried := s.repositoriesCarryingHits(ctx, result.Hits, result.Repositories); len(carried) > 0 {
+		result.Repositories = append(result.Repositories, carried...)
+	}
 	if len(result.Repositories) > limit {
 		calltrace.From(ctx).Count("limit", "repositories", calltrace.StatusOK, len(result.Repositories), limit, "trimmed to the requested limit")
 		result.Repositories = result.Repositories[:limit]
@@ -3154,6 +3165,64 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 		return result, nil
 	}
 	return result, repoErr
+}
+
+// repositoriesCarryingHits looks up the catalogue rows for repositories that
+// produced a hit and are not listed yet. A hit that came from a source not in
+// the catalogue — an instance-wide discovery result — has no row to find, and
+// is skipped rather than invented.
+func (s *Service) repositoriesCarryingHits(ctx context.Context, hits []SourceResult, already []RepositoryResult) []RepositoryResult {
+	if len(hits) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(already))
+	for _, item := range already {
+		seen[strings.ToLower(item.LibraryID)] = true
+	}
+	var wanted []string
+	for _, hit := range hits {
+		key := strings.ToLower(hit.LibraryID)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		wanted = append(wanted, hit.LibraryID)
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(wanted)), ",")
+	args := make([]any, 0, len(wanted))
+	for _, id := range wanted {
+		args = append(args, id)
+	}
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(
+		`SELECT id,project_key,slug,name,description,library_id,default_branch,source_type,indexed_at
+FROM repositories WHERE enabled=1 AND library_id IN (`+placeholders+`)`), args...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	found := map[string]RepositoryResult{}
+	for rows.Next() {
+		var item RepositoryResult
+		if rows.Scan(&item.ID, &item.ProjectKey, &item.Slug, &item.Name, &item.Description,
+			&item.LibraryID, &item.DefaultBranch, &item.SourceType, &item.IndexedAt) != nil {
+			continue
+		}
+		found[strings.ToLower(item.LibraryID)] = item
+	}
+	if rows.Err() != nil {
+		return nil
+	}
+	// Returned in the order the hits arrived, so the best match leads.
+	out := make([]RepositoryResult, 0, len(wanted))
+	for _, id := range wanted {
+		if item, ok := found[strings.ToLower(id)]; ok {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func scopedRepositoryResults(repositories []RepositoryResult, project, repository string) []RepositoryResult {

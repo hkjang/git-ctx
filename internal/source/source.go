@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"time"
 	"unicode"
@@ -128,6 +129,47 @@ type RepositorySearcher interface {
 // instance wide code search, so the caller should fall back to per repository
 // queries instead of surfacing an error.
 var ErrGlobalSearchUnsupported = errors.New("global source code search is not available on this instance")
+
+// GlobalSearchUnsupported reports whether an error means the instance cannot
+// run an instance-wide code search at all, as opposed to having failed one.
+//
+// The distinction decides what happens next: an unsupported search falls back
+// to asking each repository in turn, a failed one is reported. It was written
+// once for GitLab and only 404 was recognised for Bitbucket, so a Bitbucket
+// Server without the search plugin — which answers 501, or 403 through a proxy,
+// or 400 with a message saying the feature is off — was reported as broken
+// rather than searched the slow way. Both clients now ask the same question.
+func GlobalSearchUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	status := StatusOf(err)
+	if status == http.StatusNotImplemented || status == http.StatusNotFound {
+		return true
+	}
+	// A 500 is a server that tried and broke; anything outside the codes below
+	// is not about the feature being absent.
+	if status != 0 && status != http.StatusBadRequest && status != http.StatusForbidden {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	feature := strings.Contains(message, "scope") ||
+		strings.Contains(message, "advanced search") ||
+		strings.Contains(message, "exact code search") ||
+		strings.Contains(message, "global search") ||
+		strings.Contains(message, "code search") ||
+		strings.Contains(message, "repository search") ||
+		strings.Contains(message, "search")
+	unavailable := strings.Contains(message, "does not have a valid value") ||
+		strings.Contains(message, "not supported") ||
+		strings.Contains(message, "unsupported") ||
+		strings.Contains(message, "not enabled") ||
+		strings.Contains(message, "not available") ||
+		strings.Contains(message, "unavailable") ||
+		strings.Contains(message, "disabled") ||
+		strings.Contains(message, "invalid scope")
+	return feature && unavailable
+}
 
 // ErrCodeSearchRefUnsupported reports that a source-side code index cannot
 // search the requested branch or tag. Bitbucket Server/Data Center indexes only

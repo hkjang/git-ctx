@@ -444,7 +444,9 @@ func (c *Client) SearchGlobalQuery(ctx context.Context, query string, limit int)
 		return nil, errors.New("search query is required")
 	}
 	hits, err := c.searchCode(ctx, query, limit)
-	if source.StatusOf(err) == http.StatusNotFound {
+	if source.GlobalSearchUnsupported(err) {
+		// Both classifications are kept: the caller needs the sentinel to fall
+		// back, diagnostics and health reporting still need the HTTP status.
 		return nil, fmt.Errorf("%w: %w", source.ErrGlobalSearchUnsupported, err)
 	}
 	return hits, err

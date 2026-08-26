@@ -309,8 +309,15 @@ func (f *fakeRepository) push(commit string, changed map[string]string, removed 
 }
 
 func newFakeGitLabRepository(repository *fakeRepository, breakSearch *bool) *httptest.Server {
-	project := map[string]any{"id": 4242, "path_with_namespace": "core/api", "default_branch": "main",
-		"name": "api", "description": "payment api", "visibility": "internal", "repository_access_level": "enabled"}
+	return newFakeGitLabProject(repository, breakSearch, map[string]any{"id": 4242,
+		"path_with_namespace": "core/api", "default_branch": "main", "name": "api",
+		"description": "payment api", "visibility": "internal", "repository_access_level": "enabled"})
+}
+
+// newFakeGitLabProject serves one project whose metadata the caller chooses, so
+// a comparison against another platform can hold everything but the platform
+// itself steady.
+func newFakeGitLabProject(repository *fakeRepository, breakSearch *bool, project map[string]any) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		path := strings.TrimSuffix(r.URL.EscapedPath(), "/")
@@ -321,6 +328,12 @@ func newFakeGitLabRepository(repository *fakeRepository, breakSearch *bool) *htt
 			write(map[string]any{"compare_timeout": false, "diffs": changes})
 		case breakSearch != nil && *breakSearch && strings.HasSuffix(path, "/search"):
 			http.Error(w, `{"message":"search is not enabled"}`, http.StatusForbidden)
+		case strings.HasSuffix(path, "/search"):
+			// Neither fake platform indexes code. Saying so plainly — rather than
+			// answering with a body the client cannot read — keeps the two
+			// platforms comparable, because a comparison between them must not
+			// turn on how each fake happens to fail.
+			http.Error(w, `{"message":"code search is not enabled on this instance"}`, http.StatusNotImplemented)
 		case r.Method == http.MethodPost || r.Method == http.MethodPut:
 			write(map[string]any{"id": 77})
 		case strings.HasSuffix(path, "/repository/branches"):
@@ -756,8 +769,12 @@ func TestBitbucketChainIntegration(t *testing.T) {
 // newFakeBitbucket serves the Bitbucket Server REST 1.0 endpoints the platform
 // reads, including its page envelope and its raw-file endpoint.
 func newFakeBitbucket(files map[string]string) *httptest.Server {
-	repository := map[string]any{"id": 7, "slug": "ledger", "name": "Ledger", "description": "원장",
-		"project": map[string]string{"key": "CORE"}, "defaultBranch": "refs/heads/main", "archived": false}
+	return newFakeBitbucketRepository(files, map[string]any{"id": 7, "slug": "ledger",
+		"name": "Ledger", "description": "원장", "project": map[string]string{"key": "CORE"},
+		"defaultBranch": "refs/heads/main", "archived": false}, "abc123")
+}
+
+func newFakeBitbucketRepository(files map[string]string, repository map[string]any, commit string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimSuffix(r.URL.EscapedPath(), "/")
 		write := func(values any) {
@@ -765,15 +782,26 @@ func newFakeBitbucket(files map[string]string) *httptest.Server {
 			_ = json.NewEncoder(w).Encode(map[string]any{"values": values, "isLastPage": true, "size": 1})
 		}
 		switch {
+		case strings.Contains(path, "/search"):
+			http.Error(w, `{"errors":[{"message":"code search is not enabled on this instance"}]}`, http.StatusNotImplemented)
 		case r.Method == http.MethodPost || r.Method == http.MethodPut:
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"id":77}`)
 		case strings.HasSuffix(path, "/rest/api/1.0/projects"):
 			write([]map[string]any{{"key": "CORE", "name": "Core", "description": "core"}})
 		case strings.HasSuffix(path, "/repos"):
+			// The real endpoint filters by the name parameter. A fake that hands
+			// back the repository whatever was asked makes this platform look
+			// like it matches names it does not.
+			if name := strings.ToLower(r.URL.Query().Get("name")); name != "" &&
+				!strings.Contains(strings.ToLower(fmt.Sprint(repository["name"])), name) &&
+				!strings.Contains(strings.ToLower(fmt.Sprint(repository["slug"])), name) {
+				write([]map[string]any{})
+				return
+			}
 			write([]map[string]any{repository})
 		case strings.HasSuffix(path, "/branches"):
-			write([]map[string]any{{"id": "refs/heads/main", "displayId": "main", "latestCommit": "abc123", "isDefault": true}})
+			write([]map[string]any{{"id": "refs/heads/main", "displayId": "main", "latestCommit": commit, "isDefault": true}})
 		case strings.HasSuffix(path, "/tags"):
 			write([]map[string]any{})
 		case strings.HasSuffix(path, "/files"):
