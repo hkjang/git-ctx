@@ -1315,10 +1315,10 @@ WHERE r.enabled=1 AND ` + predicate
 // concludes that code lives in eight repositories when it lives in four hundred.
 const indexedScanLimit = 2000
 
-func (s *Service) indexedSourceHits(ctx context.Context, principals []string, query, sourceType, project, repository, ref string, limit int) ([]SourceResult, bool, error) {
+func (s *Service) indexedSourceHits(ctx context.Context, principals []string, query, sourceType, project, repository, ref string, limit int) ([]SourceResult, string, error) {
 	terms := unique(embedding.Tokens(query))
 	if len(terms) == 0 {
-		return nil, false, nil
+		return nil, "", nil
 	}
 	type scored struct {
 		result SourceResult
@@ -1371,18 +1371,23 @@ func (s *Service) indexedSourceHits(ctx context.Context, principals []string, qu
 	usedIndex := false
 	if statement, args, ok := s.fullTextCandidates(terms, sourceType, project, repository, ref, principals); ok {
 		if err := gather(statement, args); err != nil {
-			return nil, false, err
+			return nil, "", err
 		}
 		usedIndex = true
 	}
-	// The index matches whole words and their prefixes, and the scan it replaced
-	// matched anywhere inside a word — so "invoice" found settleInvoice. Rather
-	// than lose that, the scan still runs when the lookup did not fill the
-	// answer, which for a term the index knows well is never.
-	if !usedIndex || len(candidates) < limit {
+	// The index matches whole words and their prefixes; the scan it replaced also
+	// matched inside a word, which is how "invoice" found settleInvoice. That
+	// recall is worth a scan when the index found nothing — the scan is then the
+	// only route to an answer. It is not worth one when the index already found
+	// matches: the scan is a pass over every chunk in the catalogue, a third of
+	// a second on 200,000 of them, spent adding to an answer that already has
+	// something in it.
+	scanned := false
+	if !usedIndex || len(candidates) == 0 {
 		if err := gather(s.scanCandidates(terms, sourceType, project, repository, ref, principals)); err != nil {
-			return nil, false, err
+			return nil, "", err
 		}
+		scanned = true
 	}
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
 	out := make([]SourceResult, 0, min(limit, len(candidates)))
@@ -1392,7 +1397,17 @@ func (s *Service) indexedSourceHits(ctx context.Context, principals []string, qu
 			break
 		}
 	}
-	return out, capped, nil
+	// Each caveat says what actually happened. A capped read means the rows past
+	// the cap were never looked at; a skipped scan means whole-word matches were
+	// found and matches inside longer words were not searched for. They are
+	// different facts and reporting them as one taught the reader nothing.
+	switch {
+	case capped:
+		return out, fmt.Sprintf("Only the first %d indexed chunks were read, so this is a sample rather than every match: narrow with libraryId, repository or path.", indexedScanLimit), nil
+	case !scanned && len(out) < limit:
+		return out, "Matches were found by word, so a search for the same text inside a longer name — invoice within settleInvoice — was not run. Search that longer name directly if you need it.", nil
+	}
+	return out, "", nil
 }
 
 // fullTextRestriction narrows any query over document_chunks to the rows the
@@ -2995,7 +3010,7 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 	// unrelated issues suppressed the page that actually matched.
 	if len(hits) < limit {
 		indexSpan := calltrace.Start(ctx, "indexed-content", sourceType)
-		indexed, capped, indexErr := s.indexedSourceHits(ctx, principals, normalized, sourceType, project, repository, ref, limit)
+		indexed, caveat, indexErr := s.indexedSourceHits(ctx, principals, normalized, sourceType, project, repository, ref, limit)
 		if indexErr != nil {
 			indexSpan.Fail(indexErr)
 		} else {
@@ -3018,11 +3033,8 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 			}
 			if added > 0 {
 				indexedFallback = fmt.Sprintf("index: %d match(es) come from the indexed content, which is where a source that answers no live query — a wiki page, an issue — can be found. They are as recent as the last index run.", added)
-				if capped {
-					// The rows past the cap were never read, so the repositories
-					// in this answer are the ones the scan reached first — not
-					// the only ones that match.
-					indexedFallback += fmt.Sprintf(" Only the first %d indexed chunks were scanned, so this is a sample rather than every match: narrow with libraryId, repository or path.", indexedScanLimit)
+				if caveat != "" {
+					indexedFallback += " " + caveat
 				}
 				// The live path's failure is still reported below — it explains
 				// why part of the answer is index-aged — but it no longer decides

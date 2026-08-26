@@ -2096,7 +2096,7 @@ func TestAPartialIndexScanSaysThatItIsPartial(t *testing.T) {
 	}
 	joined := strings.Join(result.Diagnostics, " ")
 	if !strings.Contains(joined, "sample rather than every match") {
-		t.Fatalf("a capped scan must say so: %v", result.Diagnostics)
+		t.Fatalf("a capped read must say so: %v", result.Diagnostics)
 	}
 
 	// A query whose matches fit inside the cap must not carry the warning: a
@@ -2120,7 +2120,14 @@ INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_s
 		t.Fatal(err)
 	}
 	if strings.Contains(strings.Join(complete.Diagnostics, " "), "sample rather than every match") {
-		t.Fatalf("a complete scan must not claim to be partial: %v", complete.Diagnostics)
+		t.Fatalf("a complete read must not claim to be partial: %v", complete.Diagnostics)
+	}
+	// With an index, whole-word matches are enough of an answer that the
+	// catalogue-wide scan for matches inside longer names is skipped — and that
+	// is said, because a short answer is where it could have made a difference.
+	// A build without the index scans anyway and has nothing to report.
+	if small.FullTextAvailable() && !strings.Contains(strings.Join(complete.Diagnostics, " "), "inside a longer name") {
+		t.Fatalf("the skipped inside-a-word search must be reported: %v", complete.Diagnostics)
 	}
 }
 
