@@ -200,6 +200,7 @@ Reading the results:
 - Search responses end with Notes explaining which path ran, what the ACL filtered and whether a timeout was hit. An empty result with an ACL or indexing note is not proof that the code does not exist.
 - The live source search and the local index are both used. A note saying an answer came from the index means it is as recent as the last index run, not as recent as the repository; a note saying the live path was unavailable explains why. Wiki pages and issues are only ever in the index.
 - A note may also say that the reranker or the vector database could not be reached. The answer still stands, but its order or its breadth is not what it would have been.
+- An argument a tool does not have is dropped, and the reply says which one and lists the ones it accepts. Read that line before retrying.
 - Snippets and files are secret-masked. Cite the Source line, which points at the exact ref and lines.
 - Answers are bounded by a byte budget. A Truncated section states how many results were withheld; narrow the call (libraryId, path, limit, read-file line range) rather than repeating it. Pass maxBytes to ask for a smaller answer.`
 

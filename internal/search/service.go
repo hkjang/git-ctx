@@ -420,6 +420,99 @@ func (s *Service) systemicReason(ctx context.Context, principals []string) error
 	return nil
 }
 
+// noFileReason says which constraint emptied a file lookup.
+//
+// Every one of these situations used to produce the same sentence — "no
+// accessible repository contains %q; run find-file first or pass libraryId" —
+// including the ones where libraryId had just been passed. An agent told to do
+// the thing it already did has no move left, and the advice sends it to
+// find-file, which will also find nothing when the repository is the problem
+// rather than the path.
+//
+// The constraints are removed one at a time, and the first one whose removal
+// finds the file is the one that is named.
+func (s *Service) noFileReason(ctx context.Context, principals []string, filePath, libraryID, ref string) error {
+	if reason := s.systemicReason(ctx, principals); reason != nil {
+		return reason
+	}
+	join, predicate, aclArgs := repositoryACL(principals)
+	if libraryID != "" {
+		base, _, ok := splitLibraryID(libraryID)
+		if !ok {
+			return errors.New("libraryId must use /organization/project[/version]")
+		}
+		// Is the repository itself reachable? Blaming the path for a library the
+		// caller cannot see sends the search in the wrong direction entirely.
+		var visible int
+		if err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(
+			`SELECT COUNT(*) FROM repositories r `+join+` WHERE r.library_id=? AND r.enabled=1 AND `+predicate),
+			append([]any{base}, aclArgs...)...).Scan(&visible); err == nil && visible == 0 {
+			return fmt.Errorf("no repository %s is registered here that this identity can read: run resolve-library-id to get the id, or list-libraries to see what is available", base)
+		}
+		// The repository is there. Is the path in it on some other ref?
+		refs, err := s.refsHolding(ctx, principals, filePath, base)
+		if err == nil && len(refs) > 0 {
+			if ref != "" {
+				return fmt.Errorf("%q is in %s but not on ref %q; it is on %s", filePath, base, ref, strings.Join(refs, ", "))
+			}
+			return fmt.Errorf("%q is in %s but not on its default branch; it is on %s: pass ref to read it", filePath, base, strings.Join(refs, ", "))
+		}
+		// The repository is there and the path is not. Say where it does live.
+		if elsewhere, err := s.librariesHolding(ctx, principals, filePath); err == nil && len(elsewhere) > 0 {
+			return fmt.Errorf("%q is not in %s; it is in %s", filePath, base, strings.Join(elsewhere, ", "))
+		}
+		return fmt.Errorf("%q is not indexed in %s: run find-file with a fragment of the name to see what is", filePath, base)
+	}
+	if elsewhere, err := s.librariesHolding(ctx, principals, filePath); err == nil && len(elsewhere) > 0 {
+		return fmt.Errorf("%q is not on the default branch of %s; pass ref, or run find-file to see the indexed paths", filePath, strings.Join(elsewhere, ", "))
+	}
+	return fmt.Errorf("no accessible repository contains %q; run find-file first or pass libraryId", filePath)
+}
+
+// refsHolding lists the indexed refs of one library that do hold a path.
+func (s *Service) refsHolding(ctx context.Context, principals []string, filePath, baseID string) ([]string, error) {
+	join, predicate, aclArgs := repositoryACL(principals)
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(
+		`SELECT DISTINCT f.ref_name FROM repository_files f JOIN repositories r ON r.id=f.repository_id `+join+`
+WHERE r.enabled=1 AND `+predicate+` AND r.library_id=? AND LOWER(f.path)=LOWER(?) ORDER BY f.ref_name LIMIT 5`),
+		append(append([]any{}, aclArgs...), baseID, filePath)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var refs []string
+	for rows.Next() {
+		var ref string
+		if err = rows.Scan(&ref); err != nil {
+			return nil, err
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
+}
+
+// librariesHolding lists the readable libraries that hold a path on any ref.
+func (s *Service) librariesHolding(ctx context.Context, principals []string, filePath string) ([]string, error) {
+	join, predicate, aclArgs := repositoryACL(principals)
+	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(
+		`SELECT DISTINCT r.library_id FROM repository_files f JOIN repositories r ON r.id=f.repository_id `+join+`
+WHERE r.enabled=1 AND `+predicate+` AND LOWER(f.path)=LOWER(?) ORDER BY r.library_id LIMIT 5`),
+		append(append([]any{}, aclArgs...), filePath)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var libraries []string
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		libraries = append(libraries, id)
+	}
+	return libraries, rows.Err()
+}
+
 func (s *Service) RepositoryMap(ctx context.Context, principals []string, libraryID, requestedRef string) (RepositoryMap, error) {
 	baseID, version, ok := splitLibraryID(libraryID)
 	if !ok || len(principals) == 0 {
@@ -2140,10 +2233,7 @@ WHERE r.enabled=1 AND ` + predicate + ` AND LOWER(f.path)=LOWER(?)`
 	}
 	rows.Close()
 	if len(matches) == 0 {
-		if reason := s.systemicReason(ctx, principals); reason != nil {
-			return FileContent{}, reason
-		}
-		return FileContent{}, fmt.Errorf("no accessible repository contains %q; run find-file first or pass libraryId", filePath)
+		return FileContent{}, s.noFileReason(ctx, principals, filePath, libraryID, ref)
 	}
 	// Several repositories can hold the same path. Ask instead of guessing.
 	distinct := map[string]bool{}
@@ -3141,10 +3231,7 @@ WHERE r.enabled=1 AND ` + predicate + ` AND LOWER(f.path)=LOWER(?)`
 		matches = append(matches, item)
 	}
 	if len(matches) == 0 {
-		if reason := s.systemicReason(ctx, principals); reason != nil {
-			return resolvedPath{}, reason
-		}
-		return resolvedPath{}, fmt.Errorf("no accessible repository contains %q; run find-file first or pass libraryId", filePath)
+		return resolvedPath{}, s.noFileReason(ctx, principals, filePath, libraryID, ref)
 	}
 	if len(libraries) > 1 {
 		return resolvedPath{}, fmt.Errorf("%q exists in %d repositories; pass libraryId to choose one", filePath, len(libraries))

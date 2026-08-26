@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	oteltrace "go.opentelemetry.io/otel/trace"
 	"net/http"
+	"sort"
 )
 
 // Tool dispatch: decode one JSON-RPC call, resolve it through the registry, run
@@ -122,6 +123,56 @@ func (s *Server) call(w http.ResponseWriter, r *http.Request, req request) {
 	s.finishCall(w, r, req, p, params.Name, libraryID, start, text, err, empty, budget, audit)
 }
 
+// unknownArgumentNote names arguments the tool does not have.
+//
+// Every schema declares additionalProperties:false, and nothing enforced it.
+// An agent that sent maxResults instead of limit, or library_id instead of
+// libraryId, got an answer computed without it — the wrong size, or the wrong
+// repository — with nothing in the reply to say the argument had been dropped.
+// The call is still answered: refusing it would break agents that pass a
+// harmless extra. It is answered with the drop written down.
+func unknownArgumentNote(tool string, params json.RawMessage) string {
+	entry, ok := lookupTool(tool)
+	if !ok {
+		return ""
+	}
+	var decoded struct {
+		Arguments map[string]any `json:"arguments"`
+	}
+	if err := json.Unmarshal(params, &decoded); err != nil || len(decoded.Arguments) == 0 {
+		return ""
+	}
+	arguments := decoded.Arguments
+	properties, ok := entry.schema["properties"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	var unknown []string
+	for name := range arguments {
+		if name == "maxBytes" {
+			continue // added to the served schema by the catalog, not the registry
+		}
+		if strings.HasPrefix(name, "_") {
+			continue // protocol fields such as _meta belong to the client, not the tool
+		}
+		if _, known := properties[name]; !known {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) == 0 {
+		return ""
+	}
+	sort.Strings(unknown)
+	known := make([]string, 0, len(properties)+1)
+	for name := range properties {
+		known = append(known, name)
+	}
+	known = append(known, "maxBytes")
+	sort.Strings(known)
+	return fmt.Sprintf("\n- ignored: %s is not an argument of %s, so this answer was produced without it. It accepts %s.\n",
+		strings.Join(unknown, ", "), tool, strings.Join(known, ", "))
+}
+
 func (s *Server) finishCall(w http.ResponseWriter, r *http.Request, req request, p auth.Principal, tool, libraryID string, start time.Time, text string, err error, empty bool, budget int, audit callAudit) {
 	outcome, truncated, results, mode := "success", false, 0, ""
 	// produced is the answer's full size before the budget is applied. Recording
@@ -130,14 +181,14 @@ func (s *Server) finishCall(w http.ResponseWriter, r *http.Request, req request,
 	switch {
 	case err != nil:
 		outcome = "error"
-		text = err.Error()
+		text = err.Error() + unknownArgumentNote(tool, req.Params)
 	case empty:
 		outcome = "empty"
 		mode = retrievalMode(text)
 		// An empty answer is where the age matters most: "this directory holds
 		// nothing" and "this file has no history" read as facts about the
 		// repository when they may be facts about a month-old index.
-		text += s.freshnessNote(r.Context(), p, tool, libraryID)
+		text += unknownArgumentNote(tool, req.Params) + s.freshnessNote(r.Context(), p, tool, libraryID)
 	default:
 		// The cache holds the whole answer, so a later call with a larger budget
 		// still gets everything; only what is sent now is bounded.
@@ -148,7 +199,7 @@ func (s *Server) finishCall(w http.ResponseWriter, r *http.Request, req request,
 		// Added here rather than inside each tool, for two reasons: the age is
 		// read now rather than when a cached answer was first built, and a note
 		// about the answer must not be what the budget cuts off.
-		text += s.freshnessNote(r.Context(), p, tool, libraryID)
+		text += unknownArgumentNote(tool, req.Params) + s.freshnessNote(r.Context(), p, tool, libraryID)
 	}
 	// The audit row is written with the server context: a call that timed out
 	// must still be recorded, and its request context is already cancelled.
