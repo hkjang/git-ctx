@@ -174,6 +174,18 @@ const PlainPrefix = "bctx_live_"
 // nothing about whether the key is valid.
 func Looks(raw string) bool { return strings.HasPrefix(raw, PlainPrefix) }
 
+// PrefixOf returns the identifying segment of a key, the same value the
+// api_keys table stores. A rejection can then be recorded against the key an
+// operator would look up, without the secret half of the value going anywhere.
+// An unparseable value has no prefix, and none is invented for it.
+func PrefixOf(raw string) string {
+	parts := strings.SplitN(raw, "_", 4)
+	if len(parts) != 4 || parts[0] != "bctx" || parts[1] != "live" {
+		return ""
+	}
+	return parts[2]
+}
+
 func (s *Service) Authenticate(ctx context.Context, raw string) (userID, keyID, prefix string, scopes []string, err error) {
 	info, err := s.AuthenticateRequest(ctx, raw, "")
 	return info.UserID, info.KeyID, info.Prefix, info.Scopes, err

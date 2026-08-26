@@ -71,6 +71,9 @@ type App struct {
 	cancel             context.CancelFunc
 	wg                 sync.WaitGroup
 	credentialAttempts attemptLimiter
+	// Rejected API keys are counted separately so a flood of them cannot use up
+	// the budget that protects the bootstrap and recovery endpoints.
+	rejectedKeys attemptLimiter
 }
 
 const (
@@ -102,6 +105,53 @@ func (l *attemptLimiter) allow(key string, limit int, window time.Duration) bool
 	}
 	l.attempts[key] = append(kept, now)
 	return true
+}
+
+// count records one rejected credential from an address and reports how many
+// have arrived in the current window, and whether this one is worth an audit
+// row.
+//
+// A rejected API key used to leave no trace at all: not an audit row, not a
+// notification, nothing. An operator asking "is somebody probing our MCP
+// endpoint" had no way to answer, on a platform whose whole premise is that
+// every access is accounted for. Writing a row per attempt is the reason it was
+// left out — an unthrottled endpoint floods the audit log, which is the same
+// problem in a different direction.
+//
+// So the rows are spaced by count rather than by time: the first rejection from
+// an address is recorded, then the tenth, the hundredth, the thousandth. One
+// probe is visible immediately, a flood costs four rows an hour, and every row
+// carries how many attempts it stands for.
+func (l *attemptLimiter) count(key string, window time.Duration) (attempts int, notable bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.attempts == nil {
+		l.attempts = map[string][]time.Time{}
+	}
+	now := time.Now()
+	kept := l.attempts[key][:0]
+	for _, at := range l.attempts[key] {
+		if now.Sub(at) < window {
+			kept = append(kept, at)
+		}
+	}
+	kept = append(kept, now)
+	l.attempts[key] = kept
+	// Addresses that stopped trying are dropped so a long running instance does
+	// not accumulate them; this is the only place the map is walked, and it is
+	// only reached on a rejection.
+	for other, times := range l.attempts {
+		if len(times) == 0 || now.Sub(times[len(times)-1]) >= window {
+			delete(l.attempts, other)
+		}
+	}
+	attempts = len(kept)
+	for decade := 1; decade <= 1000; decade *= 10 {
+		if attempts == decade {
+			return attempts, true
+		}
+	}
+	return attempts, false
 }
 
 func New(ctx context.Context, c config.Config) (*App, error) {

@@ -41,6 +41,21 @@ type attemptLimiter struct {
 	attempts map[string][]time.Time
 }
 
+// recordRejectedKey leaves a trace of a credential this platform refused.
+//
+// The prefix is recorded and the key is not: a prefix says which key an
+// operator should look at when the rejection is their own expired one, and the
+// rest of the value is a secret that does not belong in a table an
+// administrator can read.
+func (a *App) recordRejectedKey(r *http.Request, raw string) {
+	attempts, notable := a.rejectedKeys.count(a.requestIP(r), time.Hour)
+	if !notable {
+		return
+	}
+	a.audit(r, auth.Principal{UserID: "anonymous"}, "apikey.auth", "api_key", apikey.PrefixOf(raw), "failure",
+		map[string]any{"attemptsInLastHour": attempts})
+}
+
 func (a *App) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Resolved once, with the trusted-proxy decision applied, and carried on
@@ -65,10 +80,17 @@ func (a *App) authenticate(next http.Handler) http.Handler {
 			if err != nil {
 				var limited *apikey.RateLimitError
 				if errors.As(err, &limited) {
-					w.Header().Set("Retry-After", fmt.Sprint(max(1, int(limited.RetryAfter.Seconds()))))
-					problem(w, http.StatusTooManyRequests, "rate_limit_exceeded", "API key rate limit exceeded")
+					// The reset is in a header the caller may never surface to
+					// whoever is reading the failure. Saying it in the body too
+					// costs nothing and turns "try again" into "try again in 47
+					// seconds".
+					seconds := max(1, int(limited.RetryAfter.Seconds()))
+					w.Header().Set("Retry-After", fmt.Sprint(seconds))
+					problem(w, http.StatusTooManyRequests, "rate_limit_exceeded",
+						fmt.Sprintf("API key rate limit exceeded; this window resets in %d second(s)", seconds))
 					return
 				}
+				a.recordRejectedKey(r, raw)
 				problem(w, http.StatusUnauthorized, "invalid_token", "API key is invalid, expired, disabled, or revoked")
 				return
 			}
