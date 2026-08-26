@@ -157,14 +157,21 @@ jobs:
           done
       # The contract tests read the console as text. This one loads it in the
       # browser that ships with the runner and opens every administrator
-      # screen, which is the only way an empty screen is visible.
+      # screen, which is the only way an empty screen is visible. It runs twice:
+      # once on an empty installation, and once on a database holding an estate,
+      # because a screen that has nothing to draw is not the screen an operator
+      # looks at.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       - name: Console render sweep
         run: |
           go build -tags sqlite_fts5 -o "$RUNNER_TEMP/git-ctx" ./cmd/git-ctx
+          go build -tags sqlite_fts5 -o "$RUNNER_TEMP/seed" ./test/web/seed
           GIT_CTX_BINARY="$RUNNER_TEMP/git-ctx" node test/web/render-sweep.js
+          "$RUNNER_TEMP/seed" "$RUNNER_TEMP/seeded.db"
+          GIT_CTX_BINARY="$RUNNER_TEMP/git-ctx" GIT_CTX_SWEEP_DB="$RUNNER_TEMP/seeded.db" \
+            node test/web/render-sweep.js
 
   docker:
     name: Docker image

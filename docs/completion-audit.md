@@ -35,6 +35,24 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.68.1 릴리스 전 검증 결과:
+
+```text
+내용이 있는 설치에서 전체 화면 렌더링            PASS
+렌더 텍스트에 undefined·NaN 등 없음              PASS
+discovered 백업 행이 목록에 그려짐               PASS
+go test -race (FTS5/태그 없음/PostgreSQL)       PASS
+빌드 모드 교차 시험·릴리스 업그레이드 시험        PASS
+go vet ./... && go build ./...                 PASS
+버전 메타데이터·GitHub Actions 정합성            PASS
+Kubernetes Kustomize·:4747·v0.68.1 렌더링        PASS
+Docker linux/amd64·UID 10001·v0.68.1 빌드        PASS
+```
+
+콘솔 렌더 스윕이 언제나 빈 데이터베이스를 상대로 돌고 있었다. 내용을 채워 돌려 보니 화면
+자체는 멀쩡했고, 대신 화면이 하는 말이 틀려 있었다 — 지난 세 릴리스가 바꾼 키 관리 방식을
+콘솔은 여전히 예전대로 설명하고 있었다. 문서를 고칠 때 화면을 같이 보지 않은 내 누락이다.
+
 2026-08-26 v0.68.0 릴리스 전 검증 결과:
 
 ```text

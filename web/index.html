@@ -852,7 +852,7 @@
             <div class="section-title">
               <div>
                 <h2>백업과 복구</h2>
-                <p>백업은 Master Key로 암호화되며 복원하면 모든 활성 세션이 폐기됩니다.</p>
+                <p>백업은 GIT_CTX_RECOVERY_KEY에서 파생한 키로 암호화되므로 같은 복구 키를 가진 다른 설치에서도 복원할 수 있습니다. 복원하면 모든 활성 세션이 폐기됩니다.</p>
               </div>
               <div class="button-row">
                 <button class="secondary" type="button" data-guide="backup">백업 가이드</button>

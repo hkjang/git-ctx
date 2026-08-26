@@ -79,6 +79,11 @@ function connect(url) {
 // string, so the absence of a reason has to be undefined rather than "".
 test("every administrator screen renders without an error", { skip: missing || undefined }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "git-ctx-render-"));
+  // The sweep has only ever run against an empty installation, so every screen
+  // was checked in the one state where it has nothing to draw. GIT_CTX_SWEEP_DB
+  // points it at a database that already holds an estate.
+  const seeded = process.env.GIT_CTX_SWEEP_DB || "";
+  const databasePath = seeded || path.join(directory, "render.db");
   // The server takes its port from a stored setting rather than the
   // environment, so it always comes up on 4747. Anything already listening
   // there is somebody's own instance; borrowing it would be rude and would
@@ -93,7 +98,7 @@ test("every administrator screen renders without an error", { skip: missing || u
     cwd: directory,
     env: {
       ...process.env,
-      GIT_CTX_DB_DSN: `file:${path.join(directory, "render.db")}?_foreign_keys=on&_busy_timeout=5000`,
+      GIT_CTX_DB_DSN: `file:${databasePath}?_foreign_keys=on&_busy_timeout=5000`,
       GIT_CTX_RECOVERY_KEY: crypto.randomBytes(48).toString("base64"),
     },
     stdio: "ignore",
@@ -160,6 +165,15 @@ test("every administrator screen renders without an error", { skip: missing || u
       assert.equal(failures.length, 0,
         `${entry.label} logged ${failures.length} error(s): ${JSON.stringify(failures[0]?.params || {}).slice(0, 300)}`);
       assert.ok(panel.length > 40, `${entry.label} rendered an empty panel (${panel.id})`);
+      const text = await evaluate(
+        `(() => { const panel = document.querySelector('.admin-panel:not([hidden])');` +
+        ` return panel ? panel.innerText : ''; })()`) || "";
+      for (const token of ["undefined", "NaN", "[object Object]", "null null", "Invalid Date"]) {
+        const at = text.indexOf(token);
+        if (at >= 0) {
+          assert.fail(`${entry.label} rendered ${token}: ${JSON.stringify(text.slice(Math.max(0, at - 90), at + 60))}`);
+        }
+      }
     }
   } finally {
     client?.close();
