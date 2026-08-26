@@ -35,6 +35,25 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.71.0 릴리스 전 검증 결과:
+
+```text
+웹훅 적대적 입력 9종(서명·크기·교차 비밀 등)     PASS
+Bitbucket HMAC 본문 변조 거부                    PASS
+재전송이 기록되고 색인은 한 번만                  PASS
+go test -race (FTS5/태그 없음/PostgreSQL)        PASS
+빌드 모드 교차 시험·릴리스 업그레이드·콘솔        PASS
+go vet ./... && go build ./...                  PASS
+버전 메타데이터·GitHub Actions 정합성             PASS
+Kubernetes Kustomize·:4747·v0.71.0 렌더링         PASS
+Docker linux/amd64·UID 10001·v0.71.0 빌드         PASS
+```
+
+외부가 직접 POST 하는 유일한 엔드포인트를 적대적으로 두드렸다. 서명 검증과 크기 제한은
+빈틈이 없었다. 대신 새 이벤트 id 로 보낸 재전송이 중복으로 처리되면서 아무 기록도 남기지
+않는다는 것을 발견했다 — 거부 경로가 이미 경고하고 있는 바로 그 실수를 중복 경로가 하고
+있었다.
+
 2026-08-26 v0.70.1 릴리스 전 검증 결과:
 
 ```text

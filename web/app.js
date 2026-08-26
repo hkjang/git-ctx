@@ -4222,7 +4222,7 @@ async function refreshWebhookEvents(capabilities = activeCapabilities) {
     const events = rows(result.events);
     summary.className = `notice ${window.rejected ? "warn" : window.received ? "ok" : ""}`;
     summary.textContent = window.received
-      ? `최근 ${window.days}일 · 수신 ${window.received}건 · 색인 예약 ${window.queued}건 · 거부 ${window.rejected}건`
+      ? `최근 ${window.days}일 · 수신 ${window.received}건 · 색인 예약 ${window.queued}건 · 거부 ${window.rejected}건 · 재전송 ${window.duplicates || 0}건`
       : `최근 ${window.days || 7}일 동안 수신한 웹훅이 없습니다. 소스 저장소에 훅이 등록되어 있는지 확인하세요.`;
     target.innerHTML = events.length
       ? `<table><thead><tr><th>수신</th><th>소스·이벤트</th><th>대상</th><th>상태</th><th>설명</th></tr></thead><tbody>${events
@@ -4231,7 +4231,7 @@ async function refreshWebhookEvents(capabilities = activeCapabilities) {
               `<tr><td>${date(item.receivedAt)}</td><td>${esc(item.sourceType)}<br><small>${esc(item.eventType || "-")}</small></td>
 <td>${esc(item.target || "-")}</td>
 <td><span class="state ${item.status === "rejected" ? "error" : item.status === "queued" ? "ok" : "warn"}">${esc(item.status)}</span></td>
-<td>${esc(item.detail || "")}</td></tr>`,
+<td>${esc(item.detail || (item.duplicateCount ? `같은 내용으로 ${item.duplicateCount}번 다시 도착했습니다 (마지막 ${date(item.lastDuplicateAt)}). 재색인하지 않았습니다.` : ""))}</td></tr>`,
           )
           .join("")}</tbody></table>`
       : '<p class="field-help">표시할 수신 내역이 없습니다.</p>';

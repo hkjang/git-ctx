@@ -886,14 +886,15 @@ func (a *App) webhookEvents(w http.ResponseWriter, r *http.Request) {
 		limit = value
 	}
 	since := time.Now().UTC().Add(-7 * 24 * time.Hour)
-	var received, queued, rejected int
+	var received, queued, rejected, duplicates int
 	_ = a.store.DB.QueryRowContext(r.Context(), a.store.Rebind(`SELECT COUNT(*),
 COALESCE(SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END),0),
-COALESCE(SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END),0)
-FROM webhook_events WHERE received_at>=?`), since).Scan(&received, &queued, &rejected)
+COALESCE(SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END),0),
+COALESCE(SUM(duplicate_count),0)
+FROM webhook_events WHERE received_at>=?`), since).Scan(&received, &queued, &rejected, &duplicates)
 
 	rows, err := a.store.DB.QueryContext(r.Context(), a.store.Rebind(`SELECT e.id,e.source_type,e.external_event_id,e.event_type,e.status,e.detail,e.received_at,
-COALESCE(r.library_id,''),COALESCE(e.repository_id,'')
+COALESCE(r.library_id,''),COALESCE(e.repository_id,''),e.duplicate_count,e.last_duplicate_at
 FROM webhook_events e LEFT JOIN repositories r ON r.id=e.repository_id
 ORDER BY e.received_at DESC LIMIT ?`), limit)
 	if err != nil {
@@ -905,7 +906,9 @@ ORDER BY e.received_at DESC LIMIT ?`), limit)
 	for rows.Next() {
 		var id, sourceType, externalID, eventType, status, detail, libraryID, repositoryID string
 		var receivedAt time.Time
-		if err = rows.Scan(&id, &sourceType, &externalID, &eventType, &status, &detail, &receivedAt, &libraryID, &repositoryID); err != nil {
+		var duplicateCount int
+		var lastDuplicateAt sql.NullTime
+		if err = rows.Scan(&id, &sourceType, &externalID, &eventType, &status, &detail, &receivedAt, &libraryID, &repositoryID, &duplicateCount, &lastDuplicateAt); err != nil {
 			problem(w, http.StatusInternalServerError, "internal_error", err.Error())
 			return
 		}
@@ -915,14 +918,22 @@ ORDER BY e.received_at DESC LIMIT ?`), limit)
 		if target == "" {
 			target = repositoryID
 		}
-		events = append(events, map[string]any{
+		event := map[string]any{
 			"id": id, "sourceType": sourceType, "externalEventId": externalID, "eventType": eventType,
 			"status": status, "detail": detail, "receivedAt": receivedAt, "target": target,
-		})
+			"duplicateCount": duplicateCount,
+		}
+		// A repeat of an event this platform already has is deduplicated rather
+		// than indexed again, and saying when it last came back is how an
+		// operator tells a hook that is firing from one that is not.
+		if lastDuplicateAt.Valid {
+			event["lastDuplicateAt"] = lastDuplicateAt.Time
+		}
+		events = append(events, event)
 	}
 	jsonOut(w, http.StatusOK, map[string]any{
 		"events": events,
-		"window": map[string]any{"days": 7, "received": received, "queued": queued, "rejected": rejected},
+		"window": map[string]any{"days": 7, "received": received, "queued": queued, "rejected": rejected, "duplicates": duplicates},
 	})
 }
 

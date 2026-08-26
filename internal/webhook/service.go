@@ -76,6 +76,20 @@ func (s *Service) Enqueue(ctx context.Context, sourceType, eventID, eventType st
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
+		// The event is deduplicated, not forgotten. A source server retrying a
+		// hook it thinks timed out is the reason this path exists, and until now
+		// it left nothing behind: no row, no counter, no status. An operator
+		// asking why a push never reached the index saw a screen with no trace
+		// of it having arrived at all.
+		if _, countErr := tx.ExecContext(ctx, s.store.Rebind(
+			`UPDATE webhook_events SET duplicate_count=duplicate_count+1,last_duplicate_at=?
+			 WHERE source_type=? AND repository_id=? AND event_type=? AND payload_hash=?`),
+			time.Now().UTC(), sourceType, repoID, eventType, payloadHash); countErr != nil {
+			return Result{}, countErr
+		}
+		if err = tx.Commit(); err != nil {
+			return Result{}, err
+		}
 		return Result{EventID: eventID, Duplicate: true}, nil
 	}
 	if len(refs) == 0 {
