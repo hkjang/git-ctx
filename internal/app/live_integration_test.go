@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 
 	"git-ctx/internal/apikey"
 	"git-ctx/internal/config"
+	"git-ctx/internal/testsupport"
 )
 
 // Every subsystem in this platform has unit tests, and every serious defect
@@ -59,8 +61,9 @@ func TestPlatformChainIntegration(t *testing.T) {
 	defer receiver.Close()
 
 	directory := t.TempDir()
+	chainDriver, chainDSN := chainDatabase(t, directory, "chain")
 	a, err := New(ctx, config.Config{
-		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(directory, "chain.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		DatabaseDriver: chainDriver, DatabaseDSN: chainDSN,
 		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
 		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
 	})
@@ -111,21 +114,21 @@ func TestPlatformChainIntegration(t *testing.T) {
 	// 3. Wait for the background worker to index it.
 	waitFor(t, 60*time.Second, "the repository to finish indexing", func() bool {
 		var completed int
-		_ = a.store.DB.QueryRow(`SELECT COUNT(*) FROM index_jobs WHERE repository_id=? AND status='completed' AND files_processed>0`, repository.ID).Scan(&completed)
+		_ = a.store.DB.QueryRow(a.store.Rebind(`SELECT COUNT(*) FROM index_jobs WHERE repository_id=? AND status='completed' AND files_processed>0`), repository.ID).Scan(&completed)
 		return completed > 0
 	})
 
 	// 4. What was indexed: the secret is masked, the manifests became an
 	// inventory, and the lock file decided the version.
 	var masked string
-	if err = a.store.DB.QueryRow(`SELECT content FROM document_chunks WHERE repository_id=? AND file_path='config/app.yaml'`, repository.ID).Scan(&masked); err != nil {
+	if err = a.store.DB.QueryRow(a.store.Rebind(`SELECT content FROM document_chunks WHERE repository_id=? AND file_path='config/app.yaml'`), repository.ID).Scan(&masked); err != nil {
 		t.Fatalf("the configuration file was not indexed: %v", err)
 	}
 	if strings.Contains(masked, "super-secret-value") {
 		t.Fatalf("a secret reached the index: %q", masked)
 	}
 	var reactVersion string
-	if err = a.store.DB.QueryRow(`SELECT version FROM repository_packages WHERE repository_id=? AND name_lower='react' AND scope='resolved'`, repository.ID).Scan(&reactVersion); err != nil {
+	if err = a.store.DB.QueryRow(a.store.Rebind(`SELECT version FROM repository_packages WHERE repository_id=? AND name_lower='react' AND scope='resolved'`), repository.ID).Scan(&reactVersion); err != nil {
 		t.Fatalf("the lock file was not inventoried: %v", err)
 	}
 	if reactVersion != "18.3.1" {
@@ -136,7 +139,7 @@ func TestPlatformChainIntegration(t *testing.T) {
 	// the revision they were made with.
 	waitFor(t, 60*time.Second, "the chunks to be embedded", func() bool {
 		var total, embedded int
-		_ = a.store.DB.QueryRow(`SELECT COUNT(*),COUNT(embedding) FROM document_chunks WHERE repository_id=?`, repository.ID).Scan(&total, &embedded)
+		_ = a.store.DB.QueryRow(a.store.Rebind(`SELECT COUNT(*),COUNT(embedding) FROM document_chunks WHERE repository_id=?`), repository.ID).Scan(&total, &embedded)
 		return total > 0 && total == embedded
 	})
 	if model.embedCalls() == 0 {
@@ -535,8 +538,9 @@ func TestPlatformDegradationIntegration(t *testing.T) {
 	defer receiver.Close()
 
 	directory := t.TempDir()
+	chainDriver, chainDSN := chainDatabase(t, directory, "degraded")
 	a, err := New(ctx, config.Config{
-		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(directory, "degraded.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		DatabaseDriver: chainDriver, DatabaseDSN: chainDSN,
 		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
 		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
 	})
@@ -578,7 +582,7 @@ func TestPlatformDegradationIntegration(t *testing.T) {
 	}
 	waitFor(t, 60*time.Second, "the repository to finish indexing", func() bool {
 		var completed int
-		_ = a.store.DB.QueryRow(`SELECT COUNT(*) FROM index_jobs WHERE repository_id=? AND status='completed' AND files_processed>0`, repository.ID).Scan(&completed)
+		_ = a.store.DB.QueryRow(a.store.Rebind(`SELECT COUNT(*) FROM index_jobs WHERE repository_id=? AND status='completed' AND files_processed>0`), repository.ID).Scan(&completed)
 		return completed > 0
 	})
 
@@ -672,8 +676,9 @@ func TestBitbucketChainIntegration(t *testing.T) {
 	defer source.Close()
 
 	directory := t.TempDir()
+	chainDriver, chainDSN := chainDatabase(t, directory, "bitbucket")
 	a, err := New(ctx, config.Config{
-		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(directory, "bitbucket.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		DatabaseDriver: chainDriver, DatabaseDSN: chainDSN,
 		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
 		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
 	})
@@ -716,25 +721,25 @@ func TestBitbucketChainIntegration(t *testing.T) {
 	}
 	waitFor(t, 60*time.Second, "the Bitbucket repository to finish indexing", func() bool {
 		var completed int
-		_ = a.store.DB.QueryRow(`SELECT COUNT(*) FROM index_jobs WHERE repository_id=? AND status='completed' AND files_processed>0`, repository.ID).Scan(&completed)
+		_ = a.store.DB.QueryRow(a.store.Rebind(`SELECT COUNT(*) FROM index_jobs WHERE repository_id=? AND status='completed' AND files_processed>0`), repository.ID).Scan(&completed)
 		return completed > 0
 	})
 
 	// The same guarantees as the GitLab chain: content indexed through the raw
 	// endpoint, secrets masked, manifests inventoried, permissions imported.
 	var masked string
-	if err = a.store.DB.QueryRow(`SELECT content FROM document_chunks WHERE repository_id=? AND file_path='config/app.yaml'`, repository.ID).Scan(&masked); err != nil {
+	if err = a.store.DB.QueryRow(a.store.Rebind(`SELECT content FROM document_chunks WHERE repository_id=? AND file_path='config/app.yaml'`), repository.ID).Scan(&masked); err != nil {
 		t.Fatalf("the configuration file was not indexed: %v", err)
 	}
 	if strings.Contains(masked, "super-secret-value") {
 		t.Fatalf("a secret reached the index: %q", masked)
 	}
 	var packages int
-	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM repository_packages WHERE repository_id=?`, repository.ID).Scan(&packages); err != nil || packages == 0 {
+	if err = a.store.DB.QueryRow(a.store.Rebind(`SELECT COUNT(*) FROM repository_packages WHERE repository_id=?`), repository.ID).Scan(&packages); err != nil || packages == 0 {
 		t.Fatalf("the manifest was not inventoried: %d err=%v", packages, err)
 	}
 	var principals int
-	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM repository_permissions WHERE repository_id=?`, repository.ID).Scan(&principals); err != nil || principals == 0 {
+	if err = a.store.DB.QueryRow(a.store.Rebind(`SELECT COUNT(*) FROM repository_permissions WHERE repository_id=?`), repository.ID).Scan(&principals); err != nil || principals == 0 {
 		t.Fatalf("no permission was imported: %d err=%v", principals, err)
 	}
 
@@ -824,8 +829,9 @@ func TestIncrementalPushChainIntegration(t *testing.T) {
 	defer source.Close()
 
 	directory := t.TempDir()
+	chainDriver, chainDSN := chainDatabase(t, directory, "incremental")
 	a, err := New(ctx, config.Config{
-		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(directory, "incremental.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		DatabaseDriver: chainDriver, DatabaseDSN: chainDSN,
 		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
 		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
 	})
@@ -858,11 +864,11 @@ func TestIncrementalPushChainIntegration(t *testing.T) {
 	}
 	waitFor(t, 60*time.Second, "the first index", func() bool {
 		var chunks int
-		_ = a.store.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id=?`, target.ID).Scan(&chunks)
+		_ = a.store.DB.QueryRow(a.store.Rebind(`SELECT COUNT(*) FROM document_chunks WHERE repository_id=?`), target.ID).Scan(&chunks)
 		return chunks >= 4
 	})
 	var inventoryBefore int
-	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM repository_packages WHERE repository_id=?`, target.ID).Scan(&inventoryBefore); err != nil || inventoryBefore == 0 {
+	if err = a.store.DB.QueryRow(a.store.Rebind(`SELECT COUNT(*) FROM repository_packages WHERE repository_id=?`), target.ID).Scan(&inventoryBefore); err != nil || inventoryBefore == 0 {
 		t.Fatalf("the manifest was not inventoried: %d err=%v", inventoryBefore, err)
 	}
 
@@ -894,22 +900,22 @@ func TestIncrementalPushChainIntegration(t *testing.T) {
 
 	waitFor(t, 60*time.Second, "the pushed change to be indexed", func() bool {
 		var updated int
-		_ = a.store.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id=? AND file_path='service.go' AND content LIKE '%settleRefund%'`, target.ID).Scan(&updated)
+		_ = a.store.DB.QueryRow(a.store.Rebind(`SELECT COUNT(*) FROM document_chunks WHERE repository_id=? AND file_path='service.go' AND content LIKE '%settleRefund%'`), target.ID).Scan(&updated)
 		return updated > 0
 	})
 
 	// The file that was deleted is gone, the file nobody touched is intact, and
 	// the inventory the diff never mentioned survived.
 	var removed int
-	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id=? AND file_path='legacy.go'`, target.ID).Scan(&removed); err != nil || removed != 0 {
+	if err = a.store.DB.QueryRow(a.store.Rebind(`SELECT COUNT(*) FROM document_chunks WHERE repository_id=? AND file_path='legacy.go'`), target.ID).Scan(&removed); err != nil || removed != 0 {
 		t.Fatalf("a deleted file stayed in the index: %d err=%v", removed, err)
 	}
 	var untouched int
-	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id=? AND file_path='README.md'`, target.ID).Scan(&untouched); err != nil || untouched == 0 {
+	if err = a.store.DB.QueryRow(a.store.Rebind(`SELECT COUNT(*) FROM document_chunks WHERE repository_id=? AND file_path='README.md'`), target.ID).Scan(&untouched); err != nil || untouched == 0 {
 		t.Fatalf("an untouched file was dropped: %d err=%v", untouched, err)
 	}
 	var inventoryAfter int
-	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM repository_packages WHERE repository_id=?`, target.ID).Scan(&inventoryAfter); err != nil {
+	if err = a.store.DB.QueryRow(a.store.Rebind(`SELECT COUNT(*) FROM repository_packages WHERE repository_id=?`), target.ID).Scan(&inventoryAfter); err != nil {
 		t.Fatal(err)
 	}
 	if inventoryAfter != inventoryBefore {
@@ -951,8 +957,9 @@ func TestAccessControlChainIntegration(t *testing.T) {
 	defer payments.Close()
 
 	directory := t.TempDir()
+	chainDriver, chainDSN := chainDatabase(t, directory, "acl")
 	a, err := New(ctx, config.Config{
-		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(directory, "acl.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		DatabaseDriver: chainDriver, DatabaseDSN: chainDSN,
 		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
 		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
 	})
@@ -984,7 +991,7 @@ func TestAccessControlChainIntegration(t *testing.T) {
 	}
 	waitFor(t, 60*time.Second, "the repository to finish indexing", func() bool {
 		var chunks int
-		_ = a.store.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id=?`, indexed.ID).Scan(&chunks)
+		_ = a.store.DB.QueryRow(a.store.Rebind(`SELECT COUNT(*) FROM document_chunks WHERE repository_id=?`), indexed.ID).Scan(&chunks)
 		return chunks > 0
 	})
 
@@ -992,7 +999,7 @@ func TestAccessControlChainIntegration(t *testing.T) {
 	// other team, so a leak is visible as a name rather than as a count.
 	must := func(query string, args ...any) {
 		t.Helper()
-		if _, err := a.store.DB.Exec(query, args...); err != nil {
+		if _, err := a.store.DB.Exec(a.store.Rebind(query), args...); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1008,7 +1015,7 @@ func TestAccessControlChainIntegration(t *testing.T) {
 	// Two developers, each mapped to one team, each with their own key.
 	newDeveloper := func(id, group string) string {
 		t.Helper()
-		must(`INSERT INTO users(id,subject,username,email,status) VALUES(?,?,?,'',"active")`, id, id, id)
+		must(`INSERT INTO users(id,subject,username,email,status) VALUES(?,?,?,'','active')`, id, id, id)
 		must(`INSERT INTO user_identities(user_id,bitbucket_user_slug,gitlab_user_id,mapping_source,bitbucket_groups) VALUES(?,'',?,'manual',?)`, id, id, group)
 		_, secret, err := a.keys.Create(ctx, id, "agent", []string{"search-code", "search-repositories", "query-docs", "read-file"}, nil)
 		if err != nil {
@@ -1101,8 +1108,9 @@ func TestDocumentSourceChainIntegration(t *testing.T) {
 	defer jira.Close()
 
 	directory := t.TempDir()
+	chainDriver, chainDSN := chainDatabase(t, directory, "documents")
 	a, err := New(ctx, config.Config{
-		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(directory, "documents.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		DatabaseDriver: chainDriver, DatabaseDSN: chainDSN,
 		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
 		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
 	})
@@ -1155,13 +1163,13 @@ func TestDocumentSourceChainIntegration(t *testing.T) {
 	for sourceType, id := range registered {
 		waitFor(t, 60*time.Second, sourceType+" to finish indexing", func() bool {
 			var chunks int
-			_ = a.store.DB.QueryRow(`SELECT COUNT(*) FROM document_chunks WHERE repository_id=?`, id).Scan(&chunks)
+			_ = a.store.DB.QueryRow(a.store.Rebind(`SELECT COUNT(*) FROM document_chunks WHERE repository_id=?`), id).Scan(&chunks)
 			return chunks > 0
 		})
 		// The connector's declared principals become the ACL, which is the only
 		// thing standing between these documents and everyone.
 		var principal string
-		if err = a.store.DB.QueryRow(`SELECT principal FROM repository_permissions WHERE repository_id=? LIMIT 1`, id).Scan(&principal); err != nil {
+		if err = a.store.DB.QueryRow(a.store.Rebind(`SELECT principal FROM repository_permissions WHERE repository_id=? LIMIT 1`), id).Scan(&principal); err != nil {
 			t.Fatalf("%s imported no principal: %v", sourceType, err)
 		}
 		if principal != "group:platform" {
@@ -1172,7 +1180,7 @@ func TestDocumentSourceChainIntegration(t *testing.T) {
 	// A Confluence page arrives as text, not as the storage-format markup it is
 	// stored in — an agent handed raw markup would quote tags at the reader.
 	var page string
-	if err = a.store.DB.QueryRow(`SELECT content FROM document_chunks WHERE repository_id=? LIMIT 1`, registered["confluence"]).Scan(&page); err != nil {
+	if err = a.store.DB.QueryRow(a.store.Rebind(`SELECT content FROM document_chunks WHERE repository_id=? LIMIT 1`), registered["confluence"]).Scan(&page); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(page, "<p>") || strings.Contains(page, "<ac:") {
@@ -1290,8 +1298,9 @@ func TestOpenSearchProjectionChainIntegration(t *testing.T) {
 	defer source.Close()
 
 	directory := t.TempDir()
+	chainDriver, chainDSN := chainDatabase(t, directory, "opensearch")
 	a, err := New(ctx, config.Config{
-		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(directory, "opensearch.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		DatabaseDriver: chainDriver, DatabaseDSN: chainDSN,
 		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
 		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
 	})
@@ -1334,7 +1343,7 @@ func TestOpenSearchProjectionChainIntegration(t *testing.T) {
 	})
 	waitFor(t, 30*time.Second, "the projection to be recorded", func() bool {
 		var projected int
-		_ = a.store.DB.QueryRow(`SELECT COUNT(*) FROM search_projection_states WHERE repository_id=?`, target.ID).Scan(&projected)
+		_ = a.store.DB.QueryRow(a.store.Rebind(`SELECT COUNT(*) FROM search_projection_states WHERE repository_id=?`), target.ID).Scan(&projected)
 		return projected > 0
 	})
 	if cluster.indexCreated() == 0 {
@@ -1491,4 +1500,27 @@ func (c *fakeCluster) hasContent(fragment string) bool {
 		}
 	}
 	return false
+}
+
+// chainDatabase picks the database these chain tests run against.
+//
+// They were written against SQLite and only ever run there, which left the
+// driver an installation with more than one node actually uses — PostgreSQL —
+// untested for everything above a single query: indexing a repository, an
+// incremental push, the access checks, the document sources. Setting
+// GIT_CTX_TEST_POSTGRES_DSN runs the same chains again on a throwaway
+// PostgreSQL database, so the two drivers are held to one set of expectations
+// rather than two.
+func chainDatabase(t *testing.T, directory, name string) (driver, dsn string) {
+	t.Helper()
+	base := os.Getenv("GIT_CTX_TEST_POSTGRES_DSN")
+	if strings.TrimSpace(base) == "" {
+		return "sqlite", "file:" + filepath.Join(directory, name+".db") + "?_foreign_keys=on&_busy_timeout=5000"
+	}
+	created, cleanup, err := testsupport.NewPostgresDatabase(context.Background(), base)
+	if err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	t.Cleanup(cleanup)
+	return "postgres", created
 }

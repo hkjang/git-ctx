@@ -138,14 +138,42 @@ func (s *Store) disableSQLiteFullText(ctx context.Context, cause error) error {
 	return cause
 }
 
+// postgresSearchVector is the expression the generated column carries.
+//
+// The words have to be split the way SQLite splits them, because both are the
+// same product. PostgreSQL's text-search parser recognises structure: it reads
+// internal/settlement/Retry.go as one token of type "file" and indexes it
+// whole, so a search for "settlement" — the ordinary way to narrow to a part of
+// a repository — matched nothing on PostgreSQL while finding four files on
+// SQLite, whose unicode61 tokenizer splits on every non-alphanumeric. Making
+// the text alphanumeric-separated before it reaches the parser leaves the two
+// tokenizers agreeing. URLs and paths stop being single tokens, which is what
+// SQLite already does.
+const postgresSearchVector = `to_tsvector('simple', regexp_replace(` +
+	`coalesce(file_path,'') || ' ' || coalesce(heading,'') || ' ' || coalesce(content,''),` +
+	` '[^[:alnum:]]+', ' ', 'g'))`
+
 func (s *Store) preparePostgresFullText(ctx context.Context) error {
 	// A stored generated column keeps the index in step with the row without a
 	// trigger to maintain: PostgreSQL recomputes it on every write, including
 	// the bulk insert that swaps a ref's content.
+	//
+	// A column already there may carry an older expression, and a generated
+	// column cannot be redefined in place. Replacing it rewrites the table once,
+	// which is the price of the rows it currently indexes wrongly.
+	var expression string
+	err := s.DB.QueryRowContext(ctx, `SELECT COALESCE(generation_expression,'') FROM information_schema.columns WHERE table_name='document_chunks' AND column_name='search_vector'`).Scan(&expression)
+	switch {
+	case err == nil && expression != "" && !equivalentSearchVector(expression):
+		if _, err = s.DB.ExecContext(ctx, `ALTER TABLE document_chunks DROP COLUMN search_vector`); err != nil {
+			return err
+		}
+	case err != nil && !errors.Is(err, sql.ErrNoRows):
+		return err
+	}
 	statements := []string{
 		`ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS search_vector tsvector
-		 GENERATED ALWAYS AS (to_tsvector('simple',
-			coalesce(file_path,'') || ' ' || coalesce(heading,'') || ' ' || coalesce(content,''))) STORED`,
+		 GENERATED ALWAYS AS (` + postgresSearchVector + `) STORED`,
 		`CREATE INDEX IF NOT EXISTS idx_document_chunks_search_vector ON document_chunks USING GIN (search_vector)`,
 	}
 	for _, statement := range statements {
@@ -154,6 +182,22 @@ func (s *Store) preparePostgresFullText(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// equivalentSearchVector compares what the server reports against what this
+// build wants. PostgreSQL re-renders the expression it stored — quoting and
+// spacing are its own — so the two are compared with whitespace removed.
+func equivalentSearchVector(stored string) bool {
+	return strings.EqualFold(compactExpression(stored), compactExpression(postgresSearchVector))
+}
+
+func compactExpression(value string) string {
+	return strings.Map(func(r rune) rune {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			return -1
+		}
+		return r
+	}, value)
 }
 
 // RebuildFullText refills the index from the chunk table. It exists for the

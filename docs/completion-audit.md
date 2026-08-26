@@ -35,6 +35,24 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.61.0 릴리스 전 검증 결과:
+
+```text
+두 드라이버 차분 시험(같은 질문 15개)           PASS
+PostgreSQL 색인 표현식 교체·GIN 복구            PASS
+플랫폼 체인 7개 PostgreSQL 실행                 PASS
+go test -race (FTS5/태그 없음/PostgreSQL)      PASS
+빌드 모드 교차 시험                            PASS
+go vet ./... && go build ./...                PASS
+버전 메타데이터·GitHub Actions 정합성           PASS
+Kubernetes Kustomize·:4747·v0.61.0 렌더링       PASS
+Docker linux/amd64·UID 10001·v0.61.0 빌드       PASS
+```
+
+이번 검증은 체인 시험 7개가 전부 SQLite 에서만 돌고 있다는 데서 출발했다. PostgreSQL 로
+돌려 보려면 시험 쪽 결함 3개를 먼저 고쳐야 했고, 그러고 나서 두 드라이버에 같은 질문을
+던져 보니 답이 갈렸다. 통과와 동일은 다른 것이다.
+
 2026-08-26 v0.60.2 릴리스 전 검증 결과:
 
 ```text
