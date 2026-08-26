@@ -1186,6 +1186,30 @@ FROM document_chunks WHERE repository_id=? AND ref_name=? ORDER BY indexed_at DE
 	return SearchExplanation{LibraryID: baseID, Ref: ref, RetrievalMode: mode, Hits: hits}, nil
 }
 
+// LibraryAllowed reports whether a library id is inside an API key's allowed
+// set. An empty set is no restriction at all.
+//
+// The check lives here as well as in the MCP layer because a tool that gathers
+// results across repositories cannot be made safe by checking its arguments:
+// find-runbook and build-context both search the whole estate when no library
+// is named, and both returned repositories a restricted key may not read.
+func LibraryAllowed(libraryID string, allowed []string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	parts := strings.Split(strings.TrimPrefix(strings.ToLower(libraryID), "/"), "/")
+	if len(parts) < 2 {
+		return false
+	}
+	base := "/" + parts[0] + "/" + parts[1]
+	for _, item := range allowed {
+		if strings.EqualFold(item, base) {
+			return true
+		}
+	}
+	return false
+}
+
 func splitLibraryID(libraryID string) (string, string, bool) {
 	parts := strings.Split(strings.TrimPrefix(strings.TrimSpace(libraryID), "/"), "/")
 	if len(parts) < 2 || len(parts) > 3 || parts[0] == "" || parts[1] == "" {

@@ -71,21 +71,9 @@ func contains(values []string, want string) bool {
 	return false
 }
 func libraryAllowed(libraryID string, allowed []string) bool {
-	if len(allowed) == 0 {
-		return true
-	}
-	parts := strings.Split(strings.TrimPrefix(strings.ToLower(libraryID), "/"), "/")
-	if len(parts) < 2 {
-		return false
-	}
-	base := "/" + parts[0] + "/" + parts[1]
-	for _, item := range allowed {
-		if strings.EqualFold(item, base) {
-			return true
-		}
-	}
-	return false
+	return search.LibraryAllowed(libraryID, allowed)
 }
+
 func filterLibraries(items []search.Library, allowed []string) []search.Library {
 	out := items[:0]
 	for _, item := range items {

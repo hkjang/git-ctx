@@ -35,6 +35,25 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.70.0 릴리스 전 검증 결과:
+
+```text
+저장소 제한 키가 금지된 저장소를 못 봄           PASS
+경계를 시험하지 않는 도구는 통과가 아니라 보고    PASS
+scope·CIDR·호출량·만료·폐기·비활성화 강제        PASS
+go test -race (FTS5/태그 없음/PostgreSQL)       PASS
+빌드 모드 교차 시험                             PASS
+go vet ./... && go build ./...                 PASS
+버전 메타데이터·GitHub Actions 정합성            PASS
+Kubernetes Kustomize·:4747·v0.70.0 렌더링        PASS
+Docker linux/amd64·UID 10001·v0.70.0 빌드        PASS
+```
+
+API 키가 내세우는 제약이 실제로 강제되는지 하나씩 재 봤다. 일곱 중 여섯은 강제되고 있었고,
+저장소 제한만 도구 두 개에서 새고 있었다 — 둘 다 libraryId 가 선택이라 인자 검사가 필터가
+되지 못하는 도구였다. 처음 시도한 검사는 데이터가 없어 공허하게 통과했는데, 그것을 알아채고
+"경계를 시험하지 않으면 실패"를 시험에 넣은 것이 이번 검증의 요점이다.
+
 2026-08-26 v0.69.1 릴리스 전 검증 결과:
 
 ```text

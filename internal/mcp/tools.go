@@ -335,6 +335,19 @@ func handleFindRunbook(s *Server, r *http.Request, p auth.Principal, args map[st
 		var items []search.RunbookResult
 		items, err = s.search.FindRunbooks(r.Context(), principalACLs(p), libraryID, stringArg(args, "query"), intArg(args, "limit", 10))
 		if err == nil {
+			// libraryId is optional here, so checking it is not a filter: a key
+			// restricted to one repository was reading the runbooks of every
+			// repository its user can see simply by leaving it out.
+			if len(p.AllowedRepositories) > 0 {
+				kept := items[:0]
+				for _, item := range items {
+					if libraryAllowed(item.LibraryID, p.AllowedRepositories) {
+						kept = append(kept, item)
+					}
+				}
+				items = kept
+			}
+			empty = len(items) == 0
 			text = formatRunbooks(items)
 		}
 	}
@@ -393,8 +406,8 @@ func handleBuildContext(s *Server, r *http.Request, p auth.Principal, args map[s
 		return "", false, errors.New("library is unavailable or access is denied")
 	}
 	var bundle search.ContextBundle
-	bundle, err = s.search.BuildChangeContext(r.Context(), principalACLs(p), stringArg(args, "query"), libraryID,
-		stringArg(args, "ref"), s.responseBudget(r.Context(), "build-context"))
+	bundle, err = s.search.BuildChangeContext(r.Context(), principalACLs(p), p.AllowedRepositories,
+		stringArg(args, "query"), libraryID, stringArg(args, "ref"), s.responseBudget(r.Context(), "build-context"))
 	if err != nil {
 		return "", false, err
 	}

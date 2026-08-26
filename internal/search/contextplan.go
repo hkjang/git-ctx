@@ -2,6 +2,7 @@ package search
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"regexp"
@@ -166,7 +167,14 @@ func (s *Service) resolveTarget(ctx context.Context, principals []string, query,
 // does. Each part is an existing search; what is new is choosing them, applying
 // the ACL once, and fitting the result into the budget without pretending the
 // part that did not fit was never there.
-func (s *Service) BuildChangeContext(ctx context.Context, principals []string, query, libraryID, ref string, budgetBytes int) (ContextBundle, error) {
+// BuildChangeContext assembles what someone needs before changing a symbol.
+//
+// allowed is the API key's repository restriction, empty when there is none.
+// It has to reach in here: this bundle deliberately looks across the whole
+// estate for callers of the target, so checking the libraryId argument — which
+// is optional — left a restricted key reading the names of repositories it may
+// not open.
+func (s *Service) BuildChangeContext(ctx context.Context, principals, allowed []string, query, libraryID, ref string, budgetBytes int) (ContextBundle, error) {
 	if len(principals) == 0 {
 		return ContextBundle{}, fmt.Errorf("no repository permissions are available for this caller")
 	}
@@ -180,6 +188,18 @@ func (s *Service) BuildChangeContext(ctx context.Context, principals []string, q
 	target, ambiguous, err := s.resolveTarget(ctx, principals, query, libraryID, ref)
 	if err != nil {
 		return ContextBundle{}, err
+	}
+	if len(allowed) > 0 {
+		if target.LibraryID != "" && !LibraryAllowed(target.LibraryID, allowed) {
+			return ContextBundle{}, errors.New("library is unavailable or access is denied")
+		}
+		kept := ambiguous[:0]
+		for _, candidate := range ambiguous {
+			if LibraryAllowed(candidate.LibraryID, allowed) {
+				kept = append(kept, candidate)
+			}
+		}
+		ambiguous = kept
 	}
 	if len(ambiguous) > 0 {
 		// Answering anyway would describe one symbol's blast radius while the
@@ -217,6 +237,9 @@ func (s *Service) BuildChangeContext(ctx context.Context, principals []string, q
 	} else {
 		lines := make([]string, 0, len(dependents.Dependents))
 		for _, item := range dependents.Dependents {
+			if !LibraryAllowed(item.LibraryID, allowed) {
+				continue
+			}
 			lines = append(lines, fmt.Sprintf("- `%s` %s:%d — %s (%s)", item.LibraryID, item.FilePath, item.LineNumber, item.FromSymbol, item.Kind))
 		}
 		note := ""
