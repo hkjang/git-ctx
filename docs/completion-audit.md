@@ -35,6 +35,24 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.69.0 릴리스 전 검증 결과:
+
+```text
+MCP 핸드셰이크·오류코드·세션 발급 조사           PASS
+도구 매개변수 43개 설명 채움                     PASS
+스키마 구조 검사(설명·items·enum·required)       PASS
+go test -race (FTS5/태그 없음/PostgreSQL)       PASS
+빌드 모드 교차 시험·콘솔 시험                    PASS
+go vet ./... && go build ./...                 PASS
+버전 메타데이터·GitHub Actions 정합성            PASS
+Kubernetes Kustomize·:4747·v0.69.0 렌더링        PASS
+Docker linux/amd64·UID 10001·v0.69.0 빌드        PASS
+```
+
+이 제품은 MCP 서버인데 시험이 핸드셰이크를 건너뛰고 tools/call 을 직접 부르고 있었다. 실제
+클라이언트처럼 접속해 보니 프로토콜은 규격대로였고, 대신 도구 스키마의 매개변수 절반 가까이가
+자기에 대해 아무 말도 하지 않았다 — 에이전트가 인자를 고르는 유일한 근거인데.
+
 2026-08-26 v0.68.1 릴리스 전 검증 결과:
 
 ```text
