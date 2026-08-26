@@ -35,6 +35,24 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.70.1 릴리스 전 검증 결과:
+
+```text
+소스 ACL: 권한 없는 저장소가 답에 없음(11개 도구)  PASS
+직접 지목: 금지된 저장소를 지정해도 거부(19개)     PASS
+세 축 모두 공허한 통과를 실패로 보고               PASS
+go test -race (FTS5/태그 없음/PostgreSQL)         PASS
+빌드 모드 교차 시험                               PASS
+go vet ./... && go build ./...                   PASS
+버전 메타데이터·GitHub Actions 정합성              PASS
+Kubernetes Kustomize·:4747·v0.70.1 렌더링          PASS
+Docker linux/amd64·UID 10001·v0.70.1 빌드          PASS
+```
+
+지난 릴리스에서 두 번째 권한 계층의 누출을 고쳤으니 첫 번째 계층도 같은 방법으로 물었다.
+소스 ACL 은 SQL 안에서 강제되어 새지 않았고, 직접 지목 호출도 전부 거부됐다. 결함은 나오지
+않았지만 공허한 통과를 실패로 보고하는 규칙 덕에 픽스처가 부족한 도구 다섯을 찾아 채웠다.
+
 2026-08-26 v0.70.0 릴리스 전 검증 결과:
 
 ```text
