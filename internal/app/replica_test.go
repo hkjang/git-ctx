@@ -138,16 +138,28 @@ func TestTwoReplicasIndexEachJobOnceIntegration(t *testing.T) {
 		}
 	}
 
-	// And the job itself ran once.
-	var attempts, completed int
-	if err = first.store.DB.QueryRow(`SELECT COALESCE(MAX(attempts),0),COUNT(*) FROM index_jobs WHERE status='completed'`).Scan(&attempts, &completed); err != nil {
+	// No job was claimed twice. A second attempt on one job id is what a claim
+	// two workers can both win looks like.
+	var attempts int
+	if err = first.store.DB.QueryRow(`SELECT COALESCE(MAX(attempts),0) FROM index_jobs WHERE status='completed'`).Scan(&attempts); err != nil {
 		t.Fatal(err)
 	}
 	if attempts > 1 {
-		t.Errorf("the job was claimed %d times; a claim two workers can both win is not a claim", attempts)
+		t.Errorf("a job was claimed %d times; a claim two workers can both win is not a claim", attempts)
 	}
-	if completed != repositories {
-		t.Errorf("%d jobs completed for %d registrations", completed, repositories)
+	// Every repository got indexed. The count of completed jobs is deliberately
+	// not compared to the count of registrations: the scheduler enqueues its own
+	// refresh for a repository whose poll interval comes round, and one of those
+	// landing inside the window is normal rather than a repository indexed
+	// twice — which is what the duplicate-row checks above actually rule out.
+	var indexed int
+	if err = first.store.DB.QueryRow(`SELECT COUNT(*) FROM (
+		SELECT DISTINCT repository_id FROM index_jobs WHERE status='completed' AND files_processed>0
+	) done`).Scan(&indexed); err != nil {
+		t.Fatal(err)
+	}
+	if indexed != repositories {
+		t.Errorf("%d of %d repositories have a completed job", indexed, repositories)
 	}
 
 	// The race has to have happened, or exactly-once proves nothing: if one

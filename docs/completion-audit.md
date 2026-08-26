@@ -35,6 +35,24 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.72.2 릴리스 전 검증 결과:
+
+```text
+배경 워커와 경주하던 시험 2건 수정·반복 통과      PASS
+CI 통합 잡과 같은 명령 그대로 실행                PASS
+go test -race (FTS5/태그 없음/PostgreSQL)        PASS
+빌드 모드 교차 시험                              PASS
+go vet ./... && go build ./...                  PASS
+버전 메타데이터·GitHub Actions 정합성             PASS
+Kubernetes Kustomize·:4747·v0.72.2 렌더링         PASS
+Docker linux/amd64·UID 10001·v0.72.2 빌드         PASS
+```
+
+v0.72.1 이 CI 에서 실패해 발행되지 않았다. 두 실패 모두 같은 원인 — 살아 있는 배경 워커가
+큐를 비우는 동안 큐 상태를 세는 시험이었다. 하나는 기존 시험이고 하나는 내가 v0.71.1 에서
+넣은 것이다. 지역에서는 통과하고 CI 타이밍에서만 드러나는 종류라, 세는 대상을 상태가 아니라
+사실로 바꿨다.
+
 2026-08-26 v0.72.1 릴리스 전 검증 결과:
 
 ```text

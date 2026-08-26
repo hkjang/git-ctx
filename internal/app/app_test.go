@@ -2854,7 +2854,11 @@ func TestSavingAnIndexPolicyQueuesTheRebuild(t *testing.T) {
 		t.Fatalf("the saved policy must still be returned: %#v", saved)
 	}
 	var jobs int
-	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM index_jobs WHERE repository_id='gitlab:1' AND kind='policy' AND status='pending'`).Scan(&jobs); err != nil || jobs != 2 {
+	// Counting only 'pending' raced the background worker: it claims a job every
+	// couple of seconds, and a job it had already picked up was missing from the
+	// count. What is being asserted is that saving the policy queued a rebuild
+	// for both refs, which is true whether or not a worker has started one.
+	if err = a.store.DB.QueryRow(`SELECT COUNT(*) FROM index_jobs WHERE repository_id='gitlab:1' AND kind='policy' AND status IN ('pending','running','completed','failed')`).Scan(&jobs); err != nil || jobs != 2 {
 		t.Fatalf("jobs=%d err=%v", jobs, err)
 	}
 	// The queued job only rebuilds if the ref is marked as built by a different
