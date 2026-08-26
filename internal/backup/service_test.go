@@ -73,6 +73,13 @@ func TestSQLiteEncryptedBackupRestoreRoundTrip(t *testing.T) {
 	_, _ = db.DB.Exec(`INSERT INTO user_sessions(id_hash,user_id,expires_at,last_seen_at) VALUES(x'01','u1',?,?)`, time.Now().Add(time.Hour), time.Now())
 	_, _ = db.DB.Exec(`INSERT INTO managed_secrets(name,backend,value_encrypted,version,status,updated_by) VALUES('model-key','database',x'010203',2,'active','admin')`)
 	_, _ = db.DB.Exec(`INSERT INTO managed_secret_versions(name,version,backend,value_encrypted,changed_by,reason) VALUES('model-key',1,'database',x'01','admin','create'),('model-key',2,'database',x'010203','admin','rotate')`)
+	// A context pack is entirely operator-authored: nothing else in the database
+	// can reconstruct it. Its entry points were added to the schema and never to
+	// the archive, so a restore returned the pack and its repositories with the
+	// symbols somebody had chosen silently gone.
+	_, _ = db.DB.Exec(`INSERT INTO context_packs(id,slug,name,description,created_by,purpose,token_budget) VALUES('p1','onboarding','Onboarding','How this project works','admin','anchor a new agent',9000)`)
+	_, _ = db.DB.Exec(`INSERT INTO context_pack_items(pack_id,library_id,ref_name,query_hint,position) VALUES('p1','/kcb/demo','main','start here',0)`)
+	_, _ = db.DB.Exec(`INSERT INTO context_pack_entrypoints(pack_id,symbol,library_id,position) VALUES('p1','Service.Query','/kcb/demo',0),('p1','Worker.RunOnce','/kcb/demo',1)`)
 	record, err := service.Create(ctx, "admin", "manual")
 	if err != nil {
 		t.Fatal(err)
@@ -93,6 +100,9 @@ func TestSQLiteEncryptedBackupRestoreRoundTrip(t *testing.T) {
 	_, _ = db.DB.Exec(`DELETE FROM mcp_call_steps`)
 	_, _ = db.DB.Exec(`DELETE FROM managed_secret_versions`)
 	_, _ = db.DB.Exec(`DELETE FROM managed_secrets`)
+	_, _ = db.DB.Exec(`DELETE FROM context_pack_entrypoints`)
+	_, _ = db.DB.Exec(`DELETE FROM context_pack_items`)
+	_, _ = db.DB.Exec(`DELETE FROM context_packs`)
 	if err = service.Restore(ctx, record.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -125,6 +135,19 @@ func TestSQLiteEncryptedBackupRestoreRoundTrip(t *testing.T) {
 	_ = db.DB.QueryRow(`SELECT COUNT(*) FROM managed_secret_versions WHERE name='model-key'`).Scan(&secretVersions)
 	if secretVersion != 2 || secretVersions != 2 {
 		t.Fatalf("managed secret version=%d history=%d", secretVersion, secretVersions)
+	}
+	var packName string
+	if err = db.DB.QueryRow(`SELECT name FROM context_packs WHERE id='p1'`).Scan(&packName); err != nil || packName != "Onboarding" {
+		t.Fatalf("context pack name=%q err=%v", packName, err)
+	}
+	var entrypoints int
+	_ = db.DB.QueryRow(`SELECT COUNT(*) FROM context_pack_entrypoints WHERE pack_id='p1'`).Scan(&entrypoints)
+	if entrypoints != 2 {
+		t.Fatalf("the pack came back with %d of its 2 entry points; an operator's own list was lost in the restore", entrypoints)
+	}
+	var firstSymbol string
+	if err = db.DB.QueryRow(`SELECT symbol FROM context_pack_entrypoints WHERE pack_id='p1' ORDER BY position LIMIT 1`).Scan(&firstSymbol); err != nil || firstSymbol != "Service.Query" {
+		t.Fatalf("entry point order was not carried: %q err=%v", firstSymbol, err)
 	}
 }
 
@@ -274,12 +297,12 @@ func TestRestoreAcceptsLegacyV1WithoutNewlyCoveredTables(t *testing.T) {
 	if err = json.Unmarshal(raw, &legacy); err != nil {
 		t.Fatal(err)
 	}
-	// A genuine V1 archive predates repository_files and mcp_call_steps, and
-	// also the key tables, which arrived later still.
+	// A genuine V1 archive predates repository_files and mcp_call_steps, the key
+	// tables, which arrived later still, and a context pack's entry points.
 	filtered := legacy.Tables[:0]
 	for _, data := range legacy.Tables {
 		switch data.Name {
-		case "repository_files", "mcp_call_steps", "platform_keys", "platform_bootstrap":
+		case "repository_files", "mcp_call_steps", "platform_keys", "platform_bootstrap", "context_pack_entrypoints":
 		default:
 			filtered = append(filtered, data)
 		}
@@ -394,7 +417,9 @@ func TestRestoreAcceptsAnArchiveWithoutTheKeyTables(t *testing.T) {
 	}
 	filtered := older.Tables[:0]
 	for _, data := range older.Tables {
-		if data.Name != "platform_keys" && data.Name != "platform_bootstrap" {
+		switch data.Name {
+		case "platform_keys", "platform_bootstrap", "context_pack_entrypoints":
+		default:
 			filtered = append(filtered, data)
 		}
 	}

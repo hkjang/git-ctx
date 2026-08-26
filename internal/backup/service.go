@@ -38,7 +38,7 @@ var tables = []string{
 	"api_keys", "api_key_restrictions", "api_key_usage_buckets",
 	"repositories", "repository_permissions", "repository_index_policies", "repository_files", "document_chunks", "repository_ref_states", "repository_ref_changes", "search_projection_states",
 	"code_symbols", "code_dependencies", "repository_maps", "repository_packages",
-	"context_packs", "context_pack_items",
+	"context_packs", "context_pack_items", "context_pack_entrypoints",
 	"quality_benchmark_cases", "quality_benchmark_runs", "quality_benchmark_results",
 	"system_settings", "setting_versions", "audit_logs", "mcp_calls", "mcp_call_steps", "index_jobs",
 	"webhook_events", "index_security_events", "mcp_tools", "notifications", "notification_deliveries",
@@ -57,13 +57,20 @@ var tables = []string{
 // repository_files and mcp_call_steps were added to logical backups. Those
 // tables already existed in the database, so restoring such an archive safely
 // leaves them empty rather than rejecting an otherwise compatible backup.
-var legacyV1Tables = withoutTables(tables, "repository_files", "mcp_call_steps", "platform_keys", "platform_bootstrap")
+var legacyV1Tables = withoutTables(tables, "repository_files", "mcp_call_steps", "platform_keys", "platform_bootstrap", "context_pack_entrypoints")
 
 // legacyV2Tables is what releases up to v0.66.0 wrote: everything except the
 // key material. Such an archive still restores; the settings in it can only be
 // opened by an installation that already holds the same keys, which is the
 // situation those releases were always in.
-var legacyV2Tables = withoutTables(tables, "platform_keys", "platform_bootstrap")
+var legacyV2Tables = withoutTables(tables, "platform_keys", "platform_bootstrap", "context_pack_entrypoints")
+
+// legacyV3Tables is what releases up to v0.75.0 wrote. A context pack's entry
+// points were added to the schema in migration 040 and never added here, so a
+// backup carried the pack and its items and left the symbols an operator had
+// typed in behind. Restoring one of those archives is still correct — it simply
+// has no entry points to carry.
+var legacyV3Tables = withoutTables(tables, "context_pack_entrypoints")
 
 func withoutTables(input []string, omitted ...string) []string {
 	out := make([]string, 0, len(input))
@@ -760,6 +767,7 @@ func (s *Service) validateArchive(ctx context.Context, a archive) error {
 	}
 	actualSet := strings.Join(actualTables, "\n")
 	if actualSet != strings.Join(tables, "\n") &&
+		actualSet != strings.Join(legacyV3Tables, "\n") &&
 		actualSet != strings.Join(legacyV2Tables, "\n") &&
 		actualSet != strings.Join(legacyV1Tables, "\n") {
 		return errors.New("backup table set does not match this git-ctx version")
