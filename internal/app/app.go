@@ -162,6 +162,31 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 	} else if openErr != nil {
 		return nil, openErr
 	}
+	// The keys come out of the database from here on. Until this call they were
+	// recomputed from the connection string at every start, so the string could
+	// not change without taking the settings and every API key with it. The
+	// recovery database is deliberately left alone: it is a temporary store for
+	// an installation whose primary database is down, and it has no keys of its
+	// own to find.
+	if !recoveryMode {
+		master, pepper, keyErr := resolveKeys(ctx, s, c.RecoveryKey, c.MasterKey, c.KeyPepper)
+		if keyErr != nil {
+			s.DB.Close()
+			return nil, keyErr
+		}
+		if master != c.MasterKey {
+			block, blockErr := aes.NewCipher([]byte(master))
+			if blockErr != nil {
+				s.DB.Close()
+				return nil, blockErr
+			}
+			if aead, err = cipher.NewGCM(block); err != nil {
+				s.DB.Close()
+				return nil, err
+			}
+		}
+		c.MasterKey, c.KeyPepper = master, pepper
+	}
 	bootstrapPath, bootstrapPersisted := "", false
 	if c.BootstrapAdmin == "" {
 		c.BootstrapAdmin, bootstrapPersisted, err = loadOrCreateBootstrapToken(ctx, s, aead)

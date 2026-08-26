@@ -35,6 +35,27 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.66.0 릴리스 전 검증 결과:
+
+```text
+릴리스 바이너리가 쓴 DB 열기(v0.1.0~현재)      PASS
+서버가 업그레이드된 DB 로 기동·응답             PASS
+마이그레이션 위험 패턴 전수 점검                PASS
+DSN 변경 후 기동·설정 읽기·API 키 동작          PASS
+복구 불가 시 원인을 말함                        PASS
+go test -race (FTS5/태그 없음/PostgreSQL)       PASS
+빌드 모드 교차 시험                             PASS
+go vet ./... && go build ./...                 PASS
+버전 메타데이터·GitHub Actions 정합성            PASS
+Kubernetes Kustomize·:4747·v0.66.0 렌더링        PASS
+Docker linux/amd64·UID 10001·v0.66.0 빌드        PASS
+```
+
+온프레미스 제품에서 가장 위험한 순간은 업그레이드인데, 그 시험이 손으로 만든 과거만 다루고
+있었다. 실제 릴리스 바이너리로 바꿔 돌려 보니 스키마는 v0.1.0 부터 깨끗했다. 대신 그 과정에서
+설정 키가 연결 문자열에서 파생된다는 것을 발견했다. 문자열 하나 바뀌면 기동이 거부되고 모든
+API 키가 죽는데, 그것을 알려 주는 것은 알고리즘 이름뿐이었다.
+
 2026-08-26 v0.65.1 릴리스 전 검증 결과:
 
 ```text

@@ -55,6 +55,12 @@ jobs:
       - name: Build-mode crossover
         run: sh test/store/build-mode.test.sh
 
+      # An on-premises product's riskiest moment is the upgrade, and the only
+      # tests for it built a "legacy schema" by hand. This takes the binary from
+      # released tags, lets it write a database, and opens that database here.
+      - name: Upgrade from released versions
+        run: sh test/store/upgrade.test.sh
+
       - name: Unit tests
         run: go test -tags sqlite_fts5 ./...
 
