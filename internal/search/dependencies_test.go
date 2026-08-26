@@ -438,3 +438,60 @@ func TestInventorySummaryCountsALockedRangeOnce(t *testing.T) {
 		t.Fatalf("lock-file precedence must be stated: %v", result.Diagnostics)
 	}
 }
+
+// A list of affected repositories is half an advisory response. The half that
+// decides whether anything happens is who owns each one, and looking that up by
+// hand for a dozen repositories is where the hours go.
+func TestAdvisoryNamesTheOwnerOfEachAffectedRepository(t *testing.T) {
+	db := inventoryFixture(t, "advisory-owners")
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.DB.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	// api declares the affected version and says who owns its manifest; worker
+	// declares a fixed version and needs no owner; console is affected and has
+	// no declaration at all.
+	exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('co-api','api','main','abc','CODEOWNERS',1,4,'CODEOWNERS','configuration','* @platform-team
+pom.xml @payments-team','h-api')`)
+	exec(`INSERT INTO repository_packages(repository_id,ref_name,ecosystem,name,name_lower,version,scope,manifest_path,commit_id) VALUES('console','main','maven','org.apache.logging.log4j:log4j-core','org.apache.logging.log4j:log4j-core','2.14.1','direct','pom.xml','abc')`)
+
+	result, err := New(db).FindDependencyUsage(context.Background(), []string{"alice"},
+		"org.apache.logging.log4j:log4j-core", "", "", "2.17.1", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Affected) != 2 {
+		t.Fatalf("affected=%v", result.Affected)
+	}
+	if owner := result.Owners["/core/api"]; owner != "@payments-team" {
+		t.Fatalf("the manifest's owner decides, not the catch-all: %q", owner)
+	}
+	if _, present := result.Owners["/core/console"]; present {
+		t.Fatalf("a repository without a declaration must not be given an owner: %#v", result.Owners)
+	}
+	// A repository that is safe is not part of the change, so it is not listed.
+	if _, present := result.Owners["/core/worker"]; present {
+		t.Fatalf("a safe repository must not appear among the owners: %#v", result.Owners)
+	}
+
+	rendered := FormatDependencyUsage(result)
+	if !strings.Contains(rendered, "@payments-team") {
+		t.Fatalf("the owner is missing from the answer:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "no CODEOWNERS declaration") {
+		t.Fatalf("a repository without a declaration must be said so, not left blank:\n%s", rendered)
+	}
+
+	// Without an advisory version there is nothing to be affected by, so no
+	// owner lookup happens at all.
+	plain, err := New(db).FindDependencyUsage(context.Background(), []string{"alice"},
+		"org.apache.logging.log4j:log4j-core", "", "", "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plain.Owners) != 0 {
+		t.Fatalf("owners were looked up without an advisory: %#v", plain.Owners)
+	}
+}

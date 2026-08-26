@@ -47,9 +47,14 @@ type DependencyUsage struct {
 	// Affected, Safe and Undecided count repositories, not declarations. During
 	// an advisory the number that matters is how many repositories must change,
 	// and how many could not be judged from what their manifest declares.
-	Affected     []string
-	Safe         []string
-	Undecided    []string
+	Affected  []string
+	Safe      []string
+	Undecided []string
+	// Owners names who is accountable for each repository that has to change,
+	// read from its CODEOWNERS declaration. A list of affected repositories is
+	// only half of an advisory response: the other half is who to tell, and
+	// looking that up by hand for a dozen repositories is where the hours go.
+	Owners       map[string]string
 	Repositories int
 	Diagnostics  []string
 }
@@ -178,6 +183,7 @@ WHERE r.enabled=1 AND ` + predicate + ` AND (pkg.name_lower=LOWER(?) OR pkg.name
 	})
 	if fixedIn != "" {
 		result = classifyAgainstFix(result, fixedIn)
+		result.Owners = s.declaredOwnersFor(ctx, principals, result)
 	}
 	// An advisory answer is only as current as the index behind it. A repository
 	// indexed a month ago may have upgraded since, and — the direction that
@@ -365,6 +371,49 @@ func sortedLibraries(set map[string]bool) []string {
 // FormatDependencyUsage renders the inventory for an agent: versions first,
 // because the decision an upgrade or an advisory needs is which version groups
 // exist, then the repositories that hold each one.
+// declaredOwnersFor reads the CODEOWNERS declaration covering each affected
+// repository's manifest — the file that has to change — so the answer names who
+// owns the change rather than only where it is. It is bounded: an advisory that
+// hits hundreds of repositories is a planning exercise, not a lookup, and the
+// list is what matters there.
+func (s *Service) declaredOwnersFor(ctx context.Context, principals []string, result DependencyUsage) map[string]string {
+	const maxOwnerLookups = 25
+	affected := map[string]bool{}
+	for _, library := range result.Affected {
+		affected[library] = true
+	}
+	if len(affected) == 0 {
+		return nil
+	}
+	owners := map[string]string{}
+	for _, user := range result.Users {
+		if len(owners) >= maxOwnerLookups {
+			break
+		}
+		if !affected[user.LibraryID] || owners[user.LibraryID] != "" {
+			continue
+		}
+		var repositoryID string
+		join, predicate, args := repositoryACL(principals)
+		args = append([]any{user.LibraryID}, args...)
+		statement := `SELECT r.id FROM repositories r ` + join + `
+WHERE r.library_id=? AND r.enabled=1 AND ` + predicate + ` LIMIT 1`
+		if err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(statement), args...).Scan(&repositoryID); err != nil {
+			continue
+		}
+		declared, _, err := s.declaredOwners(ctx, principals, repositoryID, user.Ref, user.ManifestPath)
+		if err != nil || len(declared) == 0 {
+			continue
+		}
+		// Last match wins, the same rule the platforms apply.
+		owners[user.LibraryID] = strings.Join(declared[len(declared)-1].Owners, ", ")
+	}
+	if len(owners) == 0 {
+		return nil
+	}
+	return owners
+}
+
 func FormatDependencyUsage(result DependencyUsage) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "## Dependency Usage\n\nPackage: `%s`", result.Query)
@@ -375,6 +424,19 @@ func FormatDependencyUsage(result DependencyUsage) string {
 	if result.FixedIn != "" {
 		fmt.Fprintf(&b, "Advisory: fixed in %s · affected %d · safe %d · undecided %d repositories\n",
 			result.FixedIn, len(result.Affected), len(result.Safe), len(result.Undecided))
+		if len(result.Owners) > 0 {
+			// Who owns the change is the next question after which repositories
+			// have to change, and it is the one that decides whether anything
+			// actually happens.
+			b.WriteString("\n### Owners of the affected repositories\n")
+			for _, library := range result.Affected {
+				if owner := result.Owners[library]; owner != "" {
+					fmt.Fprintf(&b, "- %s — %s\n", library, owner)
+				} else {
+					fmt.Fprintf(&b, "- %s — no CODEOWNERS declaration; use find-code-owner for its recent contributors\n", library)
+				}
+			}
+		}
 	}
 	if len(result.Versions) > 0 {
 		b.WriteString("\n### Versions\n")

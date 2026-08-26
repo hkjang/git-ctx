@@ -35,6 +35,22 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.60.0 릴리스 전 검증 결과:
+
+```text
+go test -race -count=1 ./... (FTS5/태그 없음)  PASS
+공지 소유자 조회 시험 신규                     PASS
+실인스턴스 공지 응답에 소유자 표시             PASS
+콘솔 CVE 대응 흐름 브라우저 확인               PASS
+go vet ./... && go build ./...               PASS
+버전 메타데이터·GitHub Actions 정합성          PASS
+Kubernetes Kustomize·:4747·v0.60.0 렌더링      PASS
+Docker linux/amd64·UID 10001·v0.60.0 빌드      PASS
+```
+
+이번 릴리스는 공지 답변을 목록에서 조치로 바꿨다. 영향받는 저장소마다 바꿔야 할
+매니페스트를 덮는 CODEOWNERS 소유자를 함께 답하고, 선언이 없으면 없다고 밝힌다.
+
 2026-08-26 v0.59.3 릴리스 전 검증 결과:
 
 ```text

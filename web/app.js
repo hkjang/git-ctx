@@ -1196,6 +1196,15 @@ function setupKnowledgeSearch() {
         // 어디인가"가 결론입니다. 판정 불가를 안전으로 접지 않습니다.
         lines.push(`수정 버전 ${result.FixedIn} 기준 · 영향 ${rows(result.Affected).length}개 · 안전 ${rows(result.Safe).length}개 · 판정 불가 ${rows(result.Undecided).length}개`);
         if (rows(result.Affected).length) lines.push(`  영향: ${rows(result.Affected).join(", ")}`);
+        // 영향 목록 다음 질문은 "누구에게 알리나" 입니다. 선언된 소유자가 있으면
+        // 여기서 함께 보여 주고, 없으면 없다고 밝힙니다.
+        const owners = result.Owners || {};
+        if (rows(result.Affected).length && Object.keys(owners).length) {
+          lines.push("  소유자(CODEOWNERS):");
+          for (const library of rows(result.Affected)) {
+            lines.push(`    ${library} — ${owners[library] || "선언 없음 (find-code-owner 로 최근 기여자 확인)"}`);
+          }
+        }
         if (rows(result.Undecided).length) lines.push(`  판정 불가: ${rows(result.Undecided).join(", ")}`);
       }
       lines.push("");
