@@ -187,8 +187,14 @@ Choosing a tool:
 - Before changing shared code: find-dependents shows every repository that uses it, and build-context assembles callers, dependencies, tests and history in one call.
 - "Who owns this", "who should review this": find-code-owner answers from the repository's CODEOWNERS declaration when it has one, and ranks recent contributors otherwise.
 - Third-party library questions ("who uses this package", "which version are we on", an advisory): find-dependency-usage reads the manifests and lock files and groups repositories by version. find-dependents cannot answer it — an import line has no version and a transitive dependency has no import line.
-- Documentation for a known library id: query-docs.
-- search-repositories returns repository names only, never file contents.
+- Documentation for a known library id: query-docs. resolve-library-id turns a product or repository name into the id every tool here takes.
+- search-repositories returns repository names only, never file contents. search-source asks the source servers alone; prefer search-code, which asks them and the index.
+- What calls this and what it calls: trace-dependencies. What covers it: find-tests.
+- Reviewing a change: compare-refs for what moved, get-change-impact for what depends on it, assess-change-risk for a judgement on both.
+- Incidents and procedure: find-runbook, over the runbook and operations pages in the connected wikis.
+- Sizing up a repository: get-repository-health for index age, test coverage and documented conventions; get-architecture-map for how repositories import each other.
+- A result that looks wrong: explain-search-result gives the ranking and the path that produced it.
+- Context for elsewhere: export-context bundles libraries into one document, get-context-pack returns a pack an operator curated.
 
 Reading the results:
 - Search responses end with Notes explaining which path ran, what the ACL filtered and whether a timeout was hit. An empty result with an ACL or indexing note is not proof that the code does not exist.

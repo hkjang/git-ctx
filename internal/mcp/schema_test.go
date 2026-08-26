@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"fmt"
+	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -94,4 +96,47 @@ func joinLines(values []string) string {
 		out += value
 	}
 	return out
+}
+
+// serverInstructions is the map an agent is handed before it asks anything, and
+// a tool it does not name is a tool that will not be reached for. Thirteen of
+// the twenty-nine were missing, including resolve-library-id — the one that
+// produces the library id every other tool asks for, referred to throughout the
+// document and never explained.
+//
+// Administrative tools are deliberately absent: they are answered only for a
+// caller holding an API key, and an agent without one cannot use them.
+func TestTheInstructionsNameEveryToolAnAgentCanCall(t *testing.T) {
+	var missing []string
+	for _, entry := range registry {
+		if len(entry.adminRoles) > 0 {
+			continue
+		}
+		if !strings.Contains(serverInstructions, entry.name) {
+			missing = append(missing, entry.name)
+		}
+	}
+	if len(missing) > 0 {
+		t.Fatalf("%d tools an agent can call are not named in the instructions it is given:\n  %s",
+			len(missing), joinLines(missing))
+	}
+}
+
+// The reverse: a name in the prose that is not a tool sends an agent to
+// something that does not exist.
+func TestTheInstructionsNameNoToolThatIsGone(t *testing.T) {
+	known := make(map[string]bool, len(registry))
+	for _, entry := range registry {
+		known[entry.name] = true
+	}
+	shaped := regexp.MustCompile(`\b(search|find|get|read|list|query|build|trace|compare|assess|resolve|export|reindex|explain)(-[a-z]+){1,3}\b`)
+	var strangers []string
+	for _, match := range shaped.FindAllString(serverInstructions, -1) {
+		if !known[match] {
+			strangers = append(strangers, match)
+		}
+	}
+	if len(strangers) > 0 {
+		t.Fatalf("the instructions name %d things that are not tools: %s", len(strangers), joinLines(strangers))
+	}
 }

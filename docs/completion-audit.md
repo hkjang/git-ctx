@@ -35,6 +35,24 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.69.1 릴리스 전 검증 결과:
+
+```text
+안내가 부를 수 있는 도구 29개를 모두 이름        PASS
+안내의 도구 이름이 모두 실재                     PASS
+안내 4,000바이트 상한 유지(3,829)                PASS
+go test -race (FTS5/태그 없음/PostgreSQL)       PASS
+빌드 모드 교차 시험·콘솔 시험                    PASS
+go vet ./... && go build ./...                 PASS
+버전 메타데이터·GitHub Actions 정합성            PASS
+Kubernetes Kustomize·:4747·v0.69.1 렌더링        PASS
+Docker linux/amd64·UID 10001·v0.69.1 빌드        PASS
+```
+
+지난 릴리스에서 매개변수 설명을 채웠으니 그 위층 — 도구를 고르는 안내 — 을 봤다. 29개 중
+13개가 한 번도 나오지 않았고, 그중 하나는 다른 모든 도구가 요구하는 식별자를 만드는 도구였다.
+길이 상한은 기존 시험이 이유와 함께 걸어 둔 것이라 늘리지 않고 문장을 줄여 맞췄다.
+
 2026-08-26 v0.69.0 릴리스 전 검증 결과:
 
 ```text
