@@ -27,13 +27,23 @@ func (a *App) gate(next http.Handler) http.Handler {
 			problem(w, http.StatusServiceUnavailable, "database_restart_required", "PostgreSQL migration completed; restart the service to activate it")
 			return
 		}
-		if enabled, message := a.maintenanceMode(r.Context()); enabled && !maintenanceAllowedPath(r.URL.Path) {
-			w.Header().Set("Retry-After", "60")
-			if message == "" {
-				message = "The service is temporarily in maintenance mode"
+		// The path is checked before the database is. Reading the maintenance
+		// setting first meant every request — /healthz and /readyz among them —
+		// waited on a query with no deadline, and SQLite serves the whole process
+		// through one connection. While a long index write held it, the liveness
+		// probe never answered: Kubernetes restarted the container, indexing began
+		// again, and the probe hung again. A crash loop caused by being busy.
+		// /metrics went silent at the same time, so the graphs that would have
+		// explained it were blank.
+		if !maintenanceAllowedPath(r.URL.Path) {
+			if enabled, message := a.maintenanceMode(r.Context()); enabled {
+				w.Header().Set("Retry-After", "60")
+				if message == "" {
+					message = "The service is temporarily in maintenance mode"
+				}
+				problem(w, http.StatusServiceUnavailable, "maintenance_mode", message)
+				return
 			}
-			problem(w, http.StatusServiceUnavailable, "maintenance_mode", message)
-			return
 		}
 		if (r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/admin/backups/") && strings.HasSuffix(r.URL.Path, "/restore")) || r.URL.Path == "/api/v1/admin/database/migrate" {
 			next.ServeHTTP(w, r)
@@ -45,7 +55,14 @@ func (a *App) gate(next http.Handler) http.Handler {
 	})
 }
 
+// maintenanceMode reads the operator's maintenance switch, and gives up quickly
+// if the database cannot answer. Every request that is not exempt waits on this,
+// so an unbounded read here is an unbounded stall for the whole service. Failing
+// open matches what an unreadable setting already meant: maintenance mode is a
+// deliberate act, and its absence is the safe reading.
 func (a *App) maintenanceMode(ctx context.Context) (bool, string) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
 	settings, err := a.loadSettingMap(ctx, "operations")
 	if err != nil {
 		return false, ""

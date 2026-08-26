@@ -143,8 +143,15 @@ func (a *App) readiness(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
+	// "unavailable" sent an operator to look at a database that was working; the
+	// connection was simply held by a long write. The replica is still not ready
+	// to answer promptly, so this stays a 503, but it says which of the two it is.
 	if err := a.store.DB.PingContext(ctx); err != nil {
-		jsonOut(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "database": "unavailable"})
+		reason := "unavailable"
+		if errors.Is(err, context.DeadlineExceeded) {
+			reason = "busy"
+		}
+		jsonOut(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready", "database": reason})
 		return
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"status": "ready", "database": "ok"})
@@ -1020,23 +1027,40 @@ func (a *App) metrics(w http.ResponseWriter, r *http.Request) {
 		{"git_ctx_quality_benchmark_cases", "Enabled search quality benchmark cases", `SELECT COUNT(*) FROM quality_benchmark_cases WHERE enabled=1`},
 		{"git_ctx_quality_benchmark_regressions", "Search quality benchmark regression runs", `SELECT COUNT(*) FROM quality_benchmark_runs WHERE status='regressed'`},
 	}
+	// One budget for every database read in this handler. These are nine counting queries
+	// against a pool that SQLite caps at a single connection, and they used to
+	// run with no deadline at all: while a long index write held that connection
+	// the scrape never returned, so the graphs that would have explained the
+	// stall were blank for exactly as long as it lasted. A partial scrape says
+	// more than a missing one.
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
 	for _, item := range items {
 		var value int64
-		if err := a.store.DB.QueryRowContext(r.Context(), item.query).Scan(&value); err != nil {
+		if err := a.store.DB.QueryRowContext(ctx, item.query).Scan(&value); err != nil {
 			continue
 		}
 		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n%s %d\n", item.name, item.help, item.name, item.name, value)
 	}
-	databaseUp := 1
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-	if err := a.store.DB.PingContext(ctx); err != nil {
+	// Busy and unreachable are different facts and used to be reported as one.
+	// A saturated pool answered the ping with a deadline and the scrape called
+	// the database down, which pages somebody towards a database that is fine.
+	databaseUp, databaseBusy := 1, 0
+	switch err := a.store.DB.PingContext(ctx); {
+	case err == nil:
+	case errors.Is(err, context.DeadlineExceeded):
+		databaseBusy = 1
+	default:
 		databaseUp = 0
 	}
-	cancel()
 	fmt.Fprintf(w, "# HELP git_ctx_database_up Metadata database connectivity\n# TYPE git_ctx_database_up gauge\ngit_ctx_database_up %d\n", databaseUp)
+	fmt.Fprintf(w, "# HELP git_ctx_database_busy Metadata database reachable but no connection free within the scrape budget\n# TYPE git_ctx_database_busy gauge\ngit_ctx_database_busy %d\n", databaseBusy)
 	fmt.Fprintf(w, "# HELP git_ctx_go_goroutines Current goroutines\n# TYPE git_ctx_go_goroutines gauge\ngit_ctx_go_goroutines %d\n", runtime.NumGoroutine())
 	fmt.Fprintf(w, "# HELP git_ctx_tracing_enabled OTLP tracing provider enabled\n# TYPE git_ctx_tracing_enabled gauge\ngit_ctx_tracing_enabled %d\n", boolInt(a.traces.Enabled()))
-	embeddingHealth := a.embeddingHealth(r.Context())
+	// The same budget again, not another one. Giving each database section its
+	// own deadline adds them up: three two-second budgets is a six-second scrape,
+	// which Prometheus has already abandoned.
+	embeddingHealth := a.embeddingHealth(ctx)
 	fmt.Fprintf(w, "# HELP git_ctx_embedding_coverage_percent Percentage of indexed chunks compatible with the configured embedding revision\n# TYPE git_ctx_embedding_coverage_percent gauge\ngit_ctx_embedding_coverage_percent %.3f\n", embeddingHealth.CoveragePercent)
 	fmt.Fprintf(w, "# HELP git_ctx_embedding_incompatible_refs Refs whose stored embeddings use another model revision\n# TYPE git_ctx_embedding_incompatible_refs gauge\ngit_ctx_embedding_incompatible_refs %d\n", embeddingHealth.IncompatibleRefs)
 	fmt.Fprintf(w, "# HELP git_ctx_embedding_circuit_open Whether the embedding endpoint circuit is open\n# TYPE git_ctx_embedding_circuit_open gauge\ngit_ctx_embedding_circuit_open %d\n", boolInt(embeddingHealth.Circuit.State == "open"))

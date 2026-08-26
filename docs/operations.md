@@ -164,6 +164,14 @@ Latest로 바꾸지 않는다. 저장소의 Release 쓰기 권한은 이 워크�
 제공한다. 관리자 `/api/v1/admin/health`는 같은 정보를 JSON으로 제공한다.
 `git_ctx_database_up`은 현재 메타 DB Ping 성공 여부를 1/0으로 제공한다.
 
+세 엔드포인트 모두 **DB가 바빠도 답한다.** `/healthz`는 DB를 전혀 보지 않는다 —
+재시작은 바쁜 DB를 고치지 못하고 바쁘게 만든 작업을 끊을 뿐이다. `/readyz`와
+`/metrics`의 DB 조회에는 2초 예산 하나가 걸려 있고, 그 안에 답이 없으면 부분 결과를
+돌려준다. **바쁜 것과 닿지 않는 것은 구분해서 보고한다** — `/readyz`는
+`database: busy`와 `database: unavailable`을, `/metrics`는 `git_ctx_database_up 1`과
+`git_ctx_database_busy 1`을 쓴다. SQLite는 프로세스 전체가 연결 하나를 쓰므로 긴 색인
+쓰기 중에 이 상태가 정상적으로 나타난다.
+
 임베딩 검색은 다음 지표로 별도 관찰한다.
 
 | 지표 | 의미 |
