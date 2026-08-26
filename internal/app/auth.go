@@ -48,12 +48,18 @@ type attemptLimiter struct {
 // rest of the value is a secret that does not belong in a table an
 // administrator can read.
 func (a *App) recordRejectedKey(r *http.Request, raw string) {
-	attempts, notable := a.rejectedKeys.count(a.requestIP(r), time.Hour)
+	attempts, notable, tracked := a.rejectedKeys.count(a.requestIP(r), time.Hour)
 	if !notable {
 		return
 	}
-	a.audit(r, auth.Principal{UserID: "anonymous"}, "apikey.auth", "api_key", apikey.PrefixOf(raw), "failure",
-		map[string]any{"attemptsInLastHour": attempts})
+	metadata := map[string]any{"attemptsInLastHour": attempts}
+	if tracked != a.requestIP(r) {
+		// The address is not being counted on its own, which is itself the
+		// finding: the refusals are arriving from more addresses than this
+		// instance tracks separately.
+		metadata["countedUnder"] = tracked
+	}
+	a.audit(r, auth.Principal{UserID: "anonymous"}, "apikey.auth", "api_key", apikey.PrefixOf(raw), "failure", metadata)
 }
 
 func (a *App) authenticate(next http.Handler) http.Handler {

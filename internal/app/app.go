@@ -73,7 +73,7 @@ type App struct {
 	credentialAttempts attemptLimiter
 	// Rejected API keys are counted separately so a flood of them cannot use up
 	// the budget that protects the bootstrap and recovery endpoints.
-	rejectedKeys attemptLimiter
+	rejectedKeys rejectionCounter
 }
 
 const (
@@ -107,9 +107,7 @@ func (l *attemptLimiter) allow(key string, limit int, window time.Duration) bool
 	return true
 }
 
-// count records one rejected credential from an address and reports how many
-// have arrived in the current window, and whether this one is worth an audit
-// row.
+// rejectionCounter counts refused credentials per client address.
 //
 // A rejected API key used to leave no trace at all: not an audit row, not a
 // notification, nothing. An operator asking "is somebody probing our MCP
@@ -122,36 +120,77 @@ func (l *attemptLimiter) allow(key string, limit int, window time.Duration) bool
 // an address is recorded, then the tenth, the hundredth, the thousandth. One
 // probe is visible immediately, a flood costs four rows an hour, and every row
 // carries how many attempts it stands for.
-func (l *attemptLimiter) count(key string, window time.Duration) (attempts int, notable bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.attempts == nil {
-		l.attempts = map[string][]time.Time{}
-	}
+//
+// The state is a count and a window start, not the attempt times. Keeping the
+// times made the cost of a flood grow with its own size: fifty thousand
+// rejections from one address spent three and a half seconds of CPU inside the
+// lock, which hands an unauthenticated caller a way to spend the server's time
+// simply by being wrong repeatedly.
+type rejectionCounter struct {
+	mu sync.Mutex
+	// nextPrune spaces the sweep out in time. Sweeping whenever the map is full
+	// is not amortised at all once it stays full, which is precisely what a probe
+	// spread across many addresses arranges: every refusal then walked every
+	// tracked address, and half a million of them took eighteen seconds of CPU.
+	nextPrune time.Time
+	windows   map[string]*rejectionWindow
+}
+
+type rejectionWindow struct {
+	start time.Time
+	count int
+}
+
+// trackedAddresses bounds the map. Beyond it, addresses seen for the first time
+// are counted together under one entry rather than dropped: a probe spread
+// across more addresses than this is exactly the event worth reporting, and
+// reporting it must not cost memory in proportion to the attacker's fleet.
+const trackedAddresses = 4096
+
+// sharedRejectionKey is the entry those addresses are folded into.
+const sharedRejectionKey = "(more addresses than are tracked individually)"
+
+// count records one rejection and reports how many have arrived from that
+// address in the current window, whether this one is worth an audit row, and
+// the address the count is actually kept under.
+func (c *rejectionCounter) count(address string, window time.Duration) (attempts int, notable bool, tracked string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	now := time.Now()
-	kept := l.attempts[key][:0]
-	for _, at := range l.attempts[key] {
-		if now.Sub(at) < window {
-			kept = append(kept, at)
-		}
+	if c.windows == nil {
+		c.windows = map[string]*rejectionWindow{}
 	}
-	kept = append(kept, now)
-	l.attempts[key] = kept
-	// Addresses that stopped trying are dropped so a long running instance does
-	// not accumulate them; this is the only place the map is walked, and it is
-	// only reached on a rejection.
-	for other, times := range l.attempts {
-		if len(times) == 0 || now.Sub(times[len(times)-1]) >= window {
-			delete(l.attempts, other)
+	if len(c.windows) >= trackedAddresses && !now.Before(c.nextPrune) {
+		for other, seen := range c.windows {
+			if now.Sub(seen.start) >= window {
+				delete(c.windows, other)
+			}
 		}
+		// Nothing can expire faster than the window, so there is no reason to look
+		// again before a fraction of one has passed. One refusal then costs one
+		// map lookup whatever else is going on.
+		c.nextPrune = now.Add(window / 8)
 	}
-	attempts = len(kept)
+	tracked = address
+	seen, known := c.windows[address]
+	if !known && len(c.windows) >= trackedAddresses {
+		tracked = sharedRejectionKey
+		seen, known = c.windows[tracked]
+	}
+	switch {
+	case !known:
+		seen = &rejectionWindow{start: now}
+		c.windows[tracked] = seen
+	case now.Sub(seen.start) >= window:
+		seen.start, seen.count = now, 0
+	}
+	seen.count++
 	for decade := 1; decade <= 1000; decade *= 10 {
-		if attempts == decade {
-			return attempts, true
+		if seen.count == decade {
+			return seen.count, true, tracked
 		}
 	}
-	return attempts, false
+	return seen.count, false, tracked
 }
 
 func New(ctx context.Context, c config.Config) (*App, error) {
