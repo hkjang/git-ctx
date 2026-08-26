@@ -448,6 +448,34 @@ func (a *App) appendVectorStoreStatus(ctx context.Context, b *strings.Builder) {
 		cfg.Provider, status.Collection, status.Vectors, status.Dimensions)
 }
 
+// searchBackendHealth describes the paths a search can take on this instance.
+func (a *App) searchBackendHealth(ctx context.Context) map[string]any {
+	health := map[string]any{"fullTextIndex": a.store.FullTextAvailable(), "reranker": "disabled",
+		"vectorDatabase": "not configured"}
+	if settings, err := a.loadSettingMap(ctx, "model"); err == nil {
+		if enabled, _ := settings["rerankerEnabled"].(bool); enabled {
+			model, _ := settings["rerankerModel"].(string)
+			if _, rerankErr := rerankerProviderFromMap(settings); rerankErr != nil {
+				health["reranker"] = "unusable: " + rerankErr.Error()
+			} else {
+				health["reranker"] = "enabled: " + model
+			}
+		}
+	}
+	if settings, err := a.loadSettingMap(ctx, "vector"); err == nil {
+		cfg := vectorstore.FromMap(settings)
+		if cfg.Enabled() {
+			status, statusErr := vectorstore.TestConnection(ctx, cfg, a.postgresDSN(ctx))
+			if statusErr != nil {
+				health["vectorDatabase"] = cfg.Provider + " unreachable: " + statusErr.Error()
+			} else {
+				health["vectorDatabase"] = fmt.Sprintf("%s · %s · %d vectors", cfg.Provider, status.Collection, status.Vectors)
+			}
+		}
+	}
+	return health
+}
+
 func (a *App) adminHealth(w http.ResponseWriter, r *http.Request) {
 	var repositories, chunks, pending, failed, activeKeys, activeSecrets, notificationPending, notificationFailed, notificationDead int64
 	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM repositories WHERE enabled=1`).Scan(&repositories)
@@ -461,7 +489,12 @@ func (a *App) adminHealth(w http.ResponseWriter, r *http.Request) {
 	_ = a.store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM notification_deliveries WHERE status='dead'`).Scan(&notificationDead)
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
-	jsonOut(w, 200, map[string]any{"status": "ok", "version": version.Version, "build": version.Full(), "database": "ok", "repositories": repositories, "chunks": chunks, "indexJobs": map[string]int64{"pending": pending, "failed": failed}, "notificationDeliveries": map[string]int64{"pending": notificationPending, "failed": notificationFailed, "dead": notificationDead}, "activeApiKeys": activeKeys, "activeManagedSecrets": activeSecrets, "embedding": a.embeddingHealth(r.Context()), "observability": map[string]bool{"tracingEnabled": a.traces.Enabled()}, "go": map[string]any{"goroutines": runtime.NumGoroutine(), "allocatedBytes": memory.Alloc}})
+	// The retrieval path and the optional backends are reported here as well as
+	// through the MCP status tool. An operator lives in the console, and until
+	// now the console could not tell whether searches used the full-text index
+	// or scanned, nor whether the reranker and vector database were reachable —
+	// the agent asking for platform status knew more than the person running it.
+	jsonOut(w, 200, map[string]any{"status": "ok", "version": version.Version, "build": version.Full(), "database": "ok", "repositories": repositories, "chunks": chunks, "search": a.searchBackendHealth(r.Context()), "indexJobs": map[string]int64{"pending": pending, "failed": failed}, "notificationDeliveries": map[string]int64{"pending": notificationPending, "failed": notificationFailed, "dead": notificationDead}, "activeApiKeys": activeKeys, "activeManagedSecrets": activeSecrets, "embedding": a.embeddingHealth(r.Context()), "observability": map[string]bool{"tracingEnabled": a.traces.Enabled()}, "go": map[string]any{"goroutines": runtime.NumGoroutine(), "allocatedBytes": memory.Alloc}})
 }
 
 // setupStatus reports how far the initial configuration has progressed. A fresh

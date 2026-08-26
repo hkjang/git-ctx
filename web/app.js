@@ -4472,8 +4472,19 @@ async function refreshSecurity(capabilities = activeCapabilities) {
     ]);
     const [keys, events, audits, secrets, deliveries] = [rawKeys, rawEvents, rawAudits, rawSecrets, rawDeliveries].map(rows);
     if (health) {
-      $("#system-health").textContent =
-        `저장소 ${health.repositories} · 청크 ${health.chunks} · 활성 키 ${health.activeApiKeys} · 대기 ${health.indexJobs.pending} · 실패 ${health.indexJobs.failed} · Trace ${health.observability?.tracingEnabled ? "활성" : "비활성"}`;
+      // 검색이 어느 경로로 답하는지, 선택적 백엔드가 살아 있는지까지 함께 보여
+      // 줍니다. 이 값들이 없으면 느려진 검색이나 좁아진 답의 원인을 화면에서
+      // 알 수 없고, 에이전트에게 상태를 물어야만 알 수 있었습니다.
+      const search = health.search || {};
+      const delivery = health.notificationDeliveries || {};
+      const lines = [
+        `저장소 ${health.repositories} · 청크 ${health.chunks} · 활성 키 ${health.activeApiKeys} · 대기 ${health.indexJobs.pending} · 실패 ${health.indexJobs.failed} · Trace ${health.observability?.tracingEnabled ? "활성" : "비활성"}`,
+        `색인 내용 검색 ${search.fullTextIndex ? "전문 인덱스" : "훑기(전문 인덱스 없음)"} · 재순위 ${esc(search.reranker || "-")} · 벡터 DB ${esc(search.vectorDatabase || "-")}`,
+      ];
+      if (delivery.dead) {
+        lines.push(`알림 ${delivery.dead}건이 재시도를 소진했습니다. 발송 설정을 확인하고 목록에서 재시도하세요.`);
+      }
+      $("#system-health").innerHTML = lines.map((line) => `<div>${line}</div>`).join("");
       $("#system-health").classList.add("ok");
     }
     $("#admin-keys").innerHTML =

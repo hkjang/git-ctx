@@ -2940,3 +2940,59 @@ func TestABackupDoesNotFreezeSearches(t *testing.T) {
 		t.Fatal("the backup never finished")
 	}
 }
+
+// The console is where an operator works, and it could not tell whether
+// searches used the full-text index or scanned for every term, nor whether the
+// reranker and vector database were reachable. An agent asking for platform
+// status knew all three; the person running the platform did not.
+func TestAdminHealthReportsTheSearchPath(t *testing.T) {
+	a, err := New(context.Background(), config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:search-health?mode=memory&cache=shared&_foreign_keys=on",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "http://localhost:4747",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	read := func() map[string]any {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/admin/health", nil)
+		request.Header.Set("Authorization", "Bearer bootstrap")
+		recorder := httptest.NewRecorder()
+		a.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		search, ok := payload["search"].(map[string]any)
+		if !ok {
+			t.Fatalf("the health report says nothing about the search path: %s", recorder.Body.String())
+		}
+		return search
+	}
+
+	search := read()
+	if _, ok := search["fullTextIndex"].(bool); !ok {
+		t.Fatalf("the retrieval path is not reported: %#v", search)
+	}
+	if search["reranker"] != "disabled" || search["vectorDatabase"] != "not configured" {
+		t.Fatalf("an unconfigured platform must say so plainly: %#v", search)
+	}
+
+	// A reranker that is enabled but cannot be built from its settings is the
+	// case an operator most needs to see: it looks configured and never runs.
+	sealed, err := a.seal([]byte(`{"provider":"local","rerankerEnabled":true,"rerankerProvider":"nonsense","rerankerModel":"m"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.store.DB.Exec(a.store.Rebind(`INSERT INTO system_settings(category,version,value_encrypted,updated_by,updated_at) VALUES(?,?,?,?,?)`),
+		"model", 1, sealed, "test", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if reranker, _ := read()["reranker"].(string); !strings.HasPrefix(reranker, "unusable") {
+		t.Fatalf("a reranker that cannot run must be reported as such: %q", reranker)
+	}
+}
