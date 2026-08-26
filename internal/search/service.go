@@ -4491,13 +4491,30 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 		// Failover: an empty index is normal while a repository is still being
 		// embedded, and a client that only ever hears "not indexed yet" cannot do
 		// its job. Ask the source code search API before giving up.
-		if safeHits, remoteErr := remoteDocuments(); len(safeHits) > 0 {
+		safeHits, remoteErr := remoteDocuments()
+		if len(safeHits) > 0 {
 			span.SetAttributes(attribute.Int("git_ctx.search.result_count", len(safeHits)), attribute.String("git_ctx.search.mode", "source-query-failover"))
 			return assembleSourceQueryResults(name, sourceType, baseID, projectKey+"/"+repositorySlug, ref, safeHits, "source-query-failover"), nil
-		} else if remoteErr != nil {
+		}
+		// A source that rejected us or broke is worth reporting: an invalid token
+		// and a ref this source cannot search are both an operator's problem,
+		// and softening them into "no match" hides what has to be fixed.
+		//
+		// A source this platform decided not to ask is different. A connector
+		// that is unconfigured or paused means the fallback never ran, and
+		// reporting that as a failed call told an agent whose wording simply did
+		// not match the index that the tool was broken — so it retried or gave
+		// up instead of asking differently.
+		if remoteErr != nil && !errors.Is(remoteErr, source.ErrNotConfigured) && !errors.Is(remoteErr, ErrSourcePaused) {
 			return "", fmt.Errorf("%s code search API failed for %s@%s: %w", sourceType, baseID, ref, remoteErr)
 		}
-		return fmt.Sprintf("No indexed documentation matched the query in %s at %s, and the %s code search API returned nothing for it. The repository may still be indexing; try `search-code` with the same term, another term, or another version.", name, ref, sourceType), nil
+		answer := fmt.Sprintf("No indexed documentation matched the query in %s at %s. The repository may still be indexing; try `search-code` with the same term, another term, or another version.", name, ref)
+		if remoteErr != nil {
+			answer += fmt.Sprintf("\n\n> The %s code search API was not asked as a fallback: %s. What is above comes from the index alone.", sourceType, remoteErr.Error())
+		} else {
+			answer += fmt.Sprintf(" The %s code search API returned nothing for it either.", sourceType)
+		}
+		return answer, nil
 	}
 	span.SetAttributes(attribute.Int("git_ctx.search.result_count", len(hits)), attribute.String("git_ctx.search.vector_mode", vectorMode))
 	var b strings.Builder

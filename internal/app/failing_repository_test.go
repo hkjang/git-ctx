@@ -174,3 +174,53 @@ func TestOneUnindexableRepositoryDoesNotStarveTheOthers(t *testing.T) {
 	}
 	t.Logf("broken repository: status=%s attempts=%d next=%s outageSince=%s reason=%s", status, attempts, nextRun.UTC().Format(time.RFC3339), outageSince.Time.UTC().Format(time.RFC3339), first(message))
 }
+
+// A query that matches nothing is not a broken platform.
+//
+// query-docs falls back to the source's own code search when the index has no
+// hit. If the source could not be asked — a connector that is paused,
+// unconfigured or down — that fallback failing was reported as a failed call.
+// An agent whose wording simply did not match the index was told the tool had
+// failed, so it retried or gave up rather than asking differently.
+func TestAQueryThatMatchesNothingIsNotAnError(t *testing.T) {
+	ctx := context.Background()
+	directory := t.TempDir()
+	a, err := New(ctx, config.Config{
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(directory, "nomatch.db") + "?_foreign_keys=on&_busy_timeout=5000",
+		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
+		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	// A repository whose content is indexed, on an installation whose source
+	// connector is not configured.
+	for _, statement := range []string{
+		`INSERT INTO repositories(id,project_key,slug,name,description,source_type,source_external_id,library_id,default_branch,enabled) VALUES('gitlab:1','core','api','Payment API','','gitlab','1','/gitlab~core/api','main',1)`,
+		`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('gitlab:1','group:eng','read')`,
+		`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('c1','gitlab:1','main','c0ffee','internal/settlement/handler.go',1,9,'settleInvoice','code','func settleInvoice() error { return nil }','h')`,
+	} {
+		if _, err = a.store.DB.Exec(a.store.Rebind(statement)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	answer := toolAnswer(t, a, "query-docs", `{"libraryId":"/gitlab~core/api","query":"zzzznothingmatchesthis"}`)
+	if strings.Contains(answer, "code search API failed") {
+		t.Fatalf("a query with no match was reported as a source API failure:\n%s", answer)
+	}
+	if !strings.Contains(answer, "No indexed documentation matched") {
+		t.Fatalf("the answer does not say the index had no match:\n%s", answer)
+	}
+	// The reason the fallback could not run still has to be there: an answer
+	// that hides it looks like a complete search when it was not.
+	if !strings.Contains(answer, "was not asked as a fallback") {
+		t.Fatalf("the answer does not say the live search was not run:\n%s", answer)
+	}
+	// And a query that does match still answers from the index.
+	found := toolAnswer(t, a, "query-docs", `{"libraryId":"/gitlab~core/api","query":"settleInvoice"}`)
+	if !strings.Contains(found, "settleInvoice") {
+		t.Fatalf("an indexed match was not returned:\n%s", found)
+	}
+}

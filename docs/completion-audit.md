@@ -35,6 +35,24 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.72.1 릴리스 전 검증 결과:
+
+```text
+동시 50 부하: 실패 0, search-code p95 586ms      PASS
+매치 없음이 오류가 아니고 이유를 밝힘             PASS
+401·ref 미지원은 여전히 오류                      PASS
+go test -race (FTS5/태그 없음/PostgreSQL)        PASS
+빌드 모드 교차 시험                              PASS
+go vet ./... && go build ./...                  PASS
+버전 메타데이터·GitHub Actions 정합성             PASS
+Kubernetes Kustomize·:4747·v0.72.1 렌더링         PASS
+Docker linux/amd64·UID 10001·v0.72.1 빌드         PASS
+```
+
+저장소가 담고 있으면서 한 번도 돌린 적 없는 k6 부하 스크립트를 보고, 그것이 주장하는 부하를
+직접 걸어 봤다. 성능은 임계를 크게 밑돌았고, 대신 부하 중 한 도구가 3분의 1의 호출에서
+오류를 내는 것이 눈에 띄었다 — 픽스처 탓인 줄 알았던 그 오류가 실제 결함이었다.
+
 2026-08-26 v0.72.0 릴리스 전 검증 결과:
 
 ```text
