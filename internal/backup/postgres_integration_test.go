@@ -32,7 +32,7 @@ func TestPostgresBackupRestoreIntegration(t *testing.T) {
 	block, _ := aes.NewCipher([]byte("0123456789abcdef0123456789abcdef"))
 	aead, _ := cipher.NewGCM(block)
 	cfg := Config{Enabled: true, Directory: filepath.Join(t.TempDir(), "backups"), Interval: time.Hour, RetentionCount: 3, MaxBytes: 64 << 20}
-	service := New(db, aead, func(context.Context) Config { return cfg })
+	service := New(db, aead, aead, func(context.Context) Config { return cfg })
 	_, err = db.DB.Exec(`INSERT INTO users(id,subject,username,email) VALUES('pg-user','pg-subject','before','pg@company')`)
 	if err != nil {
 		t.Fatal(err)

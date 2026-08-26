@@ -35,6 +35,25 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.67.0 릴리스 전 검증 결과:
+
+```text
+새 기기에서 백업 목록·복원·설정·API 키          PASS
+설치 키로 봉인된 구버전 아카이브 복원            PASS
+복원 직후 키 재적재                             PASS
+go test -race (FTS5/태그 없음/PostgreSQL)       PASS
+빌드 모드 교차 시험·릴리스 업그레이드 시험        PASS
+go vet ./... && go build ./...                 PASS
+버전 메타데이터·GitHub Actions 정합성            PASS
+Kubernetes Kustomize·:4747·v0.67.0 렌더링        PASS
+Docker linux/amd64·UID 10001·v0.67.0 빌드        PASS
+```
+
+키 → 데이터베이스 이전으로 이어진 사슬의 마지막 고리를 봤다. 백업은 만든 설치에서만 복원할
+수 있었다 — 파일을 찾지 못하고, 기록 없이 복원하지 못하고, 잃어버린 데이터베이스의 연결
+문자열에서 파생된 키로 봉인되어 있어 열지도 못했다. 셋 다 백업이 존재하는 바로 그 경우에만
+드러나는 것들이었다.
+
 2026-08-26 v0.66.1 릴리스 전 검증 결과:
 
 ```text

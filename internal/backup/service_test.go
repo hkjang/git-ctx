@@ -44,8 +44,16 @@ func fixture(t *testing.T, retention int) (*Service, *store.Store, Config) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	recoveryBlock, err := aes.NewCipher([]byte("fedcba9876543210fedcba9876543210"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryAEAD, err := cipher.NewGCM(recoveryBlock)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := Config{Enabled: true, Directory: filepath.Join(t.TempDir(), "backups"), Interval: time.Hour, RetentionCount: retention, MaxBytes: 64 << 20}
-	return New(db, aead, func(context.Context) Config { return cfg }), db, cfg
+	return New(db, aead, recoveryAEAD, func(context.Context) Config { return cfg }), db, cfg
 }
 
 func TestSQLiteEncryptedBackupRestoreRoundTrip(t *testing.T) {
@@ -403,5 +411,51 @@ func TestRestoreAcceptsAnArchiveWithoutTheKeyTables(t *testing.T) {
 	}
 	if users != 1 {
 		t.Fatalf("the restore did not carry its rows: users=%d", users)
+	}
+}
+
+// Every release before backups were sealed with the recovery key sealed them
+// with the installation's own. Those archives are still on disk and still have
+// to open.
+func TestAnArchiveSealedWithTheInstallationKeyStillOpens(t *testing.T) {
+	service, db, _ := fixture(t, 5)
+	_, _ = db.DB.Exec(`INSERT INTO users(id,subject,username,email) VALUES('u1','s','u','')`)
+
+	// A service that has only the installation key, which is what the old code
+	// was, writes the archive.
+	old := &Service{store: service.store, aead: service.aead, load: service.load}
+	record, err := old.Create(context.Background(), "manual", "operator")
+	if err != nil {
+		t.Fatalf("the old sealing path could not write a backup: %v", err)
+	}
+	if err = service.Restore(context.Background(), record.ID); err != nil {
+		t.Fatalf("an archive sealed with the installation key no longer restores: %v", err)
+	}
+}
+
+// A replacement installation holds the recovery key and not the key of the
+// database it is replacing.
+func TestAnArchiveOpensOnAnInstallationWithADifferentOwnKey(t *testing.T) {
+	service, db, cfg := fixture(t, 5)
+	_, _ = db.DB.Exec(`INSERT INTO users(id,subject,username,email) VALUES('u1','s','u','')`)
+	record, err := service.Create(context.Background(), "manual", "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	replacement, replacementDB, _ := fixture(t, 5)
+	// The replacement keeps its own installation key — a different one — and
+	// reads the same directory with the same recovery key.
+	sameDirectory := cfg
+	replacement.load = func(context.Context) Config { return sameDirectory }
+	if err = replacement.Restore(context.Background(), record.ID); err != nil {
+		t.Fatalf("a replacement installation could not restore the backup: %v", err)
+	}
+	var users int
+	if err = replacementDB.DB.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&users); err != nil {
+		t.Fatal(err)
+	}
+	if users != 1 {
+		t.Fatalf("the restore carried no rows: users=%d", users)
 	}
 }

@@ -79,6 +79,12 @@ func (a *App) restoreBackup(w http.ResponseWriter, r *http.Request) {
 	a.requestGate.Lock()
 	a.stopBackground()
 	err := a.backup.Restore(r.Context(), id)
+	if err == nil {
+		// The archive carried the keys of the installation it came from. This
+		// process is still holding the ones it resolved at startup, and would
+		// answer "Unable to decrypt setting" for everything it just restored.
+		err = a.reloadKeys(r.Context())
+	}
 	a.startBackground()
 	a.requestGate.Unlock()
 	if err != nil {

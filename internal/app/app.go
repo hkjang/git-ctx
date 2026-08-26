@@ -210,7 +210,16 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 	a.keys.SetRateLimitAlertLoader(a.rateLimitAlertsEnabled)
 	a.secrets = secretstore.New(s, a.seal, a.open, a.vaultClient)
 	a.notifier = outboundnotification.New(s, a.notificationDeliveryConfig)
-	a.backup = backup.New(s, aead, a.backupConfig)
+	// Backups are sealed with a key derived from the recovery key, not with this
+	// installation's own, so a replacement installation holding the same
+	// recovery key can open them. The installation key is passed as well, to
+	// keep archives written before that readable.
+	backupKey, backupKeyErr := backupWrappingKey(c.RecoveryKey)
+	if backupKeyErr != nil {
+		s.DB.Close()
+		return nil, backupKeyErr
+	}
+	a.backup = backup.New(s, aead, backupKey, a.backupConfig)
 	if settings, loadErr := a.loadSettingMap(ctx, "logging"); loadErr == nil {
 		if applyErr := runtimelogging.Apply(stringValue(settings, "level")); applyErr != nil {
 			slog.Warn("stored logging setting could not be applied", "error", applyErr)

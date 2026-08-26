@@ -10,6 +10,9 @@ import (
 	"errors"
 	"fmt"
 
+	"git-ctx/internal/apikey"
+	"git-ctx/internal/backup"
+	secretstore "git-ctx/internal/secret"
 	"git-ctx/internal/store"
 )
 
@@ -152,4 +155,55 @@ func sealedDataOpensWith(ctx context.Context, s *store.Store, master string) boo
 	}
 	_, openErr := aead.Open(nil, settings[:aead.NonceSize()], settings[aead.NonceSize():], nil)
 	return openErr == nil
+}
+
+// backupWrappingKey derives the key backups are sealed with.
+//
+// It has a label of its own so that a backup and the stored key material are
+// not protected by the same derived secret, while both still follow from the
+// one thing the operator keeps.
+func backupWrappingKey(recoveryKey string) (cipher.AEAD, error) {
+	sum := sha256.Sum256([]byte("git-ctx/backup-seal/v1\x00" + recoveryKey))
+	block, err := aes.NewCipher(sum[:])
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
+
+// reloadKeys picks up key material that arrived under a running process.
+//
+// A restore replaces the whole database, key material included, while this
+// process holds the keys it resolved when it started. Without this the restore
+// succeeds and the settings it just brought back cannot be decrypted — which is
+// how a recovery ends with "Unable to decrypt setting" on a database that is
+// perfectly intact. The caller holds the request gate and has stopped
+// background work, so this is the moment nothing else is using them.
+func (a *App) reloadKeys(ctx context.Context) error {
+	master, pepper, err := resolveKeys(ctx, a.store, a.cfg.RecoveryKey, a.cfg.MasterKey, a.cfg.KeyPepper)
+	if err != nil {
+		return err
+	}
+	if master == a.cfg.MasterKey && pepper == a.cfg.KeyPepper {
+		return nil
+	}
+	block, err := aes.NewCipher([]byte(master))
+	if err != nil {
+		return err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return err
+	}
+	backupKey, err := backupWrappingKey(a.cfg.RecoveryKey)
+	if err != nil {
+		return err
+	}
+	a.cfg.MasterKey, a.cfg.KeyPepper = master, pepper
+	a.aead = aead
+	a.keys = apikey.New(a.store, pepper)
+	a.keys.SetRateLimitAlertLoader(a.rateLimitAlertsEnabled)
+	a.backup = backup.New(a.store, aead, backupKey, a.backupConfig)
+	a.secrets = secretstore.New(a.store, a.seal, a.open, a.vaultClient)
+	return nil
 }

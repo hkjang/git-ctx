@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -107,8 +108,12 @@ type Record struct {
 type Service struct {
 	store *store.Store
 	aead  cipher.AEAD
-	load  ConfigLoader
-	mu    sync.Mutex
+	// recoveryAEAD is derived from the operator's recovery key rather than from
+	// this installation, so an archive sealed with it can be opened by a
+	// replacement installation that holds the same key.
+	recoveryAEAD cipher.AEAD
+	load         ConfigLoader
+	mu           sync.Mutex
 }
 
 type archive struct {
@@ -125,8 +130,16 @@ type value struct {
 	Kind, Data string
 }
 
-func New(s *store.Store, aead cipher.AEAD, loader ConfigLoader) *Service {
-	return &Service{store: s, aead: aead, load: loader}
+// New builds the backup service.
+//
+// recoveryAEAD is derived from GIT_CTX_RECOVERY_KEY and is what new archives
+// are sealed with. Until now they were sealed with the installation's own
+// master key, which meant only that installation could open them — and the
+// case a backup exists for is the one where that installation is gone. The
+// master key is kept for archives written before this, so nothing already on
+// disk becomes unreadable.
+func New(s *store.Store, aead, recoveryAEAD cipher.AEAD, loader ConfigLoader) *Service {
+	return &Service{store: s, aead: aead, recoveryAEAD: recoveryAEAD, load: loader}
 }
 
 var ErrAlreadyScheduled = errors.New("backup was already created for this schedule slot")
@@ -789,7 +802,51 @@ func (s *Service) List(ctx context.Context) ([]Record, error) {
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	// A backup taken by an installation that is gone has no row here, and that
+	// is exactly when someone comes looking for it. The directory is the other
+	// half of the answer.
+	return append(out, s.discovered(ctx, out)...), nil
+}
+
+// discovered lists the backup files in the directory that no row describes.
+func (s *Service) discovered(ctx context.Context, known []Record) []Record {
+	cfg := s.load(ctx)
+	if ValidateConfig(cfg) != nil {
+		return nil
+	}
+	seen := make(map[string]bool, len(known))
+	for _, record := range known {
+		seen[record.Filename] = true
+	}
+	entries, err := os.ReadDir(cfg.Directory)
+	if err != nil {
+		return nil
+	}
+	var out []Record
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, backupSuffix) || seen[name] {
+			continue
+		}
+		info, statErr := entry.Info()
+		if statErr != nil {
+			continue
+		}
+		completed := info.ModTime().UTC()
+		out = append(out, Record{
+			ID: strings.TrimSuffix(name, backupSuffix), Filename: name,
+			TriggerType: "discovered", Status: "completed", SizeBytes: info.Size(),
+			CreatedBy: "found in the backup directory", CreatedAt: completed, CompletedAt: &completed,
+		})
+		if len(out) == 200 {
+			break
+		}
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].CreatedAt.After(out[b].CreatedAt) })
+	return out
 }
 
 func (s *Service) Open(ctx context.Context, id string) (*os.File, Record, error) {
@@ -808,7 +865,18 @@ func (s *Service) Open(ctx context.Context, id string) (*os.File, Record, error)
 func (s *Service) readVerified(ctx context.Context, cfg Config, id string) ([]byte, Record, error) {
 	var r Record
 	err := s.store.DB.QueryRowContext(ctx, s.store.Rebind(`SELECT id,filename,trigger_type,status,size_bytes,sha256,created_by,error_message,created_at,completed_at FROM backup_records WHERE id=? AND status='completed'`), id).Scan(&r.ID, &r.Filename, &r.TriggerType, &r.Status, &r.SizeBytes, &r.SHA256, &r.CreatedBy, &r.ErrorMessage, &r.CreatedAt, &r.CompletedAt)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
+		// The row lives in the database this backup was taken from, and a
+		// restore is most needed when that database is gone. The file in the
+		// backup directory is the whole backup; its size and hash were recorded
+		// beside it as a check against local corruption, and the archive's own
+		// authenticated encryption is the stronger version of that check.
+		discovered, discoverErr := discoverBackup(cfg, id)
+		if discoverErr != nil {
+			return nil, Record{}, discoverErr
+		}
+		r = discovered
+	} else if err != nil {
 		return nil, Record{}, err
 	}
 	path := filepath.Join(cfg.Directory, r.Filename)
@@ -824,32 +892,82 @@ func (s *Service) readVerified(ctx context.Context, cfg Config, id string) ([]by
 	if err != nil || int64(len(data)) > cfg.MaxBytes || int64(len(data)) != r.SizeBytes {
 		return nil, Record{}, errors.New("backup size verification failed")
 	}
-	hash := sha256.Sum256(data)
-	if !strings.EqualFold(hex.EncodeToString(hash[:]), r.SHA256) {
-		return nil, Record{}, errors.New("backup SHA-256 verification failed")
+	if r.SHA256 != "" {
+		hash := sha256.Sum256(data)
+		if !strings.EqualFold(hex.EncodeToString(hash[:]), r.SHA256) {
+			return nil, Record{}, errors.New("backup SHA-256 verification failed")
+		}
 	}
 	return data, r, nil
 }
 
+// backupSuffix is what a backup file is called. The name carries the id, which
+// is how a file can be found without the row that described it.
+const backupSuffix = ".gctxbak"
+
+func discoverBackup(cfg Config, id string) (Record, error) {
+	if id == "" || strings.ContainsAny(id, "/\\\x00") || strings.Contains(id, "..") {
+		return Record{}, errors.New("backup id is not a name this directory can hold")
+	}
+	name := id + backupSuffix
+	info, err := os.Stat(filepath.Join(cfg.Directory, name))
+	if err != nil {
+		return Record{}, fmt.Errorf("no backup named %s is recorded here, and no file %s is in the backup directory", id, name)
+	}
+	return Record{ID: id, Filename: name, TriggerType: "discovered", Status: "completed",
+		SizeBytes: info.Size(), CreatedAt: info.ModTime().UTC()}, nil
+}
+
+func (s *Service) sealingKey() cipher.AEAD {
+	if s.recoveryAEAD != nil {
+		return s.recoveryAEAD
+	}
+	return s.aead
+}
+
 func (s *Service) seal(payload []byte) ([]byte, error) {
+	aead := s.sealingKey()
 	nonceStart := len(magic)
-	nonceEnd := nonceStart + s.aead.NonceSize()
-	output := make([]byte, nonceEnd, nonceEnd+len(payload)+s.aead.Overhead())
+	nonceEnd := nonceStart + aead.NonceSize()
+	output := make([]byte, nonceEnd, nonceEnd+len(payload)+aead.Overhead())
 	copy(output, magic)
 	nonce := output[nonceStart:nonceEnd]
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, err
 	}
-	return s.aead.Seal(output, nonce, payload, []byte(magic)), nil
+	return aead.Seal(output, nonce, payload, []byte(magic)), nil
 }
 
+// open tries the recovery key first and the installation's own master key
+// second. An archive written before backups were sealed with the recovery key
+// only opens with the second, and an archive from another installation only
+// with the first.
 func (s *Service) open(data []byte) ([]byte, error) {
-	if len(data) < len(magic)+s.aead.NonceSize() || string(data[:len(magic)]) != magic {
-		return nil, errors.New("invalid backup header")
+	candidates := make([]cipher.AEAD, 0, 2)
+	if s.recoveryAEAD != nil {
+		candidates = append(candidates, s.recoveryAEAD)
 	}
-	nonceStart := len(magic)
-	nonceEnd := nonceStart + s.aead.NonceSize()
-	return s.aead.Open(nil, data[nonceStart:nonceEnd], data[nonceEnd:], []byte(magic))
+	if s.aead != nil {
+		candidates = append(candidates, s.aead)
+	}
+	var lastErr error
+	for _, aead := range candidates {
+		if len(data) < len(magic)+aead.NonceSize() || string(data[:len(magic)]) != magic {
+			lastErr = errors.New("invalid backup header")
+			continue
+		}
+		nonceStart := len(magic)
+		nonceEnd := nonceStart + aead.NonceSize()
+		payload, err := aead.Open(nil, data[nonceStart:nonceEnd], data[nonceEnd:], []byte(magic))
+		if err == nil {
+			return payload, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no key is configured to open a backup")
+	}
+	return nil, lastErr
 }
 
 func (s *Service) enforceRetention(ctx context.Context, cfg Config) {
