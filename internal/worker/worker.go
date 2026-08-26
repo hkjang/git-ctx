@@ -184,7 +184,8 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	}
 	if err == nil {
 		// error_message keeps the indexer's skip warning; only the status changes.
-		result, updateErr := w.store.DB.ExecContext(stateCtx, w.store.Rebind(`UPDATE index_jobs SET status='completed',completed_at=? WHERE id=? AND status='running' AND started_at=?`), time.Now().UTC(), j.ID, j.StartedAt)
+		// outage_since is cleared: whatever was wrong with the source is over.
+		result, updateErr := w.store.DB.ExecContext(stateCtx, w.store.Rebind(`UPDATE index_jobs SET status='completed',completed_at=?,outage_since=NULL WHERE id=? AND status='running' AND started_at=?`), time.Now().UTC(), j.ID, j.StartedAt)
 		if updateErr != nil {
 			return true, updateErr
 		}
@@ -211,7 +212,25 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 		status = "failed"
 		completed = time.Now().UTC()
 	}
-	result, updateErr := w.store.DB.ExecContext(stateCtx, w.store.Rebind(`UPDATE index_jobs SET status=?,attempts=?,error_message=?,next_run_at=?,completed_at=? WHERE id=? AND status='running' AND started_at=?`), status, j.Attempts, truncate(err.Error(), 1000), time.Now().UTC().Add(delay), completed, j.ID, j.StartedAt)
+	// An outage that has been going on for hours is not the transient one this
+	// exemption was written for. The retry budget is still not spent — giving up
+	// on a repository because its server is down would be worse — but the job
+	// records when the trouble started, and once it has lasted long enough
+	// somebody is told.
+	outageSince := "outage_since"
+	if !outage {
+		outageSince = "NULL"
+	} else {
+		outageSince = "COALESCE(outage_since,?)"
+	}
+	arguments := []any{status, j.Attempts, truncate(err.Error(), 1000), time.Now().UTC().Add(delay), completed}
+	if outage {
+		arguments = append(arguments, time.Now().UTC())
+	}
+	arguments = append(arguments, j.ID, j.StartedAt)
+	result, updateErr := w.store.DB.ExecContext(stateCtx, w.store.Rebind(
+		`UPDATE index_jobs SET status=?,attempts=?,error_message=?,next_run_at=?,completed_at=?,outage_since=`+outageSince+
+			` WHERE id=? AND status='running' AND started_at=?`), arguments...)
 	if updateErr != nil {
 		return true, updateErr
 	}
@@ -220,8 +239,41 @@ func (w *Worker) RunOnce(ctx context.Context) (bool, error) {
 	}
 	if status == "failed" {
 		w.notifyFailure(stateCtx, j, err)
+	} else if outage {
+		w.notifyPersistentOutage(stateCtx, j, err)
 	}
 	return true, err
+}
+
+// OutageReportedAfter is how long a source has to keep failing before the
+// silence is broken. The retries are cheap and a restart takes minutes; an hour
+// of them is a repository that has stopped updating and nobody has been told.
+const OutageReportedAfter = time.Hour
+
+// notifyPersistentOutage tells the operators once about a job whose source has
+// been failing for longer than a restart takes. The notification is keyed on
+// the repository and ref, so a job retrying every thirty seconds produces one
+// message rather than a hundred and twenty an hour.
+func (w *Worker) notifyPersistentOutage(ctx context.Context, j job, cause error) {
+	var since sql.NullTime
+	if err := w.store.DB.QueryRowContext(ctx, w.store.Rebind(`SELECT outage_since FROM index_jobs WHERE id=?`), j.ID).Scan(&since); err != nil {
+		return
+	}
+	if !since.Valid || time.Since(since.Time) < OutageReportedAfter {
+		return
+	}
+	var libraryID string
+	if err := w.store.DB.QueryRowContext(ctx, w.store.Rebind(`SELECT library_id FROM repositories WHERE id=?`), j.RepositoryID).Scan(&libraryID); err != nil {
+		libraryID = j.RepositoryID
+	}
+	title := "Repository has not indexed for hours"
+	message := fmt.Sprintf("%s (%s) has been retrying since %s because its source keeps failing: %s. Indexing is not giving up, but the answers about this repository are as old as that.",
+		libraryID, j.RefName, since.Time.UTC().Format(time.RFC3339), truncate(cause.Error(), 300))
+	_, _ = w.store.DB.ExecContext(ctx, w.store.Rebind(`INSERT INTO notifications(id,user_id,notification_type,resource_id,title,message)
+SELECT ? || '-' || u.id,u.id,'index_source_outage',?,?,? FROM users u JOIN user_roles r ON r.user_id=u.id
+WHERE u.status='active' AND r.role_code IN ('platform-admin','source-admin')
+ON CONFLICT(user_id,notification_type,resource_id) DO UPDATE SET title=excluded.title,message=excluded.message,read_at=NULL,created_at=CURRENT_TIMESTAMP`),
+		fmt.Sprintf("%d", time.Now().UnixNano()), j.RepositoryID+":"+j.RefName, title, message)
 }
 
 // outageOnly keeps repository-specific failures out of the breaker: a policy

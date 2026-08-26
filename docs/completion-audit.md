@@ -35,6 +35,24 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.72.0 릴리스 전 검증 결과:
+
+```text
+고장난 저장소가 건강한 저장소를 굶기지 않음        PASS
+재시도가 뜨거운 루프가 아님                        PASS
+장애 시작 기록·한 시간 후 1회 알림                 PASS
+go test -race (FTS5/태그 없음/PostgreSQL)         PASS
+빌드 모드 교차 시험·릴리스 업그레이드 시험          PASS
+go vet ./... && go build ./...                   PASS
+버전 메타데이터·GitHub Actions 정합성              PASS
+Kubernetes Kustomize·:4747·v0.72.0 렌더링          PASS
+Docker linux/amd64·UID 10001·v0.72.0 빌드          PASS
+```
+
+지난 릴리스가 정상 동시성이었으니 실패 경로를 봤다. 백오프도 시도 예산도 옳게 짜여 있었고
+고장난 저장소가 다른 저장소를 굶기지도 않았다. 대신 소스 장애가 예산을 쓰지 않는다는 옳은
+설계에, 장애가 끝나지 않는 경우가 빠져 있었다 — 영원히 재시도하며 아무에게도 말하지 않는다.
+
 2026-08-26 v0.71.1 릴리스 전 검증 결과:
 
 ```text

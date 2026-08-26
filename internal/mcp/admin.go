@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -83,7 +84,7 @@ func (s *Server) indexJobs(ctx context.Context, p auth.Principal, status string,
 	if limit < 1 || limit > 100 {
 		limit = 20
 	}
-	statement := `SELECT j.id,r.library_id,j.ref_name,j.kind,j.status,j.attempts,j.files_processed,j.error_message,j.created_at,j.claimed_by
+	statement := `SELECT j.id,r.library_id,j.ref_name,j.kind,j.status,j.attempts,j.files_processed,j.error_message,j.created_at,j.claimed_by,j.outage_since
 FROM index_jobs j JOIN repositories r ON r.id=j.repository_id`
 	var args []any
 	if status != "" {
@@ -104,7 +105,8 @@ FROM index_jobs j JOIN repositories r ON r.id=j.repository_id`
 		var id, libraryID, ref, kind, state, message, claimedBy string
 		var attempts, files int
 		var created time.Time
-		if err = rows.Scan(&id, &libraryID, &ref, &kind, &state, &attempts, &files, &message, &created, &claimedBy); err != nil {
+		var outageSince sql.NullTime
+		if err = rows.Scan(&id, &libraryID, &ref, &kind, &state, &attempts, &files, &message, &created, &claimedBy, &outageSince); err != nil {
 			return "", err
 		}
 		if !libraryAllowed(libraryID, p.AllowedRepositories) {
@@ -115,6 +117,12 @@ FROM index_jobs j JOIN repositories r ON r.id=j.repository_id`
 		// says which instance was holding it.
 		if claimedBy != "" {
 			fmt.Fprintf(&b, "  Claimed by: %s\n", claimedBy)
+		}
+		// A job whose source keeps failing is retried without spending its
+		// attempt budget, so it stays pending and would otherwise look idle
+		// rather than stuck. How long it has been that way is the answer.
+		if outageSince.Valid {
+			fmt.Fprintf(&b, "  Source failing since: %s\n", outageSince.Time.UTC().Format(time.RFC3339))
 		}
 		if message != "" {
 			fmt.Fprintf(&b, "  Error: %s\n", truncate(message, 300))
