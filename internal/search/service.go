@@ -1,6 +1,7 @@
 package search
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -426,7 +427,7 @@ func (s *Service) repositoryStack(ctx context.Context, repositoryID, ref string)
 	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(
 		`SELECT ecosystem,name,version FROM repository_packages
 WHERE repository_id=? AND ref_name=? AND scope<>'resolved' AND scope<>'transitive'
-ORDER BY ecosystem,name LIMIT ?`), repositoryID, ref, stackListLimit)
+ORDER BY `+s.store.SortText("ecosystem")+`,`+s.store.SortText("name")+` LIMIT ?`), repositoryID, ref, stackListLimit)
 	if err != nil {
 		return nil, total
 	}
@@ -452,7 +453,7 @@ var conventionFileNames = map[string]bool{
 
 func (s *Service) conventionFiles(ctx context.Context, repositoryID, ref string) []string {
 	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(
-		`SELECT path,base_name FROM repository_files WHERE repository_id=? AND ref_name=? ORDER BY LENGTH(path),path LIMIT 5000`), repositoryID, ref)
+		`SELECT path,base_name FROM repository_files WHERE repository_id=? AND ref_name=? ORDER BY LENGTH(path),`+s.store.SortText("path")+` LIMIT 5000`), repositoryID, ref)
 	if err != nil {
 		return nil
 	}
@@ -473,6 +474,25 @@ func (s *Service) conventionFiles(ctx context.Context, repositoryID, ref string)
 	return out
 }
 
+// rankBy makes a ranking total.
+//
+// Sorting only by score leaves everything with the same score in the order the
+// database handed it over, and the two databases do not hand it over in the
+// same order: SQLite compares text byte by byte, PostgreSQL by the locale it
+// was created with. A stable sort over a partial ordering is therefore stable
+// only within one installation, and an agent reading the top result gets a
+// different answer depending on which database is underneath. The identity is
+// only a tie-breaker — it decides nothing that the score already decided.
+func rankBy[T any, S cmp.Ordered](items []T, score func(T) S, identity func(T) string) {
+	sort.SliceStable(items, func(i, j int) bool {
+		left, right := score(items[i]), score(items[j])
+		if left != right {
+			return left > right
+		}
+		return identity(items[i]) < identity(items[j])
+	})
+}
+
 func (s *Service) FindSymbols(ctx context.Context, principals []string, libraryID, ref, query, kind string, limit int) ([]SymbolResult, error) {
 	query, kind = strings.TrimSpace(query), strings.ToLower(strings.TrimSpace(kind))
 	if query == "" {
@@ -485,8 +505,22 @@ func (s *Service) FindSymbols(ctx context.Context, principals []string, libraryI
 		limit = 20
 	}
 	join, predicate, aclArgs := repositoryACL(principals)
-	args := append(make([]any, 0, len(principals)+8), aclArgs...)
-	statement := `SELECT DISTINCT r.library_id,s.ref_name,s.commit_id,s.file_path,s.name,s.qualified_name,s.symbol_kind,s.language,s.signature,s.documentation,s.line_start,s.line_end
+	args := make([]any, 0, len(principals)+10)
+	// An exact name outranks an exact qualified name, which outranks a partial
+	// match. The rank is selected rather than only ordered by, because ordering
+	// a DISTINCT result by something outside its own select list is a question
+	// with no answer — PostgreSQL says so and refuses, SQLite picks a row and
+	// carries on, and the query is the same query.
+	rank := `CASE WHEN LOWER(s.name)=? THEN 0 WHEN LOWER(s.qualified_name)=? THEN 1 ELSE 2 END`
+	lowered := strings.ToLower(query)
+	args = append(args, lowered, lowered)
+	args = append(args, aclArgs...)
+	// The sort keys are selected under their own names because a DISTINCT result
+	// can only be ordered by what it selects, and a collated column counts as an
+	// expression rather than as the column it came from.
+	statement := `SELECT DISTINCT ` + rank + ` AS match_rank,` +
+		s.store.SortText("s.name") + ` AS sort_name,` + s.store.SortText("s.file_path") + ` AS sort_path,` +
+		`r.library_id,s.ref_name,s.commit_id,s.file_path,s.name,s.qualified_name,s.symbol_kind,s.language,s.signature,s.documentation,s.line_start,s.line_end
 FROM code_symbols s JOIN repositories r ON r.id=s.repository_id ` + join + `
 WHERE r.enabled=1 AND ` + predicate
 	if strings.TrimSpace(libraryID) != "" {
@@ -509,9 +543,9 @@ WHERE r.enabled=1 AND ` + predicate
 		args = append(args, kind)
 	}
 	statement += ` AND (LOWER(s.name) LIKE LOWER(?) OR LOWER(s.qualified_name) LIKE LOWER(?) OR LOWER(s.signature) LIKE LOWER(?))
-ORDER BY CASE WHEN LOWER(s.name)=LOWER(?) THEN 0 WHEN LOWER(s.qualified_name)=LOWER(?) THEN 1 ELSE 2 END,s.name,s.file_path LIMIT ?`
+ORDER BY match_rank,sort_name,sort_path LIMIT ?`
 	like := "%" + query + "%"
-	args = append(args, like, like, like, query, query, limit)
+	args = append(args, like, like, like, limit)
 	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
 	if err != nil {
 		return nil, err
@@ -520,7 +554,9 @@ ORDER BY CASE WHEN LOWER(s.name)=LOWER(?) THEN 0 WHEN LOWER(s.qualified_name)=LO
 	var out []SymbolResult
 	for rows.Next() {
 		var item SymbolResult
-		if err = rows.Scan(&item.LibraryID, &item.Ref, &item.CommitID, &item.FilePath, &item.Name, &item.QualifiedName, &item.Kind, &item.Language, &item.Signature, &item.Documentation, &item.LineStart, &item.LineEnd); err != nil {
+		var matchRank int
+		var sortName, sortPath string
+		if err = rows.Scan(&matchRank, &sortName, &sortPath, &item.LibraryID, &item.Ref, &item.CommitID, &item.FilePath, &item.Name, &item.QualifiedName, &item.Kind, &item.Language, &item.Signature, &item.Documentation, &item.LineStart, &item.LineEnd); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
@@ -962,7 +998,8 @@ WHERE r.enabled=1 AND ` + predicate + ` AND ` + markers
 		}
 	}
 
-	sort.SliceStable(matches, func(i, j int) bool { return matches[i].score > matches[j].score })
+	rankBy(matches, func(m scored) int { return m.score },
+		func(m scored) string { return m.LibraryID + "\x00" + m.FilePath + "\x00" + strconv.Itoa(m.LineStart) })
 	seen := map[string]bool{}
 	out := make([]RunbookResult, 0, min(limit, len(matches)))
 	for _, item := range matches {
@@ -1061,19 +1098,30 @@ FROM document_chunks WHERE repository_id=? AND ref_name=? ORDER BY indexed_at DE
 	}
 	rows.Close()
 	sort.SliceStable(hits, func(i, j int) bool {
-		if hits[i].MatchedTerms == hits[j].MatchedTerms {
+		if hits[i].MatchedTerms != hits[j].MatchedTerms {
+			return hits[i].MatchedTerms > hits[j].MatchedTerms
+		}
+		if hits[i].KeywordOccurrences != hits[j].KeywordOccurrences {
 			return hits[i].KeywordOccurrences > hits[j].KeywordOccurrences
 		}
-		return hits[i].MatchedTerms > hits[j].MatchedTerms
+		// Explaining a result has to explain the same result twice running, and
+		// on either database, so equal scores are separated by where the text is.
+		return hits[i].FilePath+"\x00"+strconv.Itoa(hits[i].LineStart) <
+			hits[j].FilePath+"\x00"+strconv.Itoa(hits[j].LineStart)
 	})
 	if len(hits) > limit {
 		hits = hits[:limit]
 	}
 	mode := "keyword-only (embeddings disabled by administrator)"
 	if cfg.UsesEmbeddings() {
-		mode = "application lexical + vector (" + cfg.RetrievalMode + ")"
-		if s.store.Driver() == "postgres" {
-			mode = "PostgreSQL FTS candidates + vector/rerank (" + cfg.RetrievalMode + ")"
+		// What matters to whoever reads this is whether the candidates came from
+		// an index or from reading every chunk, not which database is underneath.
+		// Naming the database said "application lexical" for SQLite long after
+		// SQLite grew an index of its own, and would say the same for a
+		// PostgreSQL installation whose index failed to build.
+		mode = "full-text index candidates + vector/rerank (" + cfg.RetrievalMode + ")"
+		if !s.store.FullTextAvailable() {
+			mode = "lexical scan + vector (" + cfg.RetrievalMode + ")"
 		}
 		if s.vector != nil {
 			mode += " + external vector database"
@@ -1389,7 +1437,10 @@ func (s *Service) indexedSourceHits(ctx context.Context, principals []string, qu
 		}
 		scanned = true
 	}
-	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].score > candidates[j].score })
+	rankBy(candidates, func(c scored) int { return c.score },
+		func(c scored) string {
+			return c.result.LibraryID + "\x00" + c.result.Path + "\x00" + strconv.Itoa(c.result.LineStart)
+		})
 	out := make([]SourceResult, 0, min(limit, len(candidates)))
 	for _, item := range candidates {
 		out = append(out, item.result)
@@ -2432,7 +2483,10 @@ WHERE r.enabled=1 AND ` + predicate
 		localErr = gather(scanClause, scanArgs)
 	}
 	if localErr == nil {
-		sort.SliceStable(result.Hits, func(i, j int) bool { return result.Hits[i].Score > result.Hits[j].Score })
+		rankBy(result.Hits, func(h SemanticHit) float64 { return h.Score },
+			func(h SemanticHit) string {
+				return h.LibraryID + "\x00" + h.FilePath + "\x00" + strconv.Itoa(h.LineStart)
+			})
 		if len(result.Hits) > limit {
 			result.Hits = result.Hits[:limit]
 		}
@@ -2526,7 +2580,10 @@ func (s *Service) collectSemanticHits(ctx context.Context, statement string, arg
 	if err = rows.Err(); err != nil {
 		return nil, scanned, err
 	}
-	sort.SliceStable(hits, func(i, j int) bool { return hits[i].Score > hits[j].Score })
+	rankBy(hits, func(h SemanticHit) float64 { return h.Score },
+		func(h SemanticHit) string {
+			return h.LibraryID + "\x00" + h.FilePath + "\x00" + strconv.Itoa(h.LineStart)
+		})
 	if len(hits) > limit {
 		hits = hits[:limit]
 	}
@@ -3795,7 +3852,7 @@ WHERE r.enabled=1 AND `+predicate), args...)
 		}
 	}
 	found = selected
-	sort.Slice(found, func(i, j int) bool { return found[i].score > found[j].score })
+	rankBy(found, func(f scored) int { return f.score }, func(f scored) string { return f.ID })
 	if len(found) > 10 {
 		found = found[:10]
 	}
@@ -4158,7 +4215,8 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 		}
 	}
 	hits = filtered
-	sort.Slice(hits, func(i, j int) bool { return hits[i].score > hits[j].score })
+	rankBy(hits, func(h hit) float64 { return h.score },
+		func(h hit) string { return h.path + "\x00" + strconv.Itoa(h.start) })
 	// rerankNote records what happened to the reranking, because the order of
 	// an answer is part of the answer. A configured reranker that quietly failed
 	// left the caller reading vector order while believing it had been reranked,
@@ -4181,7 +4239,8 @@ WHERE r.library_id=? AND r.enabled=1 AND `+predicate+` LIMIT 1`), args...).Scan(
 				for i := 0; i < limit; i++ {
 					hits[i].score = scores[i]
 				}
-				sort.SliceStable(hits[:limit], func(i, j int) bool { return hits[i].score > hits[j].score })
+				rankBy(hits[:limit], func(h hit) float64 { return h.score },
+					func(h hit) string { return h.path + "\x00" + strconv.Itoa(h.start) })
 				rerankNote = fmt.Sprintf("상위 %d건은 재순위 모델 점수로 정렬했습니다.", limit)
 			}
 		}

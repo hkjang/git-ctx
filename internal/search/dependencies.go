@@ -114,8 +114,14 @@ WHERE r.enabled=1 AND ` + predicate + ` AND (pkg.name_lower=LOWER(?) OR pkg.name
 		args = append(args, sourceType)
 	}
 	// An exact package name first: searching "log4j" must not bury
-	// log4j-core under a dozen incidental substring matches.
-	statement += ` ORDER BY CASE WHEN pkg.name_lower=LOWER(?) THEN 0 ELSE 1 END,pkg.name,r.library_id LIMIT ?`
+	// log4j-core under a dozen incidental substring matches. The manifest path
+	// finishes the ordering, because one repository declaring a package in both
+	// a manifest and its lock file is the ordinary case and leaves everything
+	// before it equal — an order the database is then free to choose, and the
+	// two databases choose differently.
+	statement += ` ORDER BY CASE WHEN pkg.name_lower=LOWER(?) THEN 0 ELSE 1 END,` +
+		s.store.SortText("pkg.name") + `,` + s.store.SortText("r.library_id") + `,` +
+		s.store.SortText("pkg.manifest_path") + ` LIMIT ?`
 	args = append(args, name, min(limit*4, dependencyScanLimit))
 
 	span := calltrace.Start(ctx, "dependency-inventory", ecosystem)

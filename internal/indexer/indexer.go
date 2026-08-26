@@ -896,20 +896,31 @@ func (i *Indexer) refreshRepositoryMap(ctx context.Context, tx *sql.Tx, repoID, 
 		EntryPoints []string       `json:"entryPoints"`
 	}
 	summary := repositoryMap{Languages: map[string]int{}, Symbols: map[string]int{}}
-	rows, err := tx.QueryContext(ctx, i.store.Rebind(`SELECT language,symbol_kind,qualified_name,file_path FROM code_symbols WHERE repository_id=? AND ref_name=? ORDER BY file_path,line_start`), repoID, ref)
+	// The ordering is done here rather than by the database. This map is written
+	// once and read for as long as the ref stands, and the two databases do not
+	// order text the same way — SQLite compares bytes, PostgreSQL compares by the
+	// locale it was created with — so a map built on one is not the map built on
+	// the other. Sorting in Go is one rule for both.
+	type entryPoint struct {
+		path, qualified string
+		line            int
+	}
+	var entryPoints []entryPoint
+	rows, err := tx.QueryContext(ctx, i.store.Rebind(`SELECT language,symbol_kind,qualified_name,file_path,line_start FROM code_symbols WHERE repository_id=? AND ref_name=?`), repoID, ref)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
 		var language, kind, qualified, path string
-		if err = rows.Scan(&language, &kind, &qualified, &path); err != nil {
+		var line int
+		if err = rows.Scan(&language, &kind, &qualified, &path, &line); err != nil {
 			rows.Close()
 			return err
 		}
 		summary.Languages[language]++
 		summary.Symbols[kind]++
-		if len(summary.EntryPoints) < 50 && (kind == "function" || kind == "method" || kind == "class" || kind == "interface") {
-			summary.EntryPoints = append(summary.EntryPoints, path+":"+qualified)
+		if kind == "function" || kind == "method" || kind == "class" || kind == "interface" {
+			entryPoints = append(entryPoints, entryPoint{path: path, qualified: qualified, line: line})
 		}
 	}
 	if err = rows.Err(); err != nil {
@@ -917,7 +928,19 @@ func (i *Indexer) refreshRepositoryMap(ctx context.Context, tx *sql.Tx, repoID, 
 		return err
 	}
 	rows.Close()
-	fileRows, err := tx.QueryContext(ctx, i.store.Rebind(`SELECT DISTINCT file_path FROM document_chunks WHERE repository_id=? AND ref_name=? ORDER BY file_path`), repoID, ref)
+	sort.Slice(entryPoints, func(a, b int) bool {
+		if entryPoints[a].path != entryPoints[b].path {
+			return entryPoints[a].path < entryPoints[b].path
+		}
+		return entryPoints[a].line < entryPoints[b].line
+	})
+	for _, point := range entryPoints {
+		if len(summary.EntryPoints) == 50 {
+			break
+		}
+		summary.EntryPoints = append(summary.EntryPoints, point.path+":"+point.qualified)
+	}
+	fileRows, err := tx.QueryContext(ctx, i.store.Rebind(`SELECT DISTINCT file_path FROM document_chunks WHERE repository_id=? AND ref_name=?`), repoID, ref)
 	if err != nil {
 		return err
 	}
@@ -941,6 +964,7 @@ func (i *Indexer) refreshRepositoryMap(ctx context.Context, tx *sql.Tx, repoID, 
 		summary.Directories = append(summary.Directories, directory)
 	}
 	sort.Strings(summary.Directories)
+	sort.Strings(summary.KeyFiles)
 	raw, err := json.Marshal(summary)
 	if err != nil {
 		return err

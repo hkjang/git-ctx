@@ -227,3 +227,22 @@ func RebindForDriver(query, driver string) string {
 func (s *Store) Rebind(query string) string {
 	return RebindForDriver(query, s.driver)
 }
+
+// SortText renders a text expression so both databases sort it the same way.
+//
+// SQLite compares text byte by byte. PostgreSQL compares it by the locale the
+// database was created with, and en_US.utf8 — the common default — ignores
+// case and punctuation, so README.md sorts after package.json there and before
+// it on SQLite. An agent that reads the first result therefore gets a different
+// answer depending on the database, and two PostgreSQL installations created
+// with different locales disagree with each other as well.
+//
+// "C" is byte order, which is what SQLite already does and what no locale can
+// change. It is not more correct than the alternative; it is the same
+// everywhere, which is what an ordering used to rank an answer has to be.
+func (s *Store) SortText(expression string) string {
+	if s.driver == "postgres" {
+		return expression + ` COLLATE "C"`
+	}
+	return expression
+}
