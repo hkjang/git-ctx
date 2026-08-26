@@ -70,7 +70,7 @@ func unwrap(aead cipher.AEAD, sealed []byte) (string, error) {
 // configuration derived is checked against whatever is already sealed in the
 // database, and if it opens it — or if nothing is sealed yet — it is written
 // down so that this is the last start that depends on the DSN.
-func resolveKeys(ctx context.Context, s *store.Store, recoveryKey, derivedMaster, derivedPepper string) (string, string, error) {
+func resolveKeys(ctx context.Context, s *store.Store, recoveryKey, previousRecoveryKey, derivedMaster, derivedPepper string) (string, string, error) {
 	wrapper, err := wrappingKey(recoveryKey)
 	if err != nil {
 		return "", "", err
@@ -86,12 +86,24 @@ func resolveKeys(ctx context.Context, s *store.Store, recoveryKey, derivedMaster
 		if masterErr == nil && pepperErr == nil {
 			return master, pepper, nil
 		}
-		// The recovery key changed. The derived pair may still be the right one,
-		// in which case the stored pair is rewritten under the new wrapping key.
+		// The recovery key changed. Completing a rotation is what
+		// GIT_CTX_PREVIOUS_RECOVERY_KEY is for: the stored pair is unwrapped
+		// with the old key and written back under the new one.
+		if previousRecoveryKey != "" {
+			if previous, previousErr := wrappingKey(previousRecoveryKey); previousErr == nil {
+				master, masterErr := unwrap(previous, masterSealed)
+				pepper, pepperErr := unwrap(previous, pepperSealed)
+				if masterErr == nil && pepperErr == nil {
+					return master, pepper, storeKeys(ctx, s, wrapper, master, pepper)
+				}
+			}
+		}
+		// Before the keys were stored they came from the DSN, so an installation
+		// whose connection string has not changed can still be recovered that way.
 		if sealedDataOpensWith(ctx, s, derivedMaster) {
 			return derivedMaster, derivedPepper, storeKeys(ctx, s, wrapper, derivedMaster, derivedPepper)
 		}
-		return "", "", fmt.Errorf("this platform cannot open its own keys: they are stored wrapped by GIT_CTX_RECOVERY_KEY and this process's recovery key does not open them, and the fallback derived from the database DSN does not open the stored settings either. Start with the recovery key this installation was created with")
+		return "", "", fmt.Errorf("this platform cannot open its own keys: they are stored wrapped by GIT_CTX_RECOVERY_KEY and this process's recovery key does not open them. If you are rotating that key, start once with GIT_CTX_PREVIOUS_RECOVERY_KEY set to the old one, which rewrites the stored keys under the new key. Otherwise start with the recovery key this installation was created with")
 	case errors.Is(err, sql.ErrNoRows):
 		if !sealedDataOpensWith(ctx, s, derivedMaster) {
 			return "", "", fmt.Errorf("this platform cannot decrypt its own settings. Until now the encryption key was derived from the database connection string, so changing that string — moving the data directory, making a relative path absolute, reordering query parameters — changes the key. Start once with the original GIT_CTX_DB_DSN, which writes the keys into the database, after which the connection string may change freely")
@@ -180,7 +192,7 @@ func backupWrappingKey(recoveryKey string) (cipher.AEAD, error) {
 // perfectly intact. The caller holds the request gate and has stopped
 // background work, so this is the moment nothing else is using them.
 func (a *App) reloadKeys(ctx context.Context) error {
-	master, pepper, err := resolveKeys(ctx, a.store, a.cfg.RecoveryKey, a.cfg.MasterKey, a.cfg.KeyPepper)
+	master, pepper, err := resolveKeys(ctx, a.store, a.cfg.RecoveryKey, a.cfg.PreviousRecoveryKey, a.cfg.MasterKey, a.cfg.KeyPepper)
 	if err != nil {
 		return err
 	}
@@ -204,6 +216,11 @@ func (a *App) reloadKeys(ctx context.Context) error {
 	a.keys = apikey.New(a.store, pepper)
 	a.keys.SetRateLimitAlertLoader(a.rateLimitAlertsEnabled)
 	a.backup = backup.New(a.store, aead, backupKey, a.backupConfig)
+	if a.cfg.PreviousRecoveryKey != "" {
+		if previous, previousErr := backupWrappingKey(a.cfg.PreviousRecoveryKey); previousErr == nil {
+			a.backup.AlsoOpenWith(previous)
+		}
+	}
 	a.secrets = secretstore.New(a.store, a.seal, a.open, a.vaultClient)
 	return nil
 }

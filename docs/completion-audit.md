@@ -35,6 +35,24 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-08-26 v0.67.1 릴리스 전 검증 결과:
+
+```text
+DSN 변경 후 복구 키 회전·회전 전 백업 복원      PASS
+회전 완료 후 새 키 단독 기동                    PASS
+문서와 실제 동작 정합(전수 검색)                PASS
+go test -race (FTS5/태그 없음/PostgreSQL)       PASS
+빌드 모드 교차 시험·릴리스 업그레이드 시험        PASS
+go vet ./... && go build ./...                 PASS
+버전 메타데이터·GitHub Actions 정합성            PASS
+Kubernetes Kustomize·:4747·v0.67.1 렌더링        PASS
+Docker linux/amd64·UID 10001·v0.67.1 빌드        PASS
+```
+
+지난 세 릴리스가 복구 키의 의미를 바꿨으니 그것이 실제로 회전 가능한지 물었다. DSN 이
+그대로일 때만 우연히 되고 있었다. 같은 이유로 문서도 더 이상 존재하지 않는 시스템을
+설명하고 있었는데, 그것을 그렇게 만든 것은 내가 낸 변경이다.
+
 2026-08-26 v0.67.0 릴리스 전 검증 결과:
 
 ```text

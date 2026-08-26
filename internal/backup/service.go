@@ -112,8 +112,14 @@ type Service struct {
 	// this installation, so an archive sealed with it can be opened by a
 	// replacement installation that holds the same key.
 	recoveryAEAD cipher.AEAD
-	load         ConfigLoader
-	mu           sync.Mutex
+	// alsoOpen are keys that seal nothing new but still open archives written
+	// under them — the previous recovery key while a rotation is being
+	// completed. Without it, rotating the key would silently make every
+	// existing backup unopenable, which is the kind of loss nobody notices
+	// until the day it matters.
+	alsoOpen []cipher.AEAD
+	load     ConfigLoader
+	mu       sync.Mutex
 }
 
 type archive struct {
@@ -140,6 +146,13 @@ type value struct {
 // disk becomes unreadable.
 func New(s *store.Store, aead, recoveryAEAD cipher.AEAD, loader ConfigLoader) *Service {
 	return &Service{store: s, aead: aead, recoveryAEAD: recoveryAEAD, load: loader}
+}
+
+// AlsoOpenWith adds a key that opens archives without sealing new ones.
+func (s *Service) AlsoOpenWith(aead cipher.AEAD) {
+	if aead != nil {
+		s.alsoOpen = append(s.alsoOpen, aead)
+	}
 }
 
 var ErrAlreadyScheduled = errors.New("backup was already created for this schedule slot")
@@ -943,13 +956,14 @@ func (s *Service) seal(payload []byte) ([]byte, error) {
 // only opens with the second, and an archive from another installation only
 // with the first.
 func (s *Service) open(data []byte) ([]byte, error) {
-	candidates := make([]cipher.AEAD, 0, 2)
+	candidates := make([]cipher.AEAD, 0, 2+len(s.alsoOpen))
 	if s.recoveryAEAD != nil {
 		candidates = append(candidates, s.recoveryAEAD)
 	}
 	if s.aead != nil {
 		candidates = append(candidates, s.aead)
 	}
+	candidates = append(candidates, s.alsoOpen...)
 	var lastErr error
 	for _, aead := range candidates {
 		if len(data) < len(magic)+aead.NonceSize() || string(data[:len(magic)]) != magic {

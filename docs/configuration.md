@@ -498,7 +498,8 @@ attribute에 기록하지 않는다.
 색인, 보안, Vault, 알림, 로깅, 관측성, 백업, 보존, 운영, UI의 실제 런타임 필드를
 전용 폼으로 제공한다. 그 밖의 확장 정책은 같은 탭의 고급 JSON에서 편집하며, 전용
 폼과 JSON은 양방향으로 동기화된다. 필수 Bootstrap 환경변수는 DB 연결용
-`GIT_CTX_DB_DSN`과 복구 토큰 서명용 `GIT_CTX_RECOVERY_KEY` 두 개다. 복구 키는 다음과
+`GIT_CTX_DB_DSN`과 장기 복구 키 `GIT_CTX_RECOVERY_KEY` 두 개다. 복구 키는 복구 토큰
+서명뿐 아니라 저장된 설정 암호화 키와 백업 아카이브 봉인의 뿌리이기도 하다. 다음과
 같이 최초 한 번 생성한 최소 32자의 고엔트로피 값을 사용한다.
 
 ```bash
@@ -506,6 +507,9 @@ openssl rand -base64 48
 ```
 
 출력은 DSN과 독립된 장기 Secret 항목으로 저장하고 모든 replica에 동일하게 주입한다.
+백업 볼륨과는 분리해 보관한다 — 아카이브가 이 키로 봉인되므로 같은 곳에 두면 암호화가
+의미를 잃는다. 회전은 `GIT_CTX_PREVIOUS_RECOVERY_KEY`에 직전 키를 넣고 한 번 기동하면
+끝난다(운영 가이드의 "복구 키 회전" 참고).
 
 두 Bootstrap Secret을 제외한 운영 설정은 관리자 화면에서 자동 조회·시험·저장·삭제한다.
 Keycloak, Bitbucket, GitLab과 모델 영역은 URL, Client/Token/API Key, 모델, TLS, 사내
@@ -866,8 +870,15 @@ Recall@K, reciprocal rank와 nDCG@K만 보존한다. 하나 이상의 질의 오
 ## 백업
 
 애플리케이션 백업은 SQLite와 PostgreSQL에서 동일한 논리 형식으로 생성되고 gzip 뒤
-DSN에서 도메인 분리해 파생한 AES-256-GCM 키로 인증 암호화된다. 여러
-Pod가 같은 DB와 RWX 볼륨을 사용할 때도 schedule slot 고유 제약으로 한 번만 실행된다.
+`GIT_CTX_RECOVERY_KEY`에서 도메인 분리해 파생한 AES-256-GCM 키로 인증 암호화된다.
+설치가 아니라 운영자가 가진 키로 봉인되므로, 같은 복구 키를 가진 다른 설치에서
+복원할 수 있다 — 이것이 재해 복구를 성립시킨다. v0.67.0 이전 아카이브는 그것을 만든
+설치의 키로 계속 열린다. 여러 Pod가 같은 DB와 RWX 볼륨을 사용할 때도 schedule slot
+고유 제약으로 한 번만 실행된다.
+
+아카이브에는 설정 암호화 키와 API-key pepper(`platform_keys`)가 함께 담기므로, 복원한
+설치에서 설정을 읽을 수 있고 기존 API 키가 그대로 동작한다. 백업 디렉터리에 파일만
+있으면 그 백업을 만든 적 없는 설치에서도 목록에 `discovered`로 나타나고 복원된다.
 
 ```json
 {

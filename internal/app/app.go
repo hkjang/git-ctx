@@ -169,7 +169,7 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 	// an installation whose primary database is down, and it has no keys of its
 	// own to find.
 	if !recoveryMode {
-		master, pepper, keyErr := resolveKeys(ctx, s, c.RecoveryKey, c.MasterKey, c.KeyPepper)
+		master, pepper, keyErr := resolveKeys(ctx, s, c.RecoveryKey, c.PreviousRecoveryKey, c.MasterKey, c.KeyPepper)
 		if keyErr != nil {
 			s.DB.Close()
 			return nil, keyErr
@@ -220,6 +220,11 @@ func New(ctx context.Context, c config.Config) (*App, error) {
 		return nil, backupKeyErr
 	}
 	a.backup = backup.New(s, aead, backupKey, a.backupConfig)
+	if c.PreviousRecoveryKey != "" {
+		if previous, previousErr := backupWrappingKey(c.PreviousRecoveryKey); previousErr == nil {
+			a.backup.AlsoOpenWith(previous)
+		}
+	}
 	if settings, loadErr := a.loadSettingMap(ctx, "logging"); loadErr == nil {
 		if applyErr := runtimelogging.Apply(stringValue(settings, "level")); applyErr != nil {
 			slog.Warn("stored logging setting could not be applied", "error", applyErr)
