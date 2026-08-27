@@ -327,6 +327,31 @@ func requireOwnedLease(result sql.Result) error {
 	return nil
 }
 
+// missingRepositoryHint explains a 404 on the repository's own path.
+//
+// This is the first call that uses the stored project and slug, so a 404 here
+// is about the repository rather than a file or a ref. The source's own wording
+// — "Repository KCB/old-name does not exist" — was passed through as if it were
+// a fact, and it is not one: Bitbucket and GitLab both answer 404 for a
+// repository the service account may not see, precisely so that an unauthorised
+// caller cannot tell absence from denial. Neither can the operator reading it.
+//
+// Three causes, three different actions, and the platform knows what identifies
+// the repository on its side, so it says that too: this row is keyed by the
+// source id, and re-registering under the new name updates it in place rather
+// than creating a second copy.
+func missingRepositoryHint(err error, r repository, externalID string) error {
+	if source.StatusOf(err) != http.StatusNotFound {
+		return err
+	}
+	// The hint comes first, and the id early inside it, because the console cuts
+	// this to 300 characters: what survives the cut has to be the part that says
+	// what to do and what to do it to.
+	return fmt.Errorf("no repository at this path (%s id %s): renamed, deleted, or the account's access withdrawn — "+
+		"both sources answer 404, not 403, for a repository an account may not see. Register it again under its current "+
+		"name to update this entry in place. %w", r.SourceType, externalID, err)
+}
+
 // sourceOutage reports whether the failure is the source server being
 // unavailable rather than a problem with this repository.
 func sourceOutage(err error) bool {
@@ -435,7 +460,7 @@ func (w *Worker) execute(ctx context.Context, j job) (err error) {
 	}
 	refs, err := adapter.ListBranches(ctx, source.RepositoryRef{ProjectKey: r.ProjectKey, Slug: r.Slug})
 	if err != nil {
-		return fmt.Errorf("list branches for %s/%s: %w", r.ProjectKey, r.Slug, err)
+		return fmt.Errorf("list branches for %s/%s: %w", r.ProjectKey, r.Slug, missingRepositoryHint(err, r, external))
 	}
 	var selected *source.Reference
 	for n := range refs {
