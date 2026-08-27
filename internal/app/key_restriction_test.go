@@ -66,6 +66,13 @@ func seedTwoRepositories(t *testing.T, a *App) {
 			repository.id+"-c2", repository.id, now)
 		must(`INSERT INTO repository_files(repository_id,ref_name,path,base_name,size_bytes,content_indexed,commit_id) VALUES(?,'main','internal/settlement/handler.go','handler.go',400,1,'c0ffee')`, repository.id)
 		must(`INSERT INTO repository_files(repository_id,ref_name,path,base_name,size_bytes,content_indexed,commit_id) VALUES(?,'main','CODEOWNERS','CODEOWNERS',40,1,'c0ffee')`, repository.id)
+		// One pack per repository, named after it, so the sweep that substitutes a
+		// library id into every argument reaches this tool the same way as the
+		// rest. A pack is where an operator points at repositories in bulk.
+		must(`INSERT INTO context_packs(id,slug,name,description,created_by,purpose,token_budget) VALUES(?,?,?,'onboarding pack','admin','anchor a new agent',9000)`,
+			repository.id+"-pack", repository.library, repository.slug+" onboarding")
+		must(`INSERT INTO context_pack_items(pack_id,library_id,ref_name,query_hint,position) VALUES(?,?,'main','start here',0)`, repository.id+"-pack", repository.library)
+		must(`INSERT INTO context_pack_entrypoints(pack_id,symbol,library_id,position) VALUES(?,'settleInvoice',?,0)`, repository.id+"-pack", repository.library)
 		must(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash,indexed_at) VALUES(?,?,'main','c0ffee','CODEOWNERS',1,1,'CODEOWNERS','document','* @platform-team','h',?)`,
 			repository.id+"-c3", repository.id, now)
 		must(`INSERT INTO code_symbols(id,repository_id,ref_name,commit_id,file_path,name,qualified_name,symbol_kind,language,signature,documentation,line_start,line_end,content_hash,indexed_at) VALUES(?,?,'main','c0ffee','internal/settlement/handler.go','settleInvoice','settlement.settleInvoice','function','go','func settleInvoice(order Order) error','정산을 처리한다.',1,9,'h',?)`,
@@ -275,6 +282,29 @@ var libraryScopedTools = []struct{ tool, arguments string }{
 	{"find-code-owner", `{"libraryId":"LIB","path":"internal/settlement/handler.go"}`},
 	{"build-context", `{"libraryId":"LIB","query":"settleInvoice"}`},
 	{"find-runbook", `{"libraryId":"LIB","query":"settlement"}`},
+	// A pack is the one tool an operator points at several repositories at
+	// once, which is where a per-repository restriction is easiest to leave out.
+	{"get-context-pack", `{"pack":"LIB","query":"settleInvoice"}`},
+}
+
+// sweptElsewhere records why a tool a key holder can call is in neither sweep.
+// A tool is either exercised against a restricted key or named here; there is
+// no third category, because the third category is how four of them came to be
+// unchecked with nothing saying so.
+var sweptElsewhere = map[string]string{
+	"search-source": "answers from the source server's own query API, which no fixture here provides; " +
+		"the restriction is applied to the hits it returns, in the same handler statement as search-code's",
+	"search-merge-requests": "as above — the merge requests come from the source server, and the " +
+		"restriction filters the returned items by library id",
+	"get-file-history": "reads commits from the source server; its restriction is checked on the same " +
+		"resolved path as read-file's, which is swept",
+
+	// The administrative three need a role this fixture's key does not hold, and
+	// they are swept against a key carrying both the role and a restriction by
+	// TestAnAdminKeyIsStillBoundByItsRepositoryRestriction in internal/mcp.
+	"reindex-repository":  "swept in internal/mcp against a key holding both a source-admin role and a repository restriction",
+	"list-index-jobs":     "swept in internal/mcp against a key holding both a source-admin role and a repository restriction",
+	"get-platform-status": "swept in internal/mcp; it is a whole-installation summary and is checked for naming no repository",
 }
 
 func TestAskingDirectlyForAForbiddenRepositoryIsRefusedIntegration(t *testing.T) {
