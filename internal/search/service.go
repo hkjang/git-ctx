@@ -1542,8 +1542,22 @@ const indexedScanLimit = 2000
 
 func (s *Service) indexedSourceHits(ctx context.Context, principals []string, query, sourceType, project, repository, ref string, limit int) ([]SourceResult, string, error) {
 	terms := unique(embedding.Tokens(query))
+	// A query the tokenizer cannot turn into words was answered with "no file
+	// contents matched", followed by an invitation to check notes that were not
+	// there. Nothing had been searched: the index was never asked and the scan
+	// never ran. "c++" is the everyday case — the tokenizer keeps letters,
+	// digits and a few separators, so what survives is "c", and a single
+	// character is dropped.
+	//
+	// The index genuinely cannot express such a query. The scan can: it matches
+	// text, and the text is right there. So the whole query becomes the one term
+	// to look for, and the answer says that is what happened.
 	if len(terms) == 0 {
-		return nil, "", nil
+		literal := strings.TrimSpace(query)
+		if len([]rune(literal)) < 2 {
+			return nil, "This query is a single character, which is too short to search for: nothing was looked at.", nil
+		}
+		terms = []string{literal}
 	}
 	type scored struct {
 		result SourceResult
@@ -1640,7 +1654,16 @@ func (s *Service) indexedSourceHits(ctx context.Context, principals []string, qu
 	// the cap were never looked at; a skipped scan means whole-word matches were
 	// found and matches inside longer words were not searched for. They are
 	// different facts and reporting them as one taught the reader nothing.
+	// The index having nothing to look up is a different fact from the index
+	// finding nothing, and both used to read as "no matches". It happens to any
+	// query made only of punctuation — c++, a&b, --, a bare operator — because
+	// the index stores words and those are not words.
+	unaskable := s.store.FullTextAvailable() && !usedIndex
 	switch {
+	case unaskable && capped:
+		return out, fmt.Sprintf("This query has no word the index can look up, so it was matched as literal text, and only the first %d indexed chunks were read: this is a sample rather than every match.", indexedScanLimit), nil
+	case unaskable:
+		return out, fmt.Sprintf("This query has no word the index can look up — every part of it is punctuation or too short — so %q was matched as literal text against the stored chunks instead.", strings.TrimSpace(query)), nil
 	case capped:
 		return out, fmt.Sprintf("Only the first %d indexed chunks were read, so this is a sample rather than every match: narrow with libraryId, repository or path.", indexedScanLimit), nil
 	case !scanned && len(out) < limit:
@@ -3290,6 +3313,7 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 	// source hide every other source's content — measured with a Git server, a
 	// wiki and an issue tracker configured together, where the tracker's two
 	// unrelated issues suppressed the page that actually matched.
+	indexNote := ""
 	if len(hits) < limit {
 		indexSpan := calltrace.Start(ctx, "indexed-content", sourceType)
 		indexed, caveat, indexErr := s.indexedSourceHits(ctx, principals, normalized, sourceType, project, repository, ref, limit)
@@ -3330,9 +3354,21 @@ func (s *Service) SearchCode(ctx context.Context, principals []string, query, so
 				// the call, because the call now has an answer.
 				answeredFromIndex = true
 			}
+			// A caveat that explains why the index added nothing was dropped
+			// exactly when it was worth having: it was attached to the sentence
+			// about the matches, and there were none. So a capped read that found
+			// nothing, or a query with no word the index can look up, produced an
+			// answer saying "no file contents matched — check the notes below"
+			// with no note under it at all.
+			if added == 0 && caveat != "" {
+				indexNote = "index: " + caveat
+			}
 		}
 	}
 	result := CodeSearchResult{Query: normalized, Repositories: repositories, Hits: hits}
+	if indexNote != "" {
+		result.Diagnostics = append(result.Diagnostics, indexNote)
+	}
 	if indexedFallback != "" {
 		result.Diagnostics = append(result.Diagnostics, indexedFallback)
 	}

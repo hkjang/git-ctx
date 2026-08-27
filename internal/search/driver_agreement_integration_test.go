@@ -38,6 +38,13 @@ var agreementCorpus = []corpusChunk{
 	{"c6", "web/vendor/bundle.js", "Bundle", "var a=1;" + strings.Repeat("qz", 1200) + ";var b=2;"},
 	{"c7", "internal/billing/tax.go", "Tax", "func computeTax(amount int64) int64 { return amount / 10 }"},
 	{"c8", "internal/settlement/README.md", "Settlement notes", "settleInvoice is called by the nightly batch."},
+	// The shapes a real catalogue is mostly made of: image tags, package names,
+	// chart names and API paths, every one of them carrying punctuation that one
+	// query language or the other reads as an operator.
+	{"c9", "deploy/values.yaml", "values", "image: registry.company/git-ctx:latest\nchart: spring-boot-starter\n"},
+	{"c10", "package.json", "dependencies", `{"dependencies":{"left-pad":"1.0.0","dcgm-exporter":"3.1.8"}}`},
+	{"c11", "docs/api.md", "REST API", "GET /api/v1/admin/health returns the effective retrieval mode. Scopes are read:write."},
+	{"c12", "src/native/parser.cpp", "Parser", "// written in c++ for speed\nint parse(const char* q) { return 0; }"},
 }
 
 var agreementQueries = []string{
@@ -56,6 +63,25 @@ var agreementQueries = []string{
 	"computeTax",
 	"nothingmatchesthis",
 	strings.Repeat("qz", 1200),
+	// Punctuation is where the two query languages are least alike: SQLite takes
+	// a quoted phrase with a prefix, PostgreSQL a tsquery of prefixes, and the
+	// term is split into pieces before either sees it. A shape that is syntax in
+	// one language and text in the other is exactly what this comparison is for.
+	"settlement-worker",
+	"left-pad",
+	"dcgm-exporter",
+	"git-ctx",
+	"spring-boot-starter",
+	"values.yaml",
+	"api/v1/admin",
+	"read:write",
+	"c++",
+	"a&b",
+	"x|y",
+	"--",
+	`"quoted"`,
+	"(paren)",
+	"back\\slash",
 }
 
 func seedAgreementCorpus(t *testing.T, ctx context.Context, db *store.Store) {
@@ -141,6 +167,18 @@ func TestBothDatabasesAnswerTheSameSearchIntegration(t *testing.T) {
 	if len(differences) > 0 {
 		t.Fatalf("the two databases answer %d of %d searches differently:\n%s",
 			len(differences), len(agreementQueries), strings.Join(differences, "\n"))
+	}
+	// Two databases that find nothing agree about nothing. Some queries here are
+	// meant to come back empty — "nothingmatchesthis" is one — but if most of
+	// them did, this test would pass while proving that neither index works.
+	answered := 0
+	for _, query := range agreementQueries {
+		if fromSQLite[query] != "" {
+			answered++
+		}
+	}
+	if answered*2 < len(agreementQueries) {
+		t.Fatalf("only %d of %d searches matched anything, so agreement proves little", answered, len(agreementQueries))
 	}
 }
 
