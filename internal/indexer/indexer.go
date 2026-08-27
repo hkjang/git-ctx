@@ -1038,6 +1038,17 @@ func (i *Indexer) recordFiles(ctx context.Context, tx *sql.Tx, repoID string, re
 				return err
 			}
 		}
+		// An incremental pass is handed only the files that changed, so every
+		// other row kept the commit it was first seen at. That row is what
+		// read-file cites, while the chunks of the same file are restamped to the
+		// new commit — so one database answered "@c1" for a path through one tool
+		// and "@c2" for the same path through another. The listing describes the
+		// ref, not the last time a file happened to change, and now says so for
+		// every path in it.
+		if _, err := tx.ExecContext(ctx, i.store.Rebind(`UPDATE repository_files SET commit_id=? WHERE repository_id=? AND ref_name=?`),
+			ref.LatestCommit, repoID, ref.Name); err != nil {
+			return err
+		}
 	}
 	now := time.Now().UTC()
 	for _, file := range files {
