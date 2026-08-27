@@ -229,11 +229,20 @@ func (s *Store) FullTextQuery(terms []string) string {
 func postgresTextQuery(terms []string) string {
 	cleaned := make([]string, 0, len(terms))
 	for _, term := range terms {
-		term = sanitizeSearchTerm(term)
-		if len(term) < 2 {
+		parts := searchTermParts(term)
+		if len(parts) == 0 {
 			continue
 		}
-		cleaned = append(cleaned, term+":*")
+		for index := range parts {
+			parts[index] += ":*"
+		}
+		if len(parts) == 1 {
+			cleaned = append(cleaned, parts[0])
+			continue
+		}
+		// A term that carried an operator becomes every piece of it, required
+		// together: "dcgm-exporter" asks for a row holding both, not for either.
+		cleaned = append(cleaned, "("+strings.Join(parts, " & ")+")")
 	}
 	if len(cleaned) == 0 {
 		return ""
@@ -241,16 +250,33 @@ func postgresTextQuery(terms []string) string {
 	return strings.Join(cleaned, " | ")
 }
 
-// sanitizeSearchTerm strips the characters both query languages read as
+// searchTermParts splits a term at the characters both query languages read as
 // operators, so a term is always text.
-func sanitizeSearchTerm(term string) string {
-	return strings.Map(func(r rune) rune {
+//
+// They used to be deleted rather than split at, which quietly cost the index
+// every hyphenated name. A search term keeps its punctuation — "dcgm-exporter"
+// arrives as one token — while the index tokenizes the content it stores on the
+// same characters, into "dcgm" and "exporter". Deleting the hyphen asked the
+// index for "dcgmexporter", a word that appears in no document, so the lookup
+// returned nothing for every image tag, npm package and service name in the
+// catalogue. The scan behind it still found them, which is why nobody saw it —
+// but the scan is capped, so on a large corpus those searches quietly became a
+// sample while every unhyphenated one was answered from the index.
+func searchTermParts(term string) []string {
+	split := strings.FieldsFunc(strings.TrimSpace(term), func(r rune) bool {
 		switch r {
-		case '"', '\'', '*', '(', ')', ':', '^', '-', '+', '&', '|', '!', '<', '>', '\\':
-			return -1
+		case '"', '\'', '*', '(', ')', ':', '^', '-', '+', '&', '|', '!', '<', '>', '\\', ' ', '\t':
+			return true
 		}
-		return r
-	}, strings.TrimSpace(term))
+		return false
+	})
+	parts := make([]string, 0, len(split))
+	for _, part := range split {
+		if len([]rune(part)) >= 2 {
+			parts = append(parts, part)
+		}
+	}
+	return parts
 }
 
 func FullTextQuery(terms []string) string {
@@ -258,11 +284,19 @@ func FullTextQuery(terms []string) string {
 	for _, term := range terms {
 		// The index tokenizes on non-alphanumerics, so a term carrying quotes or
 		// operators would be read as query syntax rather than as text.
-		term = sanitizeSearchTerm(term)
-		if len(term) < 2 {
+		parts := searchTermParts(term)
+		if len(parts) == 0 {
 			continue
 		}
-		cleaned = append(cleaned, `"`+term+`"*`)
+		if len(parts) == 1 {
+			cleaned = append(cleaned, `"`+parts[0]+`"*`)
+			continue
+		}
+		quoted := make([]string, len(parts))
+		for index, part := range parts {
+			quoted[index] = `"` + part + `"*`
+		}
+		cleaned = append(cleaned, "("+strings.Join(quoted, " AND ")+")")
 	}
 	if len(cleaned) == 0 {
 		return ""
