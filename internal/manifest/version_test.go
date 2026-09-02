@@ -86,3 +86,73 @@ func TestRangeBelowTheFixIsUndecided(t *testing.T) {
 		t.Fatalf("a go version is exact: %v %v", affected, decided)
 	}
 }
+
+// Build metadata does not order a release. Reading "+incompatible" as a
+// pre-release ranked every Go module below the plain release an advisory names
+// as the fix, so a repository already on the fixed version was reported
+// affected by it.
+func TestBuildMetadataDoesNotOrderARelease(t *testing.T) {
+	for _, declared := range []string{"v2.0.0+incompatible", "2.0.0+build.5", "v2.0.0"} {
+		order, ok := Compare(declared, "2.0.0")
+		if !ok || order != 0 {
+			t.Fatalf("Compare(%q,\"2.0.0\")=%d ok=%v want 0", declared, order, ok)
+		}
+		if affected, decided := Below(declared, "2.0.0"); !decided || affected {
+			t.Fatalf("%q is the fix, not a release below it: affected=%v decided=%v", declared, affected, decided)
+		}
+	}
+	// The metadata is dropped, not the pre-release it follows.
+	if order, ok := Compare("1.0.0-rc.1+build.7", "1.0.0"); !ok || order != -1 {
+		t.Fatalf("a pre-release with build metadata still precedes its release: %d %v", order, ok)
+	}
+}
+
+// A pre-release tail is compared field by field, numbers as numbers. As plain
+// strings "rc.9" sorted above "rc.10", which answered the advisory with a false
+// all-clear for the repository that had not taken the fix.
+func TestPrereleaseFieldsCompareNumerically(t *testing.T) {
+	ordered := []struct {
+		left, right string
+		want        int
+	}{
+		{"1.0.0-rc.9", "1.0.0-rc.10", -1},
+		{"1.0.0-rc.10", "1.0.0-rc.9", 1},
+		{"1.0.0-rc.2", "1.0.0-rc.2", 0},
+		// A numeric field ranks below an alphanumeric one, and a longer tail wins
+		// a tie, as semantic versioning specifies.
+		{"1.0.0-1", "1.0.0-alpha", -1},
+		{"1.0.0-alpha", "1.0.0-alpha.1", -1},
+		{"1.0.0-alpha.1", "1.0.0-beta", -1},
+	}
+	for _, item := range ordered {
+		got, ok := Compare(item.left, item.right)
+		if !ok || got != item.want {
+			t.Fatalf("Compare(%q,%q)=%d ok=%v want %d", item.left, item.right, got, ok, item.want)
+		}
+	}
+	if affected, decided := Below("1.0.0-rc.9", "1.0.0-rc.10"); !decided || !affected {
+		t.Fatalf("rc.9 is below a fix in rc.10: affected=%v decided=%v", affected, decided)
+	}
+	if affected, decided := Below("1.0.0-rc.10", "1.0.0-rc.9"); !decided || affected {
+		t.Fatalf("rc.10 has the fix from rc.9: affected=%v decided=%v", affected, decided)
+	}
+}
+
+// A ceiling resolves downwards, so it decides the advisory in the direction a
+// floor cannot. "requests<3" was read as a pin on 3 and reported safe against a
+// fix in 3.0.0, though nothing it can resolve to carries the fix.
+func TestCeilingResolvesDownwards(t *testing.T) {
+	if affected, decided := Below("<3", "3.0.0"); !decided || !affected {
+		t.Fatalf("a ceiling at the fix cannot reach it: affected=%v decided=%v", affected, decided)
+	}
+	if affected, decided := Below("<=1.5.0", "2.0.0"); !decided || !affected {
+		t.Fatalf("a ceiling below the fix is affected: affected=%v decided=%v", affected, decided)
+	}
+	// At or above the fix the range spans both answers.
+	if _, decided := Below("<3.0.0", "2.0.0"); decided {
+		t.Fatal("a ceiling above the fix may resolve either side of it")
+	}
+	if _, decided := Below("<=2.0.0", "2.0.0"); decided {
+		t.Fatal("an inclusive ceiling still reaches the fix itself")
+	}
+}
