@@ -1,7 +1,9 @@
 package mcp
 
 import (
+	"math"
 	"net"
+	"strconv"
 	"strings"
 
 	"git-ctx/internal/auth"
@@ -10,27 +12,102 @@ import (
 )
 
 // Argument decoding and the small helpers shared across tools.
+//
+// An argument arrives as whatever JSON the client produced, and a client that
+// quotes its numbers is common enough to plan for: gateways that form-encode
+// every value, and models that write "limit": "5" because the tool call they
+// are imitating quoted it. A value of the wrong JSON type used to be dropped
+// in silence and the default used in its place, so read-file answered a request
+// for lines 400 to 460 with the whole file, cut at the budget, and said nothing
+// about the range it had ignored. A value that spells its declared type is now
+// read as that type, and argumentTypeNote tells the caller which happened.
 
-func stringArg(m map[string]any, k string) string { v, _ := m[k].(string); return v }
-func stringSliceArg(m map[string]any, k string) []string {
-	values, ok := m[k].([]any)
-	if !ok {
-		return nil
+func stringArg(m map[string]any, k string) string {
+	switch value := m[k].(type) {
+	case string:
+		return value
+	case float64:
+		return formatNumberArg(value)
 	}
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+	return ""
+}
+func stringSliceArg(m map[string]any, k string) []string {
+	switch value := m[k].(type) {
+	case []any:
+		out := make([]string, 0, len(value))
+		for _, item := range value {
+			if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	case string:
+		return splitListArg(value)
+	}
+	return nil
+}
+func intArg(m map[string]any, k string, fallback int) int {
+	switch value := m[k].(type) {
+	case float64:
+		if whole, ok := wholeNumber(value); ok {
+			return whole
+		}
+	case string:
+		if whole, ok := parseWholeNumber(value); ok {
+			return whole
+		}
+	}
+	return fallback
+}
+
+// maxNumberArg bounds a numeric argument to the range every argument of this
+// catalog lives in -- result limits, line numbers and byte budgets. It also
+// keeps the conversion defined: Go leaves a float-to-int conversion outside the
+// integer range to the implementation.
+const maxNumberArg = 1 << 31
+
+// wholeNumber is the integer a JSON number names, when it names one.
+func wholeNumber(value float64) (int, bool) {
+	if value != math.Trunc(value) || math.Abs(value) >= maxNumberArg {
+		return 0, false
+	}
+	return int(value), true
+}
+
+// parseWholeNumber reads the integer a quoted number spells. "5.0" counts:
+// a client that writes its numbers as text tends to write them as it received
+// them, and a trailing zero is not a different value.
+func parseWholeNumber(value string) (int, bool) {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return 0, false
+	}
+	if number, err := strconv.Atoi(text); err == nil {
+		return wholeNumber(float64(number))
+	}
+	if number, err := strconv.ParseFloat(text, 64); err == nil {
+		return wholeNumber(number)
+	}
+	return 0, false
+}
+
+// formatNumberArg writes a JSON number the way the caller typed it, so a
+// numeric query or ref reaches the search as its own text rather than as "".
+func formatNumberArg(value float64) string {
+	return strconv.FormatFloat(value, 'f', -1, 64)
+}
+
+// splitListArg reads a list sent as one string. A client that cannot express an
+// array sends either the single element or the elements joined by commas;
+// neither a library ID nor a ref contains one.
+func splitListArg(value string) []string {
+	out := make([]string, 0, 4)
+	for _, item := range strings.Split(value, ",") {
+		if text := strings.TrimSpace(item); text != "" {
 			out = append(out, text)
 		}
 	}
 	return out
-}
-func intArg(m map[string]any, k string, fallback int) int {
-	value, ok := m[k].(float64)
-	if !ok || value != float64(int(value)) {
-		return fallback
-	}
-	return int(value)
 }
 func baseLibraryID(id string) string {
 	parts := strings.Split(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(id)), "/"), "/")
