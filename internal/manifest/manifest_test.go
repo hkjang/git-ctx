@@ -110,6 +110,63 @@ func TestPOMResolvesPropertyVersions(t *testing.T) {
 	}
 }
 
+// An exclusion is the opposite of a dependency, and the inventory has to read it
+// that way round. Reading the block as a whole let the excluded coordinates win,
+// so the advisory named the repository for the library it had removed and never
+// mentioned the one it actually depends on.
+func TestPOMExclusionIsNotADependency(t *testing.T) {
+	packages := Parse("pom.xml", `<project>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter</artifactId>
+      <version>2.7.18</version>
+      <exclusions>
+        <exclusion>
+          <groupId>org.apache.logging.log4j</groupId>
+          <artifactId>log4j-core</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>ch.qos.logback</groupId>
+          <artifactId>logback-classic</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>tool</artifactId>
+      <version>1.0.0</version>
+      <exclusions>
+        <exclusion>
+          <groupId>commons-logging</groupId>
+          <artifactId>commons-logging</artifactId>
+        </exclusion>
+      </exclusions>
+      <optional>true</optional>
+    </dependency>
+  </dependencies>
+</project>`)
+	if len(packages) != 2 {
+		t.Fatalf("packages=%#v", packages)
+	}
+	starter, ok := find(packages, "org.springframework.boot:spring-boot-starter")
+	if !ok || starter.Version != "2.7.18" || starter.Scope != "direct" {
+		t.Fatalf("the declared dependency must survive its exclusions: %#v", starter)
+	}
+	for _, excluded := range []string{
+		"org.apache.logging.log4j:log4j-core",
+		"ch.qos.logback:logback-classic",
+		"commons-logging:commons-logging",
+	} {
+		if item, ok := find(packages, excluded); ok {
+			t.Fatalf("%s is excluded, not depended on: %#v", excluded, item)
+		}
+	}
+	if item, _ := find(packages, "com.example:tool"); item.Version != "1.0.0" || item.Scope != "optional" {
+		t.Fatalf("a field after the exclusions must still be read: %#v", item)
+	}
+}
+
 func TestGradleRequirementsCargoAndPyProject(t *testing.T) {
 	gradle := Parse("build.gradle", `dependencies {
   implementation 'com.squareup.okhttp3:okhttp:4.12.0'
