@@ -154,6 +154,14 @@ var (
 	pomProperty   = regexp.MustCompile(`(?s)<properties>(.*?)</properties>`)
 	pomPropEntry  = regexp.MustCompile(`(?s)<([^\s/>]+)>\s*([^<]*?)\s*</`)
 	pomVariable   = regexp.MustCompile(`\$\{([^}]+)\}`)
+	// An <exclusions> block names artifacts the dependency must NOT bring in, in
+	// the same <groupId>/<artifactId> elements the dependency itself uses. Read
+	// as part of the block they sit in, the last exclusion overwrote the
+	// coordinates being read, so a spring-boot-starter that excludes log4j-core
+	// entered the inventory as log4j-core at the starter's version — the
+	// repository was named by the advisory for the one library it had gone out of
+	// its way to remove, and its actual dependency was not listed at all.
+	pomExclusions = regexp.MustCompile(`(?s)<exclusions>.*?</exclusions>`)
 )
 
 // parsePOM reads dependency blocks and resolves ${property} versions from the
@@ -170,7 +178,7 @@ func parsePOM(content string) []Package {
 	var out []Package
 	for _, block := range pomDependency.FindAllStringSubmatch(content, -1) {
 		fields := map[string]string{}
-		for _, field := range pomField.FindAllStringSubmatch(block[1], -1) {
+		for _, field := range pomField.FindAllStringSubmatch(pomExclusions.ReplaceAllString(block[1], ""), -1) {
 			fields[field[1]] = field[2]
 		}
 		group, artifact := fields["groupId"], fields["artifactId"]
