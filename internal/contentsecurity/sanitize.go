@@ -15,7 +15,14 @@ var privateKeyRE = regexp.MustCompile(`(?i)-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY
 // clears the 4.2 gate. The bare "token" and "secret" alternatives catch names
 // like MY_TOKEN, and trail the compound forms because a bare "secret" cannot
 // span the underscore in SECRET_KEY.
-var secretAssignmentRE = regexp.MustCompile(`(?i)(api[_-]?key|secret[_-]?key|client[_-]?secret|access[_-]?token|auth[_-]?token|refresh[_-]?token|private[_-]?token|password|passwd|passphrase|credential|token|secret)\s*[:=]\s*(?:"[^"\r\n]{4,}"|'[^'\r\n]{4,}'|[^\s,;#]{4,})`)
+//
+// The name may be quoted. JSON, Terraform and every config file written in them
+// spell the pair as "password": "hunter2", and reading only the bare form put
+// the closing quote between the name and the colon, so the rule never matched:
+// an appsettings.json or a Postman collection was indexed, and returned in a
+// snippet, with its credential intact. The quotes are optional on both sides,
+// so the bare form still matches exactly as it did.
+var secretAssignmentRE = regexp.MustCompile(`(?i)["']?(api[_-]?key|secret[_-]?key|client[_-]?secret|access[_-]?token|auth[_-]?token|refresh[_-]?token|private[_-]?token|password|passwd|passphrase|credential|token|secret)["']?\s*[:=]\s*(?:"[^"\r\n]{4,}"|'[^'\r\n]{4,}'|[^\s,;#]{4,})`)
 var awsKeyRE = regexp.MustCompile(`\bAKIA[A-Z0-9]{16}\b`)
 
 // Vendor prefixes are matched explicitly rather than left to the entropy rule,
@@ -47,7 +54,13 @@ var oracleDSNRE = regexp.MustCompile(`(?i)\b(jdbc:oracle:[a-z]+:)[^\s/@"']+/[^\s
 // Java and Spring configuration states a credential as an element or a pair of
 // attributes, neither of which is an assignment. <password>value</password> and
 // <property name="password" value="value"/> were both returned in full.
-var xmlSecretElementRE = regexp.MustCompile(`(?i)<(password|passwd|secret|token|api[_-]?key|client[_-]?secret|credential)\s*>([^<\r\n]{4,})</`)
+//
+// An element usually carries a namespace prefix in the files this platform
+// indexes -- soapUI projects, WSDL bindings, WebSphere and Spring descriptors
+// all write <con:password> -- and requiring the name to follow "<" directly
+// missed every one of them. The prefix is captured with the name so the closing
+// tag still matches the opening one after the value is replaced.
+var xmlSecretElementRE = regexp.MustCompile(`(?i)<((?:[a-z0-9_.-]+:)?(?:password|passwd|secret|token|api[_-]?key|client[_-]?secret|credential))\s*>([^<\r\n]{4,})</`)
 var xmlSecretAttributeRE = regexp.MustCompile(`(?i)(name\s*=\s*"[^"\r\n]*(?:password|passwd|secret|token|credential)[^"\r\n]*"\s+value\s*=\s*")[^"\r\n]{4,}"`)
 
 // A command line is where a credential is most often written down for someone
