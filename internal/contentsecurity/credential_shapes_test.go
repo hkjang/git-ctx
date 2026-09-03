@@ -76,6 +76,30 @@ func TestCredentialShapesAnInstallationActuallyHolds(t *testing.T) {
 			input:  `machine bitbucket.company login svc-ci password s3cr3tvalue`,
 			leaked: "s3cr3tvalue", kept: "bitbucket.company",
 		},
+		{
+			// The closing quote of the name sat between it and the colon, so the
+			// assignment rule never matched a single JSON config file.
+			name:   "a JSON configuration file, whose key is quoted",
+			input:  `{"database": {"user": "app", "password": "hunter22"}}`,
+			leaked: "hunter22", kept: `"password"`,
+		},
+		{
+			name:   "a quoted key with spaces around the colon",
+			input:  `  "client_secret" : "s3cr3tvalue",`,
+			leaked: "s3cr3tvalue", kept: `"client_secret"`,
+		},
+		{
+			name:   "a Terraform variable, whose quoted name is assigned with =",
+			input:  `"api_key" = "abcd1234efgh"`,
+			leaked: "abcd1234efgh", kept: `"api_key"`,
+		},
+		{
+			// soapUI, WSDL and WebSphere descriptors all prefix the element, and
+			// requiring the name to follow "<" directly missed every one of them.
+			name:   "a namespaced XML element",
+			input:  `<con:password>Sup3rSecret</con:password>`,
+			leaked: "Sup3rSecret", kept: `</con:password>`,
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			masked, finding := Sanitize(c.input)
@@ -105,6 +129,10 @@ func TestOrdinaryContentIsLeftAlone(t *testing.T) {
 		`user@example.com is the contact for this service`,
 		`git@bitbucket.company:kcb/app.git`,
 		`curl https://api.company/v1/health`,
+		// A quoted name is only a credential when something is assigned to it.
+		`fields["password"] = lookup(name)`,
+		`"password" is the field the login form posts`,
+		`the "token" column is never null`,
 	} {
 		if masked, finding := Sanitize(input); masked != input {
 			t.Errorf("ordinary content was masked as %q:\n  in:  %s\n  out: %s", finding, input, masked)
