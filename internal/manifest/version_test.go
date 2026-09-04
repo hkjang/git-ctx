@@ -58,15 +58,16 @@ func TestBelowAnswersTheAdvisoryQuestion(t *testing.T) {
 	}
 }
 
-// A range only resolves upwards, so it decides the advisory in one direction
-// only. Treating "^18.2.0" as affected because its floor is below the fix would
-// flood the report with repositories that are probably already patched.
+// An open range only resolves upwards, so it decides the advisory in one
+// direction only. Treating "^18.2.0" as affected because its floor is below the
+// fix would flood the report with repositories that are probably already
+// patched: it still reaches 18.3.0 and everything up to 19.
 func TestRangeBelowTheFixIsUndecided(t *testing.T) {
 	if _, decided := Below("^18.2.0", "18.3.0"); decided {
-		t.Fatal("a caret range below the fix cannot be decided")
+		t.Fatal("a caret range that still reaches the fix cannot be decided")
 	}
-	if _, decided := Below("~2.14.0", "2.17.1"); decided {
-		t.Fatal("a tilde range below the fix cannot be decided")
+	if _, decided := Below("~2.14.0", "2.14.5"); decided {
+		t.Fatal("a tilde range that still reaches the fix cannot be decided")
 	}
 	if _, decided := Below(">=2.14.1", "2.17.1"); decided {
 		t.Fatal("an open lower bound below the fix cannot be decided")
@@ -154,5 +155,67 @@ func TestCeilingResolvesDownwards(t *testing.T) {
 	}
 	if _, decided := Below("<=2.0.0", "2.0.0"); decided {
 		t.Fatal("an inclusive ceiling still reaches the fix itself")
+	}
+}
+
+// A caret or tilde floor is not an open range: it stops one component up. When
+// the whole range sits below the fix, nothing the build can resolve to carries
+// it, and answering "undecidable from the manifest" left an operator to work
+// that out by hand for the two shapes npm, Cargo and PEP 440 manifests are
+// mostly written in.
+func TestBoundedRangeBelowTheFixIsAffected(t *testing.T) {
+	affected := []struct{ declared, fixed string }{
+		// The caret stops at the next major, so a fix released there is out of reach.
+		{"^1.2.3", "2.0.0"},
+		{"^18.2.0", "19.0.0"},
+		{"^1.2.3", "3.1.4"},
+		// Below 1.0.0 the caret stops at the next minor, and below 0.1.0 at the
+		// next patch — the range npm, Cargo and Composer all agree on.
+		{"^0.2.3", "0.3.0"},
+		{"^0.0.3", "0.0.4"},
+		// The tilde keeps major and minor, in both the npm and the PEP 440 spelling.
+		{"~2.14.0", "2.15.0"},
+		{"~2.14.0", "2.17.1"},
+		{"~=2.4.1", "2.5.0"},
+		{"~=1.2.3", "9.9.9"},
+		// A two-component tilde is read the widest way either ecosystem allows,
+		// which still stops at the next major.
+		{"~1.2", "2.0.0"},
+	}
+	for _, item := range affected {
+		below, decided := Below(item.declared, item.fixed)
+		if !decided || !below {
+			t.Fatalf("Below(%q,%q)=%v decided=%v; the range cannot reach the fix",
+				item.declared, item.fixed, below, decided)
+		}
+	}
+	// A fix inside the range leaves both answers open, and an open floor has no
+	// ceiling to decide anything with.
+	undecided := []struct{ declared, fixed string }{
+		{"^1.2.3", "1.9.0"},
+		{"^0.2.3", "0.2.9"},
+		{"~2.14.0", "2.14.9"},
+		{"~=2.4.1", "2.4.7"},
+		{">=2.14.1", "9.9.9"},
+		{">2.14.1", "9.9.9"},
+		// A declaration that names fewer components says less about where it stops,
+		// and the ecosystems disagree: npm reads "~1.2" as stopping at 1.3.0 while
+		// PEP 440 reads "~=1.2" as stopping at 2.0.0, and npm reads "^0.2" as
+		// stopping at 0.3.0. The wider reading is used, so a fix inside the gap
+		// between the two readings stays open rather than being called affected.
+		{"~1.2", "1.5.0"},
+		{"^0.2", "0.9.0"},
+	}
+	for _, item := range undecided {
+		if below, decided := Below(item.declared, item.fixed); decided {
+			t.Fatalf("Below(%q,%q)=%v was decided; the range still reaches the fix",
+				item.declared, item.fixed, below)
+		}
+	}
+	// At or above the fix the floor alone still answers, ceiling or not.
+	for _, declared := range []string{"^18.4.0", "~18.4.0", "~=18.4.0", ">=18.4.0"} {
+		if below, decided := Below(declared, "18.3.0"); !decided || below {
+			t.Fatalf("Below(%q,\"18.3.0\")=%v decided=%v; a floor at the fix is safe", declared, below, decided)
+		}
 	}
 }
