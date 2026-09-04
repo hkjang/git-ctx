@@ -40,10 +40,17 @@ func Compare(left, right string) (int, bool) {
 // which is how an advisory is phrased: "fixed in 2.17.1".
 //
 // A range is only decidable in the direction it resolves. ">=2.17.1" cannot
-// resolve below the fix, so it is safe. "^18.2.0" may resolve to 18.2.0 or to
-// 18.9.9, so a floor below the fix decides nothing — calling it affected would
-// flood an advisory with repositories that are probably already patched, and
-// calling it safe would hide the ones that are not.
+// resolve below the fix, so it is safe. ">=2.14.1" may resolve to anything above
+// its floor, so a floor below the fix decides nothing — calling it affected
+// would flood an advisory with repositories that are probably already patched,
+// and calling it safe would hide the ones that are not.
+//
+// A caret or tilde floor is not open, though. "~2.14.0" cannot reach 2.15.0 and
+// "^1.2.3" cannot reach 2.0.0, so when the whole range sits below the fix no
+// release it can pick carries it. Reading those as open-ended answered the two
+// shapes npm, Cargo and PEP 440 manifests are mostly written in with "cannot be
+// decided from the manifest", which is the sentence an operator has to resolve
+// by hand for every repository in the report.
 //
 // A ceiling resolves the other way. "requests<3" cannot resolve to anything at
 // or above 3, so against a fix in 3.0.0 every release it can pick is affected,
@@ -51,26 +58,33 @@ func Compare(left, right string) (int, bool) {
 // all-clear. Above the fix a ceiling decides nothing: "<3.0.0" against a fix in
 // 2.0.0 may resolve to 2.5.0 or to 1.4.0.
 func Below(declared, fixed string) (bool, bool) {
-	left, kind, ok := parseDeclared(declared)
+	left, ok := parseDeclared(declared)
 	if !ok {
 		return false, false
 	}
-	right, _, ok := parseDeclared(fixed)
+	right, ok := parseDeclared(fixed)
 	if !ok {
 		return false, false
 	}
-	order := left.compare(right)
-	switch kind {
+	order := left.version.compare(right.version)
+	switch left.kind {
 	case boundExact:
 		return order < 0, true
 	case boundFloor:
 		// At or above the fix a floor is safe, because it only resolves upwards.
-		// Below it, the range spans both answers.
-		return false, order >= 0
+		if order >= 0 {
+			return false, true
+		}
+		// Below it, an open floor spans both answers; a bounded one does not once
+		// its ceiling — the first release it cannot reach — is at or below the fix.
+		if left.bounded && left.ceiling.compare(right.version) <= 0 {
+			return true, true
+		}
+		return false, false
 	default:
 		// A ceiling at or below the fix leaves nothing above it to resolve to;
 		// "<=2.0.0" against a fix in 2.0.0 still reaches the fix itself.
-		if order < 0 || (kind == boundBelow && order == 0) {
+		if order < 0 || (left.kind == boundBelow && order == 0) {
 			return true, true
 		}
 		return false, false
@@ -88,6 +102,17 @@ const (
 	boundAtMost
 )
 
+// bound is one declaration read as a range: the concrete release it names, the
+// direction it can move from there, and — for the shapes that have one — the
+// first release it cannot reach.
+type bound struct {
+	version version
+	kind    boundKind
+	// ceiling is exclusive: the range covers everything below it, never it.
+	ceiling version
+	bounded bool
+}
+
 type version struct {
 	numbers    []int
 	prerelease string
@@ -103,36 +128,46 @@ var rangeOperators = []string{">=", "<=", "==", "~=", "^", "~", ">", "<", "=", "
 // that there is none. Wildcards, ranges with no numeric floor, git references
 // and "latest" are all undecidable by design.
 func parseVersion(declared string) (version, bool) {
-	parsed, _, ok := parseDeclared(declared)
-	return parsed, ok
+	parsed, ok := parseDeclared(declared)
+	return parsed.version, ok
 }
 
 // parseDeclared also reports which way the declaration can resolve, which
 // decides whether a comparison against the fix means anything.
-func parseDeclared(declared string) (version, boundKind, bool) {
+func parseDeclared(declared string) (bound, bool) {
 	value := strings.TrimSpace(declared)
 	if value == "" {
-		return version{}, boundExact, false
+		return bound{}, false
 	}
 	// A compound range ("&gt;=1.2,&lt;2.0") has no single floor worth trusting.
 	if strings.ContainsAny(value, ",|") || strings.Contains(value, " - ") {
-		return version{}, boundExact, false
+		return bound{}, false
 	}
 	lower := strings.ToLower(value)
 	for _, word := range []string{"latest", "*", "x", "main", "master", "file:", "git+", "http", "workspace:", "link:"} {
 		if strings.HasPrefix(lower, word) {
-			return version{}, boundExact, false
+			return bound{}, false
 		}
 	}
 	// "==1.2.3" and "v1.2.3" pin exactly; "^", "~", ">=" and ">" resolve upwards
-	// from the number that follows them, "<" and "<=" downwards from it.
-	kind := boundExact
+	// from the number that follows them, "<" and "<=" downwards from it. The
+	// caret and the tilde also stop somewhere, which the rest do not.
+	kind, ceiling := boundExact, ceilingNone
 	for _, operator := range []struct {
-		prefix string
-		kind   boundKind
-	}{{"^", boundFloor}, {"~=", boundFloor}, {"~", boundFloor}, {">=", boundFloor}, {">", boundFloor}, {"<=", boundAtMost}, {"<", boundBelow}} {
+		prefix  string
+		kind    boundKind
+		ceiling ceilingRule
+	}{
+		{"^", boundFloor, ceilingCaret},
+		{"~=", boundFloor, ceilingTilde},
+		{"~", boundFloor, ceilingTilde},
+		{">=", boundFloor, ceilingNone},
+		{">", boundFloor, ceilingNone},
+		{"<=", boundAtMost, ceilingNone},
+		{"<", boundBelow, ceilingNone},
+	} {
 		if strings.HasPrefix(value, operator.prefix) {
-			kind = operator.kind
+			kind, ceiling = operator.kind, operator.ceiling
 			break
 		}
 	}
@@ -148,7 +183,7 @@ func parseDeclared(declared string) (version, boundKind, bool) {
 		value = trimmed
 	}
 	if value == "" {
-		return version{}, boundExact, false
+		return bound{}, false
 	}
 	core, prerelease := value, ""
 	// Build metadata is not part of precedence, and reading it as a pre-release
@@ -165,19 +200,67 @@ func parseDeclared(declared string) (version, boundKind, bool) {
 	numbers := make([]int, 0, len(parts))
 	for _, part := range parts {
 		if part == "" {
-			return version{}, boundExact, false
+			return bound{}, false
 		}
 		// A wildcard segment ("1.2.x") leaves the release unknown.
 		number, err := strconv.Atoi(part)
 		if err != nil {
-			return version{}, boundExact, false
+			return bound{}, false
 		}
 		numbers = append(numbers, number)
 	}
 	if len(numbers) == 0 {
-		return version{}, boundExact, false
+		return bound{}, false
 	}
-	return version{numbers: numbers, prerelease: prerelease}, kind, true
+	result := bound{version: version{numbers: numbers, prerelease: prerelease}, kind: kind}
+	result.ceiling, result.bounded = rangeCeiling(ceiling, numbers)
+	return result, true
+}
+
+// ceilingRule is how an operator bounds the range above its floor.
+type ceilingRule int
+
+const (
+	ceilingNone ceilingRule = iota
+	ceilingCaret
+	ceilingTilde
+)
+
+// rangeCeiling returns the first release a caret or tilde range cannot reach.
+//
+// The caret keeps the leftmost non-zero component — "^1.2.3" stops at 2.0.0,
+// "^0.2.3" at 0.3.0, "^0.0.3" at 0.0.4 — and the tilde keeps major and minor,
+// so "~1.2.3" and PEP 440's "~=1.2.3" both stop at 1.3.0.
+//
+// A declaration that states fewer components says less about where it stops,
+// and the ecosystems disagree there: npm reads "~1.2" as stopping at 1.3.0 and
+// "^0.2" as stopping at 0.3.0, while PEP 440 reads "~=1.2" as stopping at
+// 2.0.0. The widest of the readings is used,
+// because a ceiling is only ever used to call a repository affected and an
+// over-tight one would invent that verdict.
+func rangeCeiling(rule ceilingRule, numbers []int) (version, bool) {
+	if rule == ceilingNone || len(numbers) == 0 {
+		return version{}, false
+	}
+	index := 0
+	if len(numbers) >= 3 {
+		switch rule {
+		case ceilingCaret:
+			// "^0.0.0" has no non-zero component to keep; it stops at 0.0.1.
+			index = len(numbers) - 1
+			for at, number := range numbers {
+				if number != 0 {
+					index = at
+					break
+				}
+			}
+		case ceilingTilde:
+			index = 1
+		}
+	}
+	raised := append([]int(nil), numbers[:index+1]...)
+	raised[index]++
+	return version{numbers: raised}, true
 }
 
 func (v version) compare(other version) int {
