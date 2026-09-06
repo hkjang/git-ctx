@@ -133,7 +133,12 @@ WHERE r.enabled=1 AND ` + predicate + ` AND (pkg.name_lower=LOWER(?) OR pkg.name
 	defer rows.Close()
 	seen := map[string]bool{}
 	repositories := map[string]bool{}
-	versions := map[string]map[string]bool{}
+	// Every deduplicated row, not only the ones the limit lets through: the
+	// version grouping and the advisory judgement speak for the whole match, and
+	// building them from the truncated list would drop repositories from the
+	// answer without saying so.
+	var declarations []DependencyUser
+	others := map[string]bool{}
 	scanned := 0
 	for rows.Next() {
 		var item DependencyUser
@@ -150,15 +155,11 @@ WHERE r.enabled=1 AND ` + predicate + ` AND (pkg.name_lower=LOWER(?) OR pkg.name
 		if len(result.Users) < limit {
 			result.Users = append(result.Users, item)
 		}
+		declarations = append(declarations, item)
+		if !namesPackage(name, item.Name) {
+			others[item.Name] = true
+		}
 		repositories[item.LibraryID] = true
-		declared := item.Version
-		if strings.TrimSpace(declared) == "" {
-			declared = "(선언 없음)"
-		}
-		if versions[declared] == nil {
-			versions[declared] = map[string]bool{}
-		}
-		versions[declared][item.LibraryID] = true
 	}
 	if err = rows.Err(); err != nil {
 		span.Fail(err)
@@ -172,23 +173,9 @@ WHERE r.enabled=1 AND ` + predicate + ` AND (pkg.name_lower=LOWER(?) OR pkg.name
 		return DependencyUsage{}, err
 	}
 	result.Repositories = len(repositories)
-	for version, users := range versions {
-		list := make([]string, 0, len(users))
-		for library := range users {
-			list = append(list, library)
-		}
-		sort.Strings(list)
-		result.Versions = append(result.Versions, DependencyVersion{Version: version, Repositories: list})
-	}
-	// Most-used version first: that is the one an upgrade converges on.
-	sort.SliceStable(result.Versions, func(i, j int) bool {
-		if len(result.Versions[i].Repositories) != len(result.Versions[j].Repositories) {
-			return len(result.Versions[i].Repositories) > len(result.Versions[j].Repositories)
-		}
-		return result.Versions[i].Version > result.Versions[j].Version
-	})
+	result.Versions = groupVersions(declarations, nil)
 	if fixedIn != "" {
-		result = classifyAgainstFix(result, fixedIn)
+		result = classifyAgainstFix(result, declarations, fixedIn)
 		result.Owners = s.declaredOwnersFor(ctx, principals, result)
 	}
 	// An advisory answer is only as current as the index behind it. A repository
@@ -234,6 +221,14 @@ WHERE r.enabled=1 AND ` + predicate + ` AND (pkg.name_lower=LOWER(?) OR pkg.name
 			result.Diagnostics = append(result.Diagnostics,
 				fmt.Sprintf("advisory: %d개 저장소는 락파일에 해석된 버전으로 판정했습니다. 선언된 범위가 아니라 실제 빌드가 쓰는 버전입니다.", resolvedCount))
 		}
+		if len(others) > 0 {
+			// Left out of the judgement, not out of the answer: the declarations are
+			// still listed, and naming them is what lets an operator see that the
+			// query was wider than the advisory.
+			result.Diagnostics = append(result.Diagnostics,
+				fmt.Sprintf("advisory: 이름이 부분만 일치하는 다른 패키지 %d개(%s)의 선언은 판정에서 제외했습니다. 그 패키지의 권고라면 정확한 이름으로 다시 질의하세요.",
+					len(others), strings.Join(namesSample(others), ", ")))
+		}
 		if len(result.Undecided) > 0 {
 			// The undecided set is the honest part of the answer: a caret range or a
 			// floating version cannot be judged from the manifest alone, and calling
@@ -248,20 +243,27 @@ WHERE r.enabled=1 AND ` + predicate + ` AND (pkg.name_lower=LOWER(?) OR pkg.name
 // classifyAgainstFix labels each version group against the release that fixes
 // an advisory, and counts repositories rather than declarations because that is
 // the unit of work an upgrade is planned in.
-func classifyAgainstFix(result DependencyUsage, fixedIn string) DependencyUsage {
+func classifyAgainstFix(result DependencyUsage, declarations []DependencyUser, fixedIn string) DependencyUsage {
+	// Only declarations of the package the advisory is about are judged. The
+	// inventory query matches a substring on purpose, and everything below reads
+	// a version as if it belonged to the queried package.
+	judged := make([]DependencyUser, 0, len(declarations))
+	for _, user := range declarations {
+		if namesPackage(result.Query, user.Name) {
+			judged = append(judged, user)
+		}
+	}
 	// A repository that has a lock file is judged by what its build resolved, not
 	// by the range that produced it. Without this a repository with a perfectly
 	// decidable lock file would still be reported as undecidable because its
 	// manifest says "^18.2.0".
 	resolved := map[string]bool{}
-	for _, user := range result.Users {
+	for _, user := range judged {
 		if user.Scope == "resolved" {
 			resolved[user.LibraryID] = true
 		}
 	}
-	if len(resolved) > 0 {
-		result = regroupPreferringResolved(result, resolved)
-	}
+	result.Versions = groupVersions(judged, resolved)
 	affected, safe, undecided := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for index, group := range result.Versions {
 		below, decided := manifest.Below(group.Version, fixedIn)
@@ -301,13 +303,47 @@ func classifyAgainstFix(result DependencyUsage, fixedIn string) DependencyUsage 
 	return result
 }
 
-// regroupPreferringResolved rebuilds the version grouping so that a repository
-// with a lock file contributes only its resolved versions. The declared range
-// stays in the declaration list — it is what a fix has to edit — but it no
-// longer decides whether the repository is affected.
-func regroupPreferringResolved(result DependencyUsage, resolved map[string]bool) DependencyUsage {
+// namesPackage reports whether a matched declaration names the package that was
+// asked about.
+//
+// The inventory query matches a substring so that "log4j" finds
+// "org.apache.logging.log4j:log4j-core" and "log4j-core" finds it too — an
+// operator reading an advisory has the library's common name, not the
+// coordinate the manifest spells. The same substring rule also makes "requests"
+// find "requests-toolbelt", and during an advisory that is not a nuisance but a
+// wrong answer: the toolbelt's 0.10.1 read as a version of requests reports a
+// repository as affected by a vulnerability in a library it does not use.
+//
+// The rule keeps the coordinate and drops the coincidence: the query has to be
+// the whole name, or a whole segment of it — a maven group or artifact, a path
+// element of a module or scoped package, or the last dot-separated part of a
+// group. A name that only shares a prefix or a hyphenated word is a different
+// package.
+func namesPackage(query, name string) bool {
+	query, name = strings.ToLower(strings.TrimSpace(query)), strings.ToLower(strings.TrimSpace(name))
+	if query == "" || query == name {
+		return true
+	}
+	// A GitHub-style advisory names "gin-gonic/gin", which is the tail of the
+	// module path rather than one segment of it.
+	if strings.HasSuffix(name, "/"+query) || strings.HasSuffix(name, ":"+query) {
+		return true
+	}
+	for _, segment := range strings.FieldsFunc(name, func(r rune) bool { return r == ':' || r == '/' }) {
+		if segment == query || strings.HasSuffix(segment, "."+query) {
+			return true
+		}
+	}
+	return false
+}
+
+// groupVersions collects the repositories that declare each version. A
+// repository listed in resolved contributes only its lock file's versions: the
+// declared range stays in the declaration list — it is what a fix has to edit —
+// but it no longer decides whether the repository is affected.
+func groupVersions(declarations []DependencyUser, resolved map[string]bool) []DependencyVersion {
 	versions := map[string]map[string]bool{}
-	for _, user := range result.Users {
+	for _, user := range declarations {
 		if resolved[user.LibraryID] && user.Scope != "resolved" {
 			continue
 		}
@@ -320,18 +356,18 @@ func regroupPreferringResolved(result DependencyUsage, resolved map[string]bool)
 		}
 		versions[declared][user.LibraryID] = true
 	}
-	regrouped := result
-	regrouped.Versions = make([]DependencyVersion, 0, len(versions))
+	grouped := make([]DependencyVersion, 0, len(versions))
 	for version, libraries := range versions {
-		regrouped.Versions = append(regrouped.Versions, DependencyVersion{Version: version, Repositories: sortedLibraries(libraries)})
+		grouped = append(grouped, DependencyVersion{Version: version, Repositories: sortedLibraries(libraries)})
 	}
-	sort.SliceStable(regrouped.Versions, func(i, j int) bool {
-		if len(regrouped.Versions[i].Repositories) != len(regrouped.Versions[j].Repositories) {
-			return len(regrouped.Versions[i].Repositories) > len(regrouped.Versions[j].Repositories)
+	// Most-used version first: that is the one an upgrade converges on.
+	sort.SliceStable(grouped, func(i, j int) bool {
+		if len(grouped[i].Repositories) != len(grouped[j].Repositories) {
+			return len(grouped[i].Repositories) > len(grouped[j].Repositories)
 		}
-		return regrouped.Versions[i].Version > regrouped.Versions[j].Version
+		return grouped[i].Version > grouped[j].Version
 	})
-	return regrouped
+	return grouped
 }
 
 // usedLibraries lists the repositories an answer drew on, in a stable order.
@@ -363,6 +399,18 @@ func statusRank(status string) int {
 	default:
 		return 2
 	}
+}
+
+// namesSample lists the excluded package names, bounded so one query that
+// matched dozens of neighbours does not push the rest of the notes out of the
+// response budget.
+func namesSample(set map[string]bool) []string {
+	const maxNames = 5
+	names := sortedLibraries(set)
+	if len(names) > maxNames {
+		names = append(names[:maxNames:maxNames], fmt.Sprintf("외 %d개", len(names)-maxNames))
+	}
+	return names
 }
 
 func sortedLibraries(set map[string]bool) []string {
