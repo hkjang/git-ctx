@@ -518,12 +518,13 @@ VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET co
 		// every manifest and lock file of a ref in memory at once is a real cost:
 		// a lock file is megabytes, and a monorepo has dozens.
 		if path := filepath.ToSlash(file.Path); !parsedManifests[path] {
-			if _, isManifest := manifest.Recognize(path); isManifest {
+			_, isManifest := manifest.Recognize(path)
+			_, isLock := manifest.RecognizeLock(path)
+			if isManifest || isLock {
 				parsedManifests[path] = true
-				packages = appendPackages(packages, path, safeContent)
-			} else if _, isLock := manifest.RecognizeLock(path); isLock {
-				parsedManifests[path] = true
-				packages = appendPackages(packages, path, safeContent)
+				var notes []string
+				packages, notes = appendPackages(packages, path, safeContent)
+				manifestWarnings = append(manifestWarnings, notes...)
 			}
 		}
 		contentLines := strings.Split(strings.ReplaceAll(safeContent, "\r\n", "\n"), "\n")
@@ -578,10 +579,8 @@ VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET co
 	// happens to exclude .json or .xml would be worse than none. The count is
 	// bounded so a monorepo of a thousand packages cannot turn one index run into
 	// a thousand extra round trips.
+	deferredManifests := 0
 	for _, file := range files {
-		if len(parsedManifests) >= maxManifestsPerRef {
-			break
-		}
 		path := filepath.ToSlash(file.Path)
 		if parsedManifests[path] {
 			continue
@@ -591,12 +590,22 @@ VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET co
 		if !isManifest && !isLock {
 			continue
 		}
+		// The cap is applied here rather than at the top of the loop so reaching
+		// it counts the manifests actually left unread. Breaking out early could
+		// not tell "sixty manifests, all read" from "sixty read and forty
+		// dropped", and reported both as a complete inventory.
+		if len(parsedManifests) >= maxManifestsPerRef {
+			deferredManifests++
+			continue
+		}
 		limit := int64(manifest.MaxManifestBytes)
 		if isLock {
 			// A lock file is large by nature; it is read up to its own bound.
 			limit = manifest.MaxLockBytes
 		}
 		if file.Size > limit {
+			manifestWarnings = append(manifestWarnings, fmt.Sprintf(
+				"manifest %s: %d bytes is over the %d byte read limit, so its dependencies are not in the inventory", path, file.Size, limit))
 			continue
 		}
 		raw, readErr := adapter.GetFile(ctx, repo, snapshotRef, file.Path)
@@ -609,7 +618,13 @@ VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repository_id,ref_name) DO UPDATE SET co
 		}
 		safeManifest, _ := sanitize(string(raw))
 		parsedManifests[path] = true
-		packages = appendPackages(packages, path, safeManifest)
+		var notes []string
+		packages, notes = appendPackages(packages, path, safeManifest)
+		manifestWarnings = append(manifestWarnings, notes...)
+	}
+	if deferredManifests > 0 {
+		manifestWarnings = append(manifestWarnings, fmt.Sprintf(
+			"%d further manifest file(s) were not read: one ref parses at most %d, so the inventory is partial", deferredManifests, maxManifestsPerRef))
 	}
 	// A ref with an enormous number of declarations is bounded here rather than
 	// at write time, so the inventory stays a catalogue instead of a copy of
@@ -1012,19 +1027,29 @@ type inventoryPackage struct {
 // appendPackages parses one manifest or lock file and adds what it declares.
 // A package declared by two files is kept once per file, because "which file
 // declares this" is what an upgrade has to edit.
-func appendPackages(out []inventoryPackage, path, content string) []inventoryPackage {
+// A file the parsers could not cover whole returns a note, which the caller
+// carries into the job warning: an inventory that is quietly partial reads, in
+// an advisory, exactly like an inventory that is complete and clean.
+func appendPackages(out []inventoryPackage, path, content string) ([]inventoryPackage, []string) {
 	// A manifest states intent and a lock file states the resolved result. Both
 	// are recorded: the first is what a team edits, the second is what an
 	// advisory can actually judge.
-	declared := manifest.Parse(path, content)
-	declared = append(declared, manifest.ParseLock(path, content)...)
+	declared, manifestNote := manifest.ParseNoted(path, content)
+	locked, lockNote := manifest.ParseLockNoted(path, content)
+	declared = append(declared, locked...)
 	for _, item := range declared {
 		if strings.TrimSpace(item.Name) == "" {
 			continue
 		}
 		out = append(out, inventoryPackage{Package: item, ManifestPath: path})
 	}
-	return out
+	var notes []string
+	for _, note := range []string{manifestNote, lockNote} {
+		if note != "" {
+			notes = append(notes, note)
+		}
+	}
+	return out, notes
 }
 
 func (i *Indexer) recordFiles(ctx context.Context, tx *sql.Tx, repoID string, ref source.Reference, files []source.File, incremental bool, removed map[string]bool) error {

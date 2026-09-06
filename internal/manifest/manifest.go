@@ -15,6 +15,7 @@ package manifest
 
 import (
 	"encoding/json"
+	"fmt"
 	"path"
 	"regexp"
 	"strings"
@@ -62,10 +63,32 @@ const MaxManifestBytes = 1 << 20
 
 // Parse extracts the dependencies declared by one manifest.
 func Parse(filePath, content string) []Package {
+	packages, _ := ParseNoted(filePath, content)
+	return packages
+}
+
+// ParseNoted extracts the dependencies declared by one manifest and reports, in
+// a note, what the read could not cover. The note is empty when the manifest was
+// read whole; a caller that indexes manifests surfaces it so the gap is visible.
+//
+// A manifest over MaxManifestBytes used to return nil with no trace. One
+// generated package.json a megabyte long therefore removed its repository from
+// the inventory, and an advisory query read that absence as "this repository
+// does not use the library" — the one answer the inventory must never invent.
+// The limit still holds; it no longer holds quietly.
+func ParseNoted(filePath, content string) ([]Package, string) {
 	ecosystem, ok := Recognize(filePath)
-	if !ok || len(content) > MaxManifestBytes {
-		return nil
+	if !ok {
+		return nil, ""
 	}
+	if len(content) > MaxManifestBytes {
+		return nil, fmt.Sprintf("manifest %s: %d bytes is over the %d byte manifest limit, so none of its dependencies are in the inventory",
+			filePath, len(content), MaxManifestBytes)
+	}
+	return parseManifest(ecosystem, filePath, content), ""
+}
+
+func parseManifest(ecosystem, filePath, content string) []Package {
 	switch ecosystem {
 	case "go":
 		return parseGoMod(content)

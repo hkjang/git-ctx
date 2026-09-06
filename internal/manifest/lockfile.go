@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"encoding/json"
+	"fmt"
 	"path"
 	"regexp"
 	"strings"
@@ -46,9 +47,28 @@ const MaxLockPackages = 4000
 // package has Scope "resolved", which is what marks it as authoritative for an
 // advisory.
 func ParseLock(filePath, content string) []Package {
+	packages, _ := ParseLockNoted(filePath, content)
+	return packages
+}
+
+// ParseLockNoted extracts the resolved packages of one lock file and reports, in
+// a note, what it could not record. The note is empty when the lock file was
+// read whole.
+//
+// Both bounds below used to apply in silence, and both remove resolved versions
+// — the only declarations an advisory can judge outright. A lock over
+// MaxLockBytes dropped its repository from the inventory entirely; a lock over
+// MaxLockPackages kept an arbitrary prefix of it, and because go.sum is sorted
+// by module path, the names that vanished were a contiguous alphabetical tail.
+// Either way the repository reads as "not affected" for what was cut.
+func ParseLockNoted(filePath, content string) ([]Package, string) {
 	ecosystem, ok := RecognizeLock(filePath)
-	if !ok || len(content) > MaxLockBytes {
-		return nil
+	if !ok {
+		return nil, ""
+	}
+	if len(content) > MaxLockBytes {
+		return nil, fmt.Sprintf("lock file %s: %d bytes is over the %d byte lock limit, so none of its resolved versions are in the inventory",
+			filePath, len(content), MaxLockBytes)
 	}
 	base := strings.ToLower(path.Base(filePath))
 	var packages []Package
@@ -69,9 +89,11 @@ func ParseLock(filePath, content string) []Package {
 		packages[index].Scope = "resolved"
 	}
 	if len(packages) > MaxLockPackages {
-		packages = packages[:MaxLockPackages]
+		note := fmt.Sprintf("lock file %s: %d resolved packages is over the %d recorded per file, so %d of them are not in the inventory",
+			filePath, len(packages), MaxLockPackages, len(packages)-MaxLockPackages)
+		return packages[:MaxLockPackages], note
 	}
-	return packages
+	return packages, ""
 }
 
 // parseGoSum reads module versions. Each module appears twice — once for the
