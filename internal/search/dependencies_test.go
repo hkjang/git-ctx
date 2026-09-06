@@ -495,3 +495,102 @@ pom.xml @payments-team','h-api')`)
 		t.Fatalf("owners were looked up without an advisory: %#v", plain.Owners)
 	}
 }
+
+// The inventory query matches a substring so an operator can find a coordinate
+// from the library's common name. During an advisory that same rule used to
+// judge a neighbouring package's version against this package's fix, so a
+// repository that depends on requests-toolbelt was reported as affected by an
+// advisory for requests — a wrong answer in the one place the tool exists to be
+// right.
+func TestAdvisoryJudgesOnlyTheQueriedPackage(t *testing.T) {
+	db := inventoryFixture(t, "dependency-neighbour")
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.DB.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	add := func(repository, name, version string) {
+		exec(`INSERT INTO repository_packages(repository_id,ref_name,ecosystem,name,name_lower,version,scope,manifest_path,commit_id) VALUES(?,'main','pypi',?,?,?,'direct','requirements.txt','abc')`,
+			repository, name, strings.ToLower(name), version)
+	}
+	add("api", "requests", "2.20.0")
+	add("worker", "requests-toolbelt", "0.10.1")
+	add("console", "requests-mock", "1.11.0")
+
+	result, err := New(db).FindDependencyUsage(context.Background(), []string{"alice"}, "requests", "", "", "2.31.0", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(result.Affected, ",") != "/core/api" {
+		t.Fatalf("only the repository that declares requests is affected: affected=%v", result.Affected)
+	}
+	if len(result.Safe) != 0 || len(result.Undecided) != 0 {
+		t.Fatalf("a different package must not be judged at all: safe=%v undecided=%v", result.Safe, result.Undecided)
+	}
+	for _, version := range result.Versions {
+		if version.Version != "2.20.0" {
+			t.Fatalf("a neighbouring package's version was judged: %#v", version)
+		}
+	}
+	// The declarations are still listed and the exclusion is stated, so nothing
+	// disappears without the operator being told.
+	if len(result.Users) != 3 {
+		t.Fatalf("the substring matches must stay in the answer: %#v", result.Users)
+	}
+	joined := strings.Join(result.Diagnostics, " ")
+	if !strings.Contains(joined, "requests-mock, requests-toolbelt") || !strings.Contains(joined, "판정에서 제외") {
+		t.Fatalf("the excluded packages must be named: %v", result.Diagnostics)
+	}
+
+	// Without an advisory the wider match is a discovery aid, not a claim, and
+	// stays exactly as it was.
+	plain, err := New(db).FindDependencyUsage(context.Background(), []string{"alice"}, "requests", "", "", "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plain.Versions) != 3 {
+		t.Fatalf("the plain inventory must still group every match: %#v", plain.Versions)
+	}
+	if strings.Contains(strings.Join(plain.Diagnostics, " "), "판정에서 제외") {
+		t.Fatalf("nothing is excluded when nothing is judged: %v", plain.Diagnostics)
+	}
+}
+
+// The coordinate an advisory is read against is rarely the one the manifest
+// spells: "log4j" has to keep reaching org.apache.logging.log4j:log4j-core, and
+// "gin-gonic/gin" the module path that ends with it.
+func TestAdvisoryStillReachesTheCoordinate(t *testing.T) {
+	db := inventoryFixture(t, "dependency-coordinate")
+	result, err := New(db).FindDependencyUsage(context.Background(), []string{"alice"}, "log4j", "", "", "2.17.1", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(result.Affected, ",") != "/core/api" {
+		t.Fatalf("the group segment must still name the package: affected=%v", result.Affected)
+	}
+	if strings.Join(result.Safe, ",") != "/core/console,/core/worker" {
+		t.Fatalf("safe=%v", result.Safe)
+	}
+	for _, name := range []string{"org.apache.logging.log4j:log4j-core", "log4j-core", "log4j", "logging.log4j"} {
+		if !namesPackage(name, "org.apache.logging.log4j:log4j-core") {
+			t.Fatalf("%q must name the coordinate", name)
+		}
+	}
+	for _, name := range []string{"gin-gonic/gin", "gin", "github.com/gin-gonic/gin"} {
+		if !namesPackage(name, "github.com/gin-gonic/gin") {
+			t.Fatalf("%q must name the module", name)
+		}
+	}
+	// A shared prefix or a hyphenated word is a different package.
+	for _, pair := range [][2]string{
+		{"requests", "requests-toolbelt"},
+		{"log4j", "org.apache.logging.log4jz:log4jz-core"},
+		{"gin", "github.com/gin-gonic/gin-contrib"},
+		{"core", "requests-core"},
+	} {
+		if namesPackage(pair[0], pair[1]) {
+			t.Fatalf("%q must not name %q", pair[0], pair[1])
+		}
+	}
+}
