@@ -2,6 +2,7 @@ package search
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -592,5 +593,74 @@ func TestAdvisoryStillReachesTheCoordinate(t *testing.T) {
 		if namesPackage(pair[0], pair[1]) {
 			t.Fatalf("%q must not name %q", pair[0], pair[1])
 		}
+	}
+}
+
+// A widely declared package must be judged in full, and a scan that stopped
+// early must say so.
+//
+// The inventory query was bounded by four times the display limit while the
+// truncation notice watched a constant five times larger, so the common case —
+// the default limit, a package a hundred repositories declare — decided
+// "affected N · safe M" from the first four hundred declarations and reported
+// the count as if it covered everything. The repositories past the cut were
+// counted as neither affected nor safe, which during an advisory reads as an
+// all-clear for them.
+func TestAdvisoryJudgesEveryMatchNotOnlyTheListedOnes(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:dependency-scan-limit?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.DB.Close() })
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.DB.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	const repositories = 12
+	for index := 0; index < repositories; index++ {
+		id := fmt.Sprintf("r%02d", index)
+		exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES(?,'core',?,?,'gitlab',?,?,'main')`,
+			id, id, id, id, "/core/"+id)
+		exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES(?,'alice','read')`, id)
+		version := "4.17.20"
+		if index%2 == 1 {
+			version = "4.17.21"
+		}
+		exec(`INSERT INTO repository_packages(repository_id,ref_name,ecosystem,name,name_lower,version,scope,manifest_path,commit_id) VALUES(?,'main','npm','lodash','lodash',?,'direct','package.json','abc')`,
+			id, version)
+	}
+
+	// A display limit of one lists one repository and used to scan four.
+	result, err := New(db).FindDependencyUsage(ctx, []string{"alice"}, "lodash", "", "", "4.17.21", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Users) != 1 {
+		t.Fatalf("the display limit still bounds the listing: %#v", result.Users)
+	}
+	if len(result.Affected)+len(result.Safe)+len(result.Undecided) != repositories {
+		t.Fatalf("every matching repository must be judged: affected=%v safe=%v undecided=%v",
+			result.Affected, result.Safe, result.Undecided)
+	}
+	// The repositories that sort last are the ones the truncated scan dropped.
+	if strings.Join(result.Affected, ",") != "/core/r00,/core/r02,/core/r04,/core/r06,/core/r08,/core/r10" {
+		t.Fatalf("affected=%v", result.Affected)
+	}
+	if joined := strings.Join(result.Diagnostics, " "); strings.Contains(joined, "조회를 끊었습니다") {
+		t.Fatalf("nothing was truncated: %v", result.Diagnostics)
+	}
+
+	// Without an advisory the display limit still bounds the scan, and the
+	// notice now reports the limit that was actually applied rather than a
+	// constant it never reached.
+	plain, err := New(db).FindDependencyUsage(ctx, []string{"alice"}, "lodash", "", "", "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(plain.Diagnostics, " "), "상위 4건만 확인했습니다") {
+		t.Fatalf("a scan that stopped early must say so: %v", plain.Diagnostics)
 	}
 }

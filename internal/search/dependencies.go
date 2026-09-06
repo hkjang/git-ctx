@@ -122,7 +122,17 @@ WHERE r.enabled=1 AND ` + predicate + ` AND (pkg.name_lower=LOWER(?) OR pkg.name
 	statement += ` ORDER BY CASE WHEN pkg.name_lower=LOWER(?) THEN 0 ELSE 1 END,` +
 		s.store.SortText("pkg.name") + `,` + s.store.SortText("r.library_id") + `,` +
 		s.store.SortText("pkg.manifest_path") + ` LIMIT ?`
-	args = append(args, name, min(limit*4, dependencyScanLimit))
+	// The display limit bounds what is listed; it must not bound what is judged.
+	// An advisory counts repositories over the whole match, so stopping the scan
+	// at four times the display limit decided "영향 3개 · 안전 9개" from the first
+	// four hundred declarations of a widely used package — and because the
+	// truncation notice below watched the constant instead of the limit actually
+	// applied, the answer never said the scan had stopped at all.
+	scanLimit := min(limit*4, dependencyScanLimit)
+	if fixedIn != "" {
+		scanLimit = dependencyScanLimit
+	}
+	args = append(args, name, scanLimit)
 
 	span := calltrace.Start(ctx, "dependency-inventory", ecosystem)
 	rows, err := s.store.DB.QueryContext(ctx, s.store.Rebind(statement), args...)
@@ -205,9 +215,16 @@ WHERE r.enabled=1 AND ` + predicate + ` AND (pkg.name_lower=LOWER(?) OR pkg.name
 		}
 		return result, nil
 	}
-	if scanned >= dependencyScanLimit {
-		result.Diagnostics = append(result.Diagnostics,
-			fmt.Sprintf("inventory: 상위 %d건만 확인했습니다. 이름을 더 정확히 지정하면 전체를 볼 수 있습니다.", dependencyScanLimit))
+	if scanned >= scanLimit {
+		// During an advisory the truncation is not a display detail: the
+		// declarations that were never read are counted as neither affected nor
+		// safe nor undecided, so the summary below is short by an unknown number of
+		// repositories and reads as an all-clear for them.
+		note := fmt.Sprintf("inventory: 상위 %d건만 확인했습니다. 이름을 더 정확히 지정하면 전체를 볼 수 있습니다.", scanLimit)
+		if fixedIn != "" {
+			note = fmt.Sprintf("inventory: 선언 %d건에서 조회를 끊었습니다. 그 뒤의 저장소는 영향·안전·판정 불가 어디에도 세지 않았으므로 아래 집계는 불완전합니다. 이름이나 생태계를 더 정확히 지정해 다시 질의하세요.", scanLimit)
+		}
+		result.Diagnostics = append(result.Diagnostics, note)
 	}
 	if len(result.Versions) > 1 {
 		result.Diagnostics = append(result.Diagnostics,
