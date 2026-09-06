@@ -27,7 +27,7 @@
 | 관리자 연동 설정 | 완료 | Keycloak·Bitbucket·GitLab·Confluence·Jira·Embedding·Reranker 전용 필드, Bitbucket/GitLab 실제 Query Search 진단과 결과 표시, 일반값 자동 재조회, 버전·수정자·시각과 비밀 필드별 마스킹·암호화 저장 |
 | OpenSearch | 완료(계약 시험) | 관리자 연결·index mapping 시험, ref별 delete/bulk projection, repository·ref·principal 선필터, DB 청크 hydration, Worker 재시도 |
 | 최초·복구 관리자 세션 | 완료 | 최초 일회용 토큰을 30분 HttpOnly·SameSite 세션으로 교환하고 실제 `platform-admin` SSO 로그인 성공 시 전역 폐기. 이후 CLI 서명 복구 토큰의 1회 소비·만료·Origin 검증·영구 MCP 키 생성 차단 |
-| 의존성 인벤토리 | 완료 | 색인 시 go.mod·package.json·pom.xml·build.gradle·requirements.txt·pyproject.toml·Cargo.toml 파싱, 내용 정책 제외 매니페스트 포함, ref 단위 교체, `find-dependency-usage` 버전 묶음과 저장소 제한 키 비노출 계약 시험 |
+| 의존성 인벤토리 | 완료 | 색인 시 go.mod·package.json·pom.xml·build.gradle·requirements.txt·pyproject.toml·Cargo.toml 파싱, 내용 정책 제외 매니페스트 포함, ref 단위 교체, 크기·개수 한계로 읽지 못한 매니페스트를 색인 작업 경고로 보고, `find-dependency-usage` 버전 묶음과 저장소 제한 키 비노출 계약 시험 |
 | 버전 표시 | 완료 | 공개 설정과 `/api/v1/me` 버전 제공, 로그인 전 상단·안내와 로그인 후 프로필 표시 |
 | 비밀정보 관리 | 완료(계약 시험) | 암호화 DB/Vault KV v2 backend, 등록·회전·중지, 원문 비노출, `secret://` 동적 참조와 Fail Closed |
 | 관리자 UI 구조 | 완료 | 개인화 영역과 분리된 권한 기반 관리자 진입, 역할별 대메뉴, 설정 종류별 탭, 저장 진행·오류 상태 |
@@ -35,7 +35,7 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
-2026-08-26 v0.77.7 릴리스 전 검증 결과:
+2026-08-26 v0.77.8 릴리스 전 검증 결과:
 
 ```text
 잘린 답이 예산의 95~99% 사용(이전 6%)            PASS
@@ -45,8 +45,8 @@ go test -race (FTS5/태그 없음/PostgreSQL)        PASS
 빌드 모드 교차 시험                              PASS
 go vet ./... && go build ./...                  PASS
 버전 메타데이터·GitHub Actions 정합성             PASS
-Kubernetes Kustomize·:4747·v0.77.7 렌더링         PASS
-Docker linux/amd64·UID 10001·v0.77.7 빌드         PASS
+Kubernetes Kustomize·:4747·v0.77.8 렌더링         PASS
+Docker linux/amd64·UID 10001·v0.77.8 빌드         PASS
 ```
 
 지침이 "잘리면 몇 건이 빠졌는지 말한다" 고 약속하기에 그것을 재 봤다. 말은 하고 있었다. 다만
