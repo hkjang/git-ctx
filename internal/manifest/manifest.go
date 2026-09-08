@@ -47,13 +47,61 @@ func Recognize(filePath string) (string, bool) {
 		return "maven", true
 	case "build.gradle", "build.gradle.kts":
 		return "gradle", true
-	case "requirements.txt", "requirements-dev.txt", "pyproject.toml":
+	case "pyproject.toml":
 		return "pypi", true
 	case "cargo.toml":
 		return "cargo", true
-	default:
+	}
+	if _, ok := requirementsFile(filePath); ok {
+		return "pypi", true
+	}
+	return "", false
+}
+
+// requirementsFile reports whether a path names a pip requirements file, and
+// what that file is for. A project rarely has exactly one: pip-tools writes
+// requirements.in beside the requirements.txt it compiles from it, teams split
+// the set by environment, and the layout most Django projects start from puts
+// one file per environment under requirements/. Recognizing two exact names
+// left every one of those repositories out of the inventory, where a repository
+// whose pins were never read looks exactly like one that does not use the
+// library at all.
+func requirementsFile(filePath string) (string, bool) {
+	base := strings.ToLower(path.Base(filePath))
+	stem, ok := strings.CutSuffix(base, ".txt")
+	if !ok {
+		if stem, ok = strings.CutSuffix(base, ".in"); !ok {
+			return "", false
+		}
+	}
+	named := stem == "requirements" ||
+		strings.HasPrefix(stem, "requirements-") ||
+		strings.HasPrefix(stem, "requirements_") ||
+		strings.HasPrefix(stem, "requirements.") ||
+		strings.HasSuffix(stem, "-requirements") ||
+		strings.HasSuffix(stem, "_requirements")
+	if !named && strings.ToLower(path.Base(path.Dir(filePath))) != "requirements" {
 		return "", false
 	}
+	return requirementsScope(stem), true
+}
+
+// requirementsScope reads what the file name says the set is for. Only the name
+// separates the tooling a repository tests with from what its service ships,
+// and an upgrade plan needs that distinction the same way go.mod's `// indirect`
+// marker gives it.
+func requirementsScope(stem string) string {
+	for _, part := range strings.FieldsFunc(stem, func(r rune) bool {
+		return r == '-' || r == '_' || r == '.'
+	}) {
+		switch part {
+		case "test", "tests", "testing":
+			return "test"
+		case "dev", "develop", "development", "local":
+			return "dev"
+		}
+	}
+	return "direct"
 }
 
 // MaxManifestBytes bounds one manifest read. A lock file committed as a
@@ -76,10 +124,10 @@ func Parse(filePath, content string) []Package {
 	case "gradle":
 		return parseGradle(content)
 	case "pypi":
-		if strings.HasSuffix(strings.ToLower(path.Base(filePath)), ".toml") {
-			return parsePyProject(content)
+		if scope, ok := requirementsFile(filePath); ok {
+			return parseRequirements(content, scope)
 		}
-		return parseRequirements(content)
+		return parsePyProject(content)
 	case "cargo":
 		return parseCargo(content)
 	default:
@@ -242,7 +290,7 @@ var requirementLine = regexp.MustCompile(`^\s*([A-Za-z0-9._-]+)\s*(?:\[[^\]]*\])
 // file the way an unpinned requirement does — without the operator in the list
 // the "!" was read as the version itself and became a group of its own in the
 // inventory.
-func parseRequirements(content string) []Package {
+func parseRequirements(content, scope string) []Package {
 	var out []Package
 	for _, raw := range strings.Split(content, "\n") {
 		line := strings.TrimSpace(raw)
@@ -257,10 +305,17 @@ func parseRequirements(content string) []Package {
 			continue
 		}
 		version := ""
-		if match[3] != "" && match[2] != "!=" {
+		switch {
+		case match[3] == "":
+		case match[2] == "":
+			// No requirement states a version without an operator, so a bare word
+			// after the name means the line is prose. Read as a version it made a
+			// sentence in a text file into a package at version "directory".
+			continue
+		case match[2] != "!=":
 			version = strings.TrimSpace(match[2] + match[3])
 		}
-		out = append(out, Package{Ecosystem: "pypi", Name: match[1], Version: version, Scope: "direct"})
+		out = append(out, Package{Ecosystem: "pypi", Name: match[1], Version: version, Scope: scope})
 	}
 	return out
 }
@@ -509,10 +564,7 @@ func parsePyProject(content string) []Package {
 				if requirement == "" {
 					continue
 				}
-				for _, declared := range parseRequirements(requirement) {
-					declared.Scope = scope
-					out = append(out, declared)
-				}
+				out = append(out, parseRequirements(requirement, scope)...)
 			}
 		}
 	}
