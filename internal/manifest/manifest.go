@@ -265,53 +265,136 @@ var (
 
 // parseTOMLDependencies walks the [dependency] style sections of a TOML file.
 // It is shared by Cargo.toml and pyproject.toml, which express the same idea
-// with different section names.
-func parseTOMLDependencies(content, ecosystem string, sections map[string]string) []Package {
+// with different section names. scopeOf decides whether a section path holds
+// dependencies; a path one element longer than one it accepts is a single
+// dependency given a section of its own — [dependencies.serde] — which is how
+// a declaration with several fields is usually written.
+func parseTOMLDependencies(content, ecosystem string, scopeOf func(string) (string, bool)) []Package {
 	var out []Package
 	positions := tomlSection.FindAllStringSubmatchIndex(content, -1)
 	for index, position := range positions {
-		name := strings.TrimSpace(content[position[2]:position[3]])
-		scope, ok := sections[name]
-		if !ok {
-			continue
-		}
+		section := strings.TrimSpace(content[position[2]:position[3]])
 		end := len(content)
 		if index+1 < len(positions) {
 			end = positions[index+1][0]
 		}
-		for _, entry := range tomlEntry.FindAllStringSubmatch(content[position[1]:end], -1) {
-			value := strings.TrimSpace(entry[2])
-			version := ""
-			switch {
-			case strings.HasPrefix(value, `"`):
+		body := content[position[1]:end]
+		if scope, ok := scopeOf(section); ok {
+			out = append(out, tomlTable(body, ecosystem, scope)...)
+			continue
+		}
+		at := strings.LastIndex(section, ".")
+		if at < 0 {
+			continue
+		}
+		scope, ok := scopeOf(section[:at])
+		if !ok {
+			continue
+		}
+		name := strings.Trim(section[at+1:], `"'`)
+		if name == "" {
+			continue
+		}
+		version := ""
+		if inline := tomlVersion.FindStringSubmatch(body); inline != nil {
+			version = inline[1]
+		}
+		out = append(out, Package{Ecosystem: ecosystem, Name: name, Version: version, Scope: scope})
+	}
+	return out
+}
+
+// tomlTable reads one table of dependencies. A key states either the whole
+// dependency (serde = "1.0") or one field of it (serde.workspace = true), and
+// reading the second shape as a name gave the inventory a package called
+// "serde.workspace" at no version instead of serde — every member crate of a
+// workspace that pins its versions centrally declares its dependencies that way.
+func tomlTable(body, ecosystem, scope string) []Package {
+	var out []Package
+	seen := map[string]int{}
+	for _, entry := range tomlEntry.FindAllStringSubmatch(body, -1) {
+		name, field, dotted := strings.Cut(entry[1], ".")
+		if name == "" {
+			continue
+		}
+		value := strings.TrimSpace(entry[2])
+		version := ""
+		switch {
+		case dotted:
+			// serde.version = "1.0" states one; serde.workspace = true and
+			// serde.features = [...] leave the number to the workspace root.
+			if field == "version" && strings.HasPrefix(value, `"`) {
 				version = strings.Trim(value, `"`)
-			default:
-				if inline := tomlVersion.FindStringSubmatch(value); inline != nil {
-					version = inline[1]
-				}
 			}
-			out = append(out, Package{Ecosystem: ecosystem, Name: entry[1], Version: version, Scope: scope})
+		case strings.HasPrefix(value, `"`):
+			version = strings.Trim(value, `"`)
+		default:
+			if inline := tomlVersion.FindStringSubmatch(value); inline != nil {
+				version = inline[1]
+			}
+		}
+		index, repeated := seen[name]
+		if !repeated {
+			seen[name] = len(out)
+			out = append(out, Package{Ecosystem: ecosystem, Name: name, Version: version, Scope: scope})
+			continue
+		}
+		if out[index].Version == "" {
+			out[index].Version = version
 		}
 	}
 	return out
 }
 
 func parseCargo(content string) []Package {
-	return parseTOMLDependencies(content, "cargo", map[string]string{
-		"dependencies": "direct", "dev-dependencies": "dev", "build-dependencies": "dev",
-	})
+	return parseTOMLDependencies(content, "cargo", cargoScope)
+}
+
+// cargoScope maps a Cargo section to a scope. The three dependency tables also
+// appear under a path: [workspace.dependencies] holds the versions a monorepo
+// pins once for every member, and [target.'cfg(unix)'.dependencies] the ones
+// only one platform builds. Both are real dependencies of the repository.
+func cargoScope(section string) (string, bool) {
+	switch section[strings.LastIndex(section, ".")+1:] {
+	case "dependencies":
+		return "direct", true
+	case "dev-dependencies", "build-dependencies":
+		return "dev", true
+	}
+	return "", false
 }
 
 var pyProjectArray = regexp.MustCompile(`(?s)dependencies\s*=\s*\[(.*?)\]`)
 
+// pyProjectScope maps a pyproject section to a scope. Poetry 1.2 replaced the
+// single [tool.poetry.dev-dependencies] table with named groups, so a project
+// on any current Poetry states its dev and test dependencies under a path that
+// names the group instead.
+func pyProjectScope(section string) (string, bool) {
+	switch section {
+	case "project.dependencies", "tool.poetry.dependencies":
+		return "direct", true
+	case "tool.poetry.dev-dependencies":
+		return "dev", true
+	}
+	group, ok := strings.CutPrefix(section, "tool.poetry.group.")
+	if !ok {
+		return "", false
+	}
+	group, ok = strings.CutSuffix(group, ".dependencies")
+	if !ok || strings.Contains(group, ".") {
+		return "", false
+	}
+	if strings.EqualFold(group, "test") {
+		return "test", true
+	}
+	return "dev", true
+}
+
 // parsePyProject reads both shapes in use: the PEP 621 dependencies array and
 // Poetry's [tool.poetry.dependencies] table.
 func parsePyProject(content string) []Package {
-	out := parseTOMLDependencies(content, "pypi", map[string]string{
-		"tool.poetry.dependencies":     "direct",
-		"tool.poetry.dev-dependencies": "dev",
-		"project.dependencies":         "direct",
-	})
+	out := parseTOMLDependencies(content, "pypi", pyProjectScope)
 	if array := pyProjectArray.FindStringSubmatch(content); array != nil {
 		for _, item := range strings.Split(array[1], ",") {
 			requirement := strings.Trim(strings.TrimSpace(item), `"'`)
