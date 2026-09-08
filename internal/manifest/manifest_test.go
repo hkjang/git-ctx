@@ -251,3 +251,82 @@ func TestRecognizeAndBounds(t *testing.T) {
 		t.Fatal("an oversized manifest must be skipped")
 	}
 }
+
+// A build script states a dependency in more than one shape, and the ones the
+// parser used to miss are the ones an advisory needs most: the map notation
+// older Groovy builds write, and the per-variant configurations the Android and
+// Kotlin plugins generate. A repository that declares a library only that way
+// was absent from the inventory, which reads exactly like a repository that
+// does not use the library at all.
+func TestGradleReadsEveryDeclarationShape(t *testing.T) {
+	packages := Parse("build.gradle", `dependencies {
+  implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+  implementation group: 'org.apache.logging.log4j', name: 'log4j-core', version: '2.14.1'
+  androidTestImplementation 'androidx.test:runner:1.5.2'
+  debugImplementation "com.squareup.leakcanary:leakcanary-android:2.9"
+  kapt 'com.google.dagger:dagger-compiler:2.44'
+  testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.9.1")
+  compileOnlyApi 'org.projectlombok:lombok:1.18.30'
+  testCompile group: 'junit', name: 'junit', version: '4.13.2'
+}`)
+	for _, expected := range []Package{
+		{Ecosystem: "gradle", Name: "com.squareup.okhttp3:okhttp", Version: "4.12.0", Scope: "direct"},
+		{Ecosystem: "gradle", Name: "org.apache.logging.log4j:log4j-core", Version: "2.14.1", Scope: "direct"},
+		{Ecosystem: "gradle", Name: "androidx.test:runner", Version: "1.5.2", Scope: "test"},
+		{Ecosystem: "gradle", Name: "com.squareup.leakcanary:leakcanary-android", Version: "2.9", Scope: "direct"},
+		{Ecosystem: "gradle", Name: "com.google.dagger:dagger-compiler", Version: "2.44", Scope: "direct"},
+		{Ecosystem: "gradle", Name: "org.junit.jupiter:junit-jupiter-engine", Version: "5.9.1", Scope: "test"},
+		{Ecosystem: "gradle", Name: "org.projectlombok:lombok", Version: "1.18.30", Scope: "direct"},
+		{Ecosystem: "gradle", Name: "junit:junit", Version: "4.13.2", Scope: "test"},
+	} {
+		item, ok := find(packages, expected.Name)
+		if !ok {
+			t.Fatalf("%s was not read: %#v", expected.Name, packages)
+		}
+		if item != expected {
+			t.Fatalf("%s=%#v, want %#v", expected.Name, item, expected)
+		}
+	}
+	if len(packages) != 8 {
+		t.Fatalf("packages=%#v", packages)
+	}
+}
+
+// The inventory answers "which third party do you depend on", so what a build
+// script says about itself, about a library it removes, or about a coordinate
+// it never spells out must stay out of it.
+func TestGradleLeavesOutWhatIsNotADeclaredLibrary(t *testing.T) {
+	packages := Parse("build.gradle", `plugins {
+  id 'org.springframework.boot' version '2.7.18'
+}
+repositories {
+  mavenCentral()
+}
+dependencies {
+  implementation project(':shared')
+  implementation platform('org.junit:junit-bom:5.9.1')
+  implementation libs.spring.boot.starter
+  implementation 'org.hibernate:hibernate-core:6.2.7.Final', {
+    exclude group: 'org.jboss.logging', name: 'jboss-logging'
+  }
+  api "org.springframework:spring-core:$springVersion"
+}
+tasks.named('compileJava') {
+  options.encoding = 'UTF-8'
+}`)
+	if len(packages) != 2 {
+		t.Fatalf("packages=%#v", packages)
+	}
+	if item, _ := find(packages, "org.hibernate:hibernate-core"); item.Version != "6.2.7.Final" {
+		t.Fatalf("a coordinate with a trailing exclusion closure must still be read: %#v", item)
+	}
+	if _, ok := find(packages, "org.jboss.logging:jboss-logging"); ok {
+		t.Fatalf("an excluded library is not a dependency: %#v", packages)
+	}
+	// An interpolated version names a variable, not a release, and every
+	// repository writing a different variable name would otherwise land in its
+	// own version group and answer nothing.
+	if item, _ := find(packages, "org.springframework:spring-core"); item.Version != "" {
+		t.Fatalf("an interpolated version must be left empty: %#v", item)
+	}
+}

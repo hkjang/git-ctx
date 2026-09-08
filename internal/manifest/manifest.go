@@ -210,24 +210,93 @@ func parsePOM(content string) []Package {
 	return out
 }
 
-var gradleDependency = regexp.MustCompile(`(?m)^\s*(implementation|api|compileOnly|runtimeOnly|testImplementation|testCompileOnly|annotationProcessor)\s*[( ]\s*['"]([^'"]+)['"]`)
+var (
+	// gradleDeclaration splits a line into the configuration it names and the
+	// argument that follows, in either the Groovy (`api 'a:b:1'`) or the Kotlin
+	// (`api("a:b:1")`) DSL.
+	gradleDeclaration = regexp.MustCompile(`^\s*([A-Za-z][A-Za-z0-9_]*)[( \t](.*)$`)
+	// gradleShorthand reads the `group:artifact:version` string most builds use.
+	gradleShorthand = regexp.MustCompile(`^['"]([^'"]+)['"]`)
+	// gradleMapEntry reads the map notation older Groovy builds use instead:
+	// `implementation group: 'g', name: 'a', version: '1'`.
+	gradleMapEntry = regexp.MustCompile(`\b(group|name|version)\s*:\s*['"]([^'"]*)['"]`)
+)
+
+// gradleConfigurations are the base configurations that declare a dependency.
+// The Android and Kotlin plugins generate one per source set and build variant
+// by prefixing the base name — testImplementation, debugImplementation,
+// androidTestApi — so the base is matched as a suffix rather than enumerated.
+// Longer bases come first so compileOnlyApi is not read as an Api variant.
+var gradleConfigurations = []string{
+	"annotationprocessor", "compileonlyapi", "implementation", "compileonly",
+	"runtimeonly", "runtime", "compile", "kapt", "ksp", "api",
+}
+
+// gradleScope reports the scope of a configuration, and whether the name
+// declares a dependency at all. Everything else in a build script — repository
+// blocks, task wiring, plugin ids — must be left out of the inventory.
+func gradleScope(configuration string) (string, bool) {
+	lower := strings.ToLower(configuration)
+	for _, base := range gradleConfigurations {
+		if !strings.HasSuffix(lower, base) {
+			continue
+		}
+		if strings.Contains(lower[:len(lower)-len(base)], "test") {
+			return "test", true
+		}
+		return "direct", true
+	}
+	return "", false
+}
 
 func parseGradle(content string) []Package {
 	var out []Package
-	for _, match := range gradleDependency.FindAllStringSubmatch(content, -1) {
-		coordinate := strings.Split(match[2], ":")
-		if len(coordinate) < 2 {
+	for _, raw := range strings.Split(content, "\n") {
+		match := gradleDeclaration.FindStringSubmatch(raw)
+		if match == nil {
 			continue
 		}
-		version := ""
-		if len(coordinate) > 2 {
-			version = coordinate[2]
+		scope, ok := gradleScope(match[1])
+		if !ok {
+			continue
 		}
-		scope := "direct"
-		if strings.HasPrefix(match[1], "test") {
-			scope = "test"
+		// A leading parenthesis belongs to the Kotlin DSL call; one that opens a
+		// wrapper such as platform(...) or project(...) stays, and neither shape
+		// yields a coordinate below.
+		rest := strings.TrimLeft(match[2], "( \t")
+		name, version := "", ""
+		if shorthand := gradleShorthand.FindStringSubmatch(rest); shorthand != nil {
+			coordinate := strings.Split(shorthand[1], ":")
+			if len(coordinate) < 2 {
+				continue
+			}
+			name = coordinate[0] + ":" + coordinate[1]
+			if len(coordinate) > 2 {
+				version = coordinate[2]
+			}
+		} else {
+			// `exclude` writes the same map with `module` instead of `name`, and
+			// a trailing closure can put one on this line; requiring both group
+			// and name keeps a removed library out of the inventory.
+			fields := map[string]string{}
+			for _, entry := range gradleMapEntry.FindAllStringSubmatch(rest, -1) {
+				fields[entry[1]] = entry[2]
+			}
+			if fields["group"] == "" || fields["name"] == "" {
+				continue
+			}
+			name = fields["group"] + ":" + fields["name"]
+			version = fields["version"]
 		}
-		out = append(out, Package{Ecosystem: "gradle", Name: coordinate[0] + ":" + coordinate[1], Version: version, Scope: scope})
+		// An interpolated version names a variable declared elsewhere. Recording
+		// `$log4jVersion` as the version would put every repository that writes
+		// it into its own version group and answer no advisory; an empty version
+		// says the same thing the rest of the parsers say when the manifest
+		// leaves the number to a lock file.
+		if strings.Contains(version, "$") {
+			version = ""
+		}
+		out = append(out, Package{Ecosystem: "gradle", Name: name, Version: version, Scope: scope})
 	}
 	return out
 }
