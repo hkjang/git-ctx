@@ -239,6 +239,88 @@ httpx = "0.27.0"
 	}
 }
 
+// A dependency does not have to be a line in the [dependencies] table. Cargo
+// gives one a section of its own, collects versions at the workspace root, and
+// scopes them per target; Poetry 1.2 moved dev dependencies into named groups.
+// Read as exact section names, all of those declarations were dropped, and a
+// member crate's `serde.workspace = true` entered the inventory as an empty
+// version for a package named "serde.workspace".
+func TestTOMLDependenciesStatedUnderAPath(t *testing.T) {
+	cargo := Parse("Cargo.toml", `[package]
+name = "svc"
+version = "0.1.0"
+
+[workspace.dependencies]
+serde = { version = "1.0.203", features = ["derive"] }
+
+[dependencies]
+tokio.workspace = true
+anyhow.version = "1.0.86"
+anyhow.features = ["backtrace"]
+
+[dependencies.reqwest]
+version = "0.12.4"
+features = ["json"]
+default-features = false
+
+[target.'cfg(unix)'.dependencies]
+nix = "0.29"
+
+[dev-dependencies.criterion]
+version = "0.5.1"
+`)
+	for _, want := range []Package{
+		{Ecosystem: "cargo", Name: "serde", Version: "1.0.203", Scope: "direct"},
+		{Ecosystem: "cargo", Name: "tokio", Version: "", Scope: "direct"},
+		{Ecosystem: "cargo", Name: "anyhow", Version: "1.0.86", Scope: "direct"},
+		{Ecosystem: "cargo", Name: "reqwest", Version: "0.12.4", Scope: "direct"},
+		{Ecosystem: "cargo", Name: "nix", Version: "0.29", Scope: "direct"},
+		{Ecosystem: "cargo", Name: "criterion", Version: "0.5.1", Scope: "dev"},
+	} {
+		item, ok := find(cargo, want.Name)
+		if !ok || item != want {
+			t.Fatalf("%s: got %#v want %#v", want.Name, item, want)
+		}
+	}
+	// The fields of a dependency are not dependencies of their own.
+	for _, excluded := range []string{"tokio.workspace", "anyhow.version", "version", "features", "default-features", "svc"} {
+		if item, ok := find(cargo, excluded); ok {
+			t.Fatalf("%s is not a package: %#v", excluded, item)
+		}
+	}
+	if len(cargo) != 6 {
+		t.Fatalf("cargo=%#v", cargo)
+	}
+
+	pyproject := Parse("pyproject.toml", `[tool.poetry.dependencies]
+httpx = "0.27.0"
+
+[tool.poetry.dependencies.urllib3]
+version = "2.2.1"
+extras = ["socks"]
+
+[tool.poetry.group.dev.dependencies]
+black = "24.4.2"
+
+[tool.poetry.group.test.dependencies]
+pytest = "^8.2"
+`)
+	for _, want := range []Package{
+		{Ecosystem: "pypi", Name: "httpx", Version: "0.27.0", Scope: "direct"},
+		{Ecosystem: "pypi", Name: "urllib3", Version: "2.2.1", Scope: "direct"},
+		{Ecosystem: "pypi", Name: "black", Version: "24.4.2", Scope: "dev"},
+		{Ecosystem: "pypi", Name: "pytest", Version: "^8.2", Scope: "test"},
+	} {
+		item, ok := find(pyproject, want.Name)
+		if !ok || item != want {
+			t.Fatalf("%s: got %#v want %#v", want.Name, item, want)
+		}
+	}
+	if len(pyproject) != 4 {
+		t.Fatalf("pyproject=%#v", pyproject)
+	}
+}
+
 func TestRecognizeAndBounds(t *testing.T) {
 	if _, ok := Recognize("internal/app/app.go"); ok {
 		t.Fatal("source files are not manifests")
