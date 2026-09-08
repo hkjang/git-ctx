@@ -415,3 +415,77 @@ func TestRecognizeAndBounds(t *testing.T) {
 		t.Fatal("an oversized manifest must be skipped")
 	}
 }
+
+// A repository that splits its requirements — the layout pip-tools and the
+// common Django project template produce — declared nothing the inventory could
+// see, because two exact file names were recognized and no more. An advisory
+// then read those repositories as not using the library at all.
+func TestRequirementsFilesTheWayProjectsNameThem(t *testing.T) {
+	for _, filePath := range []string{
+		"requirements.txt",
+		"requirements-dev.txt",
+		"requirements_test.txt",
+		"requirements.prod.txt",
+		"dev-requirements.txt",
+		"test_requirements.txt",
+		"requirements.in",
+		"requirements/base.txt",
+		"services/api/requirements/production.in",
+		"REQUIREMENTS.TXT",
+	} {
+		ecosystem, ok := Recognize(filePath)
+		if !ok || ecosystem != "pypi" {
+			t.Fatalf("%s: ecosystem=%s ok=%v", filePath, ecosystem, ok)
+		}
+	}
+	// A text file is not a requirements file merely for being one, and a
+	// pyproject keeps going to the TOML parser.
+	for _, filePath := range []string{"notes.txt", "docs/install.txt", "requirements.md", "requirements/README.rst"} {
+		if _, ok := Recognize(filePath); ok {
+			t.Fatalf("%s must not be read as a requirements file", filePath)
+		}
+	}
+	if items := Parse("pyproject.toml", "[project]\ndependencies = [\"requests==2.31.0\"]\n"); len(items) != 1 {
+		t.Fatalf("pyproject=%#v", items)
+	}
+}
+
+// The file name is the only thing that says what a set of requirements is for,
+// and an upgrade plan separates what a service ships from what it tests with.
+func TestRequirementsScopeComesFromTheFileName(t *testing.T) {
+	for filePath, scope := range map[string]string{
+		"requirements.txt":             "direct",
+		"requirements/base.txt":        "direct",
+		"requirements-dev.txt":         "dev",
+		"requirements/local.in":        "dev",
+		"requirements_test.txt":        "test",
+		"requirements/testing.txt":     "test",
+		"deploy/prod-requirements.txt": "direct",
+	} {
+		items := Parse(filePath, "Django==4.2.7\n")
+		if len(items) != 1 || items[0].Scope != scope {
+			t.Fatalf("%s: %#v want scope %s", filePath, items, scope)
+		}
+	}
+}
+
+// Nothing keeps prose out of a .txt file that sits where requirements live, and
+// a name followed by a bare word was read as a package at that word's version —
+// "This directory contains" entered the inventory as "This" at "directory".
+func TestProseIsNotARequirement(t *testing.T) {
+	items := Parse("requirements/base.txt", `This directory contains the shared requirements.
+See docs/setup.md before editing.
+Django==4.2.7
+requests >= 2.31.0 ; python_version < "3.13"
+urllib3
+`)
+	if len(items) != 3 {
+		t.Fatalf("requirements=%#v", items)
+	}
+	if item, _ := find(items, "requests"); item.Version != ">=2.31.0" {
+		t.Fatalf("a marker must not hide the version: %#v", item)
+	}
+	if item, _ := find(items, "urllib3"); item.Version != "" {
+		t.Fatalf("an unpinned requirement must have no version: %#v", item)
+	}
+}

@@ -756,6 +756,11 @@ Embedding 요청은 한 번의 원격 호출로 병합하며 각 호출자의 �
 `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`,
 `Cargo.lock`, `poetry.lock` 입니다.
 
+pip 요구사항 파일은 이름이 여럿이라 다음도 함께 읽습니다 — `requirements-dev.txt`
+처럼 접두사·접미사가 붙은 이름, pip-tools 의 `requirements.in`, 그리고
+`requirements/` 디렉터리 아래의 `.txt`·`.in` 파일. 파일 이름이 `dev`·`test` 를
+말하면 그 선언들의 scope 도 그렇게 기록합니다.
+
 매니페스트는 **의도**(`^18.2.0`)를, 락파일은 **결과**(`18.3.1`)를 말합니다. 보안
 공지 판정은 락파일이 있으면 그쪽을 씁니다. 선언된 범위는 목록에 그대로 남습니다 —
 고칠 때 편집해야 하는 것이 그쪽이기 때문입니다. 락파일의 중첩 사본(같은 패키지의
