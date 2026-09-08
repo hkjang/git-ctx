@@ -232,8 +232,16 @@ func parseGradle(content string) []Package {
 	return out
 }
 
-var requirementLine = regexp.MustCompile(`^\s*([A-Za-z0-9._-]+)\s*(?:\[[^\]]*\])?\s*(==|>=|<=|~=|>|<)?\s*([A-Za-z0-9._*+!-]+)?`)
+// requirementLine reads one PEP 508 requirement. The operator alternation lists
+// the longer forms first, because the shorter ones are prefixes of them.
+var requirementLine = regexp.MustCompile(`^\s*([A-Za-z0-9._-]+)\s*(?:\[[^\]]*\])?\s*(===|==|>=|<=|~=|!=|>|<)?\s*([A-Za-z0-9._*+!-]+)?`)
 
+// parseRequirements reads a requirements file, or one requirement out of a
+// pyproject array. An exclusion states which release the project will not take,
+// not which one it runs, so "urllib3!=1.25.0" leaves the version to the lock
+// file the way an unpinned requirement does — without the operator in the list
+// the "!" was read as the version itself and became a group of its own in the
+// inventory.
 func parseRequirements(content string) []Package {
 	var out []Package
 	for _, raw := range strings.Split(content, "\n") {
@@ -249,7 +257,7 @@ func parseRequirements(content string) []Package {
 			continue
 		}
 		version := ""
-		if match[3] != "" {
+		if match[3] != "" && match[2] != "!=" {
 			version = strings.TrimSpace(match[2] + match[3])
 		}
 		out = append(out, Package{Ecosystem: "pypi", Name: match[1], Version: version, Scope: "direct"})

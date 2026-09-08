@@ -376,6 +376,33 @@ tooling = ["tox>=4"]
 	}
 }
 
+// Two PEP 440 operators were missing from the requirement pattern, and neither
+// failed loudly: "!=" left the "!" behind as the version, and "===" pinned
+// exactly but was read as no version at all.
+func TestRequirementOperatorsThatWereMissing(t *testing.T) {
+	packages := Parse("requirements.txt", `urllib3!=1.25.0
+certifi != 2022.9.24
+pip===23.3.1
+Django==4.2.7
+`)
+	for _, want := range []Package{
+		{Ecosystem: "pypi", Name: "urllib3", Version: "", Scope: "direct"},
+		{Ecosystem: "pypi", Name: "certifi", Version: "", Scope: "direct"},
+		{Ecosystem: "pypi", Name: "pip", Version: "===23.3.1", Scope: "direct"},
+		{Ecosystem: "pypi", Name: "Django", Version: "==4.2.7", Scope: "direct"},
+	} {
+		item, ok := find(packages, want.Name)
+		if !ok || item != want {
+			t.Fatalf("%s: got %#v want %#v", want.Name, item, want)
+		}
+	}
+	// An arbitrary equality names one release, so an advisory can be answered
+	// against it rather than left undecided.
+	if item, _ := find(packages, "pip"); !Comparable(item.Version) {
+		t.Fatalf("an exact pin must be comparable: %#v", item)
+	}
+}
+
 func TestRecognizeAndBounds(t *testing.T) {
 	if _, ok := Recognize("internal/app/app.go"); ok {
 		t.Fatal("source files are not manifests")
