@@ -321,6 +321,61 @@ pytest = "^8.2"
 	}
 }
 
+// A pyproject states dependencies in several arrays, and only one of them was
+// read. Worse, that one ended at the first closing bracket, which a requirement
+// carries itself when it names an extra — "black[jupyter]" swallowed the array
+// and everything declared after it was silently absent from the inventory.
+func TestPyProjectReadsEveryDependencyArray(t *testing.T) {
+	packages := Parse("pyproject.toml", `[build-system]
+requires = ["setuptools>=69"]
+
+[project]
+name = "svc"
+classifiers = ["Programming Language :: Python"]
+dependencies = [
+  "black[jupyter]>=23.0",  # an extra is not the end of the array]
+  "requests>=2.31.0",
+  "urllib3",
+]
+
+[project.optional-dependencies]
+docs = ["sphinx>=7.3"]
+dev = ["pytest>=7.4", "mypy==1.9.0"]
+
+[dependency-groups]
+test = ["coverage>=7.5"]
+lint = ["ruff>=0.4"]
+
+[tool.pdm.dev-dependencies]
+tooling = ["tox>=4"]
+`)
+	for _, want := range []Package{
+		{Ecosystem: "pypi", Name: "black", Version: ">=23.0", Scope: "direct"},
+		{Ecosystem: "pypi", Name: "requests", Version: ">=2.31.0", Scope: "direct"},
+		{Ecosystem: "pypi", Name: "urllib3", Version: "", Scope: "direct"},
+		{Ecosystem: "pypi", Name: "sphinx", Version: ">=7.3", Scope: "optional"},
+		{Ecosystem: "pypi", Name: "pytest", Version: ">=7.4", Scope: "optional"},
+		{Ecosystem: "pypi", Name: "mypy", Version: "==1.9.0", Scope: "optional"},
+		{Ecosystem: "pypi", Name: "coverage", Version: ">=7.5", Scope: "test"},
+		{Ecosystem: "pypi", Name: "ruff", Version: ">=0.4", Scope: "dev"},
+		{Ecosystem: "pypi", Name: "tox", Version: ">=4", Scope: "dev"},
+	} {
+		item, ok := find(packages, want.Name)
+		if !ok || item != want {
+			t.Fatalf("%s: got %#v want %#v", want.Name, item, want)
+		}
+	}
+	// Not every array in a pyproject holds dependencies of the repository.
+	for _, excluded := range []string{"setuptools", "Programming", "svc"} {
+		if item, ok := find(packages, excluded); ok {
+			t.Fatalf("%s is not a declared dependency: %#v", excluded, item)
+		}
+	}
+	if len(packages) != 9 {
+		t.Fatalf("packages=%#v", packages)
+	}
+}
+
 func TestRecognizeAndBounds(t *testing.T) {
 	if _, ok := Recognize("internal/app/app.go"); ok {
 		t.Fatal("source files are not manifests")

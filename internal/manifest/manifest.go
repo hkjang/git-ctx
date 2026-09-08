@@ -271,37 +271,52 @@ var (
 // a declaration with several fields is usually written.
 func parseTOMLDependencies(content, ecosystem string, scopeOf func(string) (string, bool)) []Package {
 	var out []Package
-	positions := tomlSection.FindAllStringSubmatchIndex(content, -1)
-	for index, position := range positions {
-		section := strings.TrimSpace(content[position[2]:position[3]])
-		end := len(content)
-		if index+1 < len(positions) {
-			end = positions[index+1][0]
-		}
-		body := content[position[1]:end]
-		if scope, ok := scopeOf(section); ok {
-			out = append(out, tomlTable(body, ecosystem, scope)...)
+	for _, span := range tomlSections(content) {
+		if scope, ok := scopeOf(span.name); ok {
+			out = append(out, tomlTable(span.body, ecosystem, scope)...)
 			continue
 		}
-		at := strings.LastIndex(section, ".")
+		at := strings.LastIndex(span.name, ".")
 		if at < 0 {
 			continue
 		}
-		scope, ok := scopeOf(section[:at])
+		scope, ok := scopeOf(span.name[:at])
 		if !ok {
 			continue
 		}
-		name := strings.Trim(section[at+1:], `"'`)
+		name := strings.Trim(span.name[at+1:], `"'`)
 		if name == "" {
 			continue
 		}
 		version := ""
-		if inline := tomlVersion.FindStringSubmatch(body); inline != nil {
+		if inline := tomlVersion.FindStringSubmatch(span.body); inline != nil {
 			version = inline[1]
 		}
 		out = append(out, Package{Ecosystem: ecosystem, Name: name, Version: version, Scope: scope})
 	}
 	return out
+}
+
+// tomlSpan is one section header and everything written under it.
+type tomlSpan struct {
+	name string
+	body string
+}
+
+func tomlSections(content string) []tomlSpan {
+	positions := tomlSection.FindAllStringSubmatchIndex(content, -1)
+	spans := make([]tomlSpan, 0, len(positions))
+	for index, position := range positions {
+		end := len(content)
+		if index+1 < len(positions) {
+			end = positions[index+1][0]
+		}
+		spans = append(spans, tomlSpan{
+			name: strings.TrimSpace(content[position[2]:position[3]]),
+			body: content[position[1]:end],
+		})
+	}
+	return spans
 }
 
 // tomlTable reads one table of dependencies. A key states either the whole
@@ -346,6 +361,61 @@ func tomlTable(body, ecosystem, scope string) []Package {
 	return out
 }
 
+// tomlArray returns the items of the array whose opening bracket is at open.
+// A requirement carries brackets of its own — "black[jupyter]>=23" names an
+// extra — so ending the array at the first closing bracket cut it off inside a
+// string and dropped every dependency declared after that line.
+func tomlArray(body string, open int) []string {
+	var (
+		items []string
+		item  strings.Builder
+		depth int
+		quote byte
+	)
+	for at := open; at < len(body); at++ {
+		char := body[at]
+		if quote != 0 {
+			if char == '\\' && quote == '"' && at+1 < len(body) {
+				item.WriteByte(char)
+				at++
+				char = body[at]
+			} else if char == quote {
+				quote = 0
+			}
+			item.WriteByte(char)
+			continue
+		}
+		switch char {
+		case '"', '\'':
+			quote = char
+			item.WriteByte(char)
+		case '#':
+			for at+1 < len(body) && body[at+1] != '\n' {
+				at++
+			}
+		case '[':
+			if depth++; depth > 1 {
+				item.WriteByte(char)
+			}
+		case ']':
+			if depth--; depth == 0 {
+				return append(items, item.String())
+			}
+			item.WriteByte(char)
+		case ',':
+			if depth == 1 {
+				items = append(items, item.String())
+				item.Reset()
+				continue
+			}
+			item.WriteByte(char)
+		default:
+			item.WriteByte(char)
+		}
+	}
+	return append(items, item.String())
+}
+
 func parseCargo(content string) []Package {
 	return parseTOMLDependencies(content, "cargo", cargoScope)
 }
@@ -364,7 +434,7 @@ func cargoScope(section string) (string, bool) {
 	return "", false
 }
 
-var pyProjectArray = regexp.MustCompile(`(?s)dependencies\s*=\s*\[(.*?)\]`)
+var tomlArrayKey = regexp.MustCompile(`(?m)^\s*([A-Za-z0-9._-]+)\s*=\s*\[`)
 
 // pyProjectScope maps a pyproject section to a scope. Poetry 1.2 replaced the
 // single [tool.poetry.dev-dependencies] table with named groups, so a project
@@ -385,23 +455,57 @@ func pyProjectScope(section string) (string, bool) {
 	if !ok || strings.Contains(group, ".") {
 		return "", false
 	}
-	if strings.EqualFold(group, "test") {
-		return "test", true
-	}
-	return "dev", true
+	return groupScope(group), true
 }
 
-// parsePyProject reads both shapes in use: the PEP 621 dependencies array and
+// pyArrayScope maps a "name = [requirement, ...]" array to a scope. Only the
+// PEP 621 array under [project] states what the package installs; the other
+// sections give a name to a set a developer opts into — an extra, a PEP 735
+// dependency group, a PDM development set — and each entry there is a package
+// the repository builds or tests with. Reading none of them left every project
+// on setuptools, hatch or PDM stating its test tooling in the standard place
+// absent from the inventory for those libraries.
+func pyArrayScope(section, key string) (string, bool) {
+	switch section {
+	case "project":
+		return "direct", key == "dependencies"
+	case "project.optional-dependencies":
+		return "optional", true
+	case "dependency-groups", "tool.pdm.dev-dependencies":
+		return groupScope(key), true
+	}
+	return "", false
+}
+
+// groupScope reads the name a project gave a set of dependencies. Only what a
+// group calls itself separates test tooling from the rest of development.
+func groupScope(group string) string {
+	if strings.EqualFold(group, "test") {
+		return "test"
+	}
+	return "dev"
+}
+
+// parsePyProject reads both shapes in use: the PEP 621 dependencies arrays and
 // Poetry's [tool.poetry.dependencies] table.
 func parsePyProject(content string) []Package {
 	out := parseTOMLDependencies(content, "pypi", pyProjectScope)
-	if array := pyProjectArray.FindStringSubmatch(content); array != nil {
-		for _, item := range strings.Split(array[1], ",") {
-			requirement := strings.Trim(strings.TrimSpace(item), `"'`)
-			if requirement == "" {
+	for _, span := range tomlSections(content) {
+		for _, key := range tomlArrayKey.FindAllStringSubmatchIndex(span.body, -1) {
+			scope, ok := pyArrayScope(span.name, strings.TrimSpace(span.body[key[2]:key[3]]))
+			if !ok {
 				continue
 			}
-			out = append(out, parseRequirements(requirement)...)
+			for _, item := range tomlArray(span.body, key[1]-1) {
+				requirement := strings.Trim(strings.TrimSpace(item), `"'`)
+				if requirement == "" {
+					continue
+				}
+				for _, declared := range parseRequirements(requirement) {
+					declared.Scope = scope
+					out = append(out, declared)
+				}
+			}
 		}
 	}
 	// Poetry states the interpreter as a dependency; it is not a package.
