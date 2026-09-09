@@ -8,7 +8,11 @@ import (
 	"strings"
 )
 
-var privateKeyRE = regexp.MustCompile(`(?i)-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----`)
+// PGP writes the only header that does not end at "PRIVATE KEY": an exported
+// secret key is "-----BEGIN PGP PRIVATE KEY BLOCK-----". A .asc or .gpg file
+// committed to a repository was therefore indexed whole, key material included,
+// while every other private key format was blocked.
+var privateKeyRE = regexp.MustCompile(`(?i)-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY(?: BLOCK)?-----`)
 
 // Naming the field is the only signal available for values the entropy rule
 // cannot reach -- notably hex, whose entropy tops out at 4.0 and so never
@@ -22,7 +26,21 @@ var privateKeyRE = regexp.MustCompile(`(?i)-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY
 // an appsettings.json or a Postman collection was indexed, and returned in a
 // snippet, with its credential intact. The quotes are optional on both sides,
 // so the bare form still matches exactly as it did.
-var secretAssignmentRE = regexp.MustCompile(`(?i)["']?(api[_-]?key|secret[_-]?key|client[_-]?secret|access[_-]?token|auth[_-]?token|refresh[_-]?token|private[_-]?token|password|passwd|passphrase|credential|token|secret)["']?\s*[:=]\s*(?:"[^"\r\n]{4,}"|'[^'\r\n]{4,}'|[^\s,;#]{4,})`)
+//
+// An assignment is one line. Written with \s the rule ran past the end of it
+// and took the next line's first word as the value, which YAML makes constant:
+// "secret:" and "token:" are ordinary section headers, and a Kubernetes volume
+// that says
+//
+//	secret:
+//	  secretName: db-creds
+//
+// came back as "secret: [REDACTED] db-creds" — the key masked, the value left,
+// a security event raised for a manifest holding no credential, and a line gone
+// from the chunk. The line matters beyond the text: chunks are cut from the
+// masked content, so every line number after a swallowed newline described the
+// wrong line of the real file for the rest of that file.
+var secretAssignmentRE = regexp.MustCompile(`(?i)["']?(api[_-]?key|secret[_-]?key|client[_-]?secret|access[_-]?token|auth[_-]?token|refresh[_-]?token|private[_-]?token|password|passwd|passphrase|credential|token|secret)["']?[^\S\r\n]*[:=][^\S\r\n]*(?:"[^"\r\n]{4,}"|'[^'\r\n]{4,}'|[^\s,;#]{4,})`)
 var awsKeyRE = regexp.MustCompile(`\bAKIA[A-Z0-9]{16}\b`)
 
 // Vendor prefixes are matched explicitly rather than left to the entropy rule,
@@ -43,7 +61,12 @@ var knownTokenRE = regexp.MustCompile(`\b(?:glpat-[A-Za-z0-9_-]{20,}|gh[pousr]_[
 // The password half deliberately admits "@": P@ssw0rd is a password people
 // actually choose, and stopping at the first "@" left "ssw0rd" in the answer.
 // It still cannot cross a space or a slash, so it stays inside one URL.
-var credentialURLRE = regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://)[^\s/:@"'<>]+:[^\s/"'<>]+@`)
+//
+// The user half may be empty. Redis, AMQP and the clients built on them
+// authenticate with a password and no user name, so their URLs are written
+// redis://:s3cr3t@cache:6379 — requiring at least one character before the
+// colon meant the one credential in the line was the one part not matched.
+var credentialURLRE = regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://)[^\s/:@"'<>]*:[^\s/"'<>]+@`)
 
 // Oracle's thin driver puts the credentials before the @ with a slash rather
 // than a colon, so no URL rule reaches it. It is too common in the
@@ -71,7 +94,11 @@ var curlUserRE = regexp.MustCompile(`(?i)\bcurl\b[^\n]{0,200}?(\s-u\s+|\s--user\
 // .netrc and its imitators separate the value with spaces rather than a colon
 // or an equals sign, which no assignment rule reaches. Requiring the login
 // field before it keeps the rule off prose that merely says "password".
-var netrcRE = regexp.MustCompile(`(?i)\blogin\s+\S+\s+password\s+\S{4,}`)
+//
+// A real .netrc puts each field on its own line, so the separators are captured
+// and written back rather than replaced by single spaces: rewriting the whole
+// match collapsed the three-line entry onto one and moved every line after it.
+var netrcRE = regexp.MustCompile(`(?i)\b(login\s+)\S+(\s+password\s+)\S{4,}`)
 
 // An Authorization header carries a credential whose shape is the issuer's
 // business, so no vendor prefix and no entropy floor will find it.
@@ -139,7 +166,7 @@ func Sanitize(content string) (string, string) {
 	})
 	masked = netrcRE.ReplaceAllStringFunc(masked, func(value string) string {
 		finding = "credential_assignment"
-		return netrcRE.ReplaceAllString(value, "login [REDACTED] password [REDACTED]")
+		return netrcRE.ReplaceAllString(value, "${1}[REDACTED]${2}[REDACTED]")
 	})
 	masked = authorizationHeaderRE.ReplaceAllStringFunc(masked, func(value string) string {
 		finding = "credential_assignment"

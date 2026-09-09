@@ -33,6 +33,9 @@ func TestSanitizeBlocksAllCommonPrivateKeyPEMHeaders(t *testing.T) {
 		"-----BEGIN DSA PRIVATE KEY-----",
 		"-----BEGIN OPENSSH PRIVATE KEY-----",
 		"-----BEGIN ENCRYPTED PRIVATE KEY-----",
+		// PGP is the one header that continues past "PRIVATE KEY", so an
+		// exported secret key was the one private key format indexed whole.
+		"-----BEGIN PGP PRIVATE KEY BLOCK-----",
 	} {
 		if safe, finding := Sanitize(header + "\nsecret material"); safe != "" || finding != "private_key" {
 			t.Errorf("header=%q safe=%q finding=%q", header, safe, finding)
