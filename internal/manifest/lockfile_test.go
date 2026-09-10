@@ -95,6 +95,118 @@ description = "client"
 	}
 }
 
+// Poetry is one of four resolvers a Python project picks from, and its lock was
+// the only one read. A pyproject states ranges and a range is what an advisory
+// cannot judge, so a repository resolving with uv, PDM or pipenv contributed the
+// question and never the answer.
+func TestThePythonLockFilesAProjectActuallyHas(t *testing.T) {
+	cases := map[string]struct {
+		path, content string
+		want          map[string]string
+		absent        []string
+	}{
+		"uv.lock": {
+			path: "uv.lock",
+			content: `version = 1
+requires-python = ">=3.11"
+
+[[package]]
+name = "requests"
+version = "2.31.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "certifi" },
+    { name = "urllib3" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "urllib3", specifier = ">=1.21.1" }]
+
+[[package]]
+name = "urllib3"
+version = "2.2.1"
+source = { registry = "https://pypi.org/simple" }
+`,
+			want: map[string]string{"requests": "2.31.0", "urllib3": "2.2.1"},
+			// The names inside a dependencies array or a metadata table describe the
+			// edges of the graph, not resolved packages of their own.
+			absent: []string{"certifi"},
+		},
+		"pdm.lock": {
+			path: "pdm.lock",
+			content: `[metadata]
+groups = ["default"]
+lock_version = "4.4.1"
+content_hash = "sha256:abc"
+
+[[package]]
+name = "asgiref"
+version = "3.7.2"
+requires_python = ">=3.7"
+
+[[package]]
+name = "django"
+version = "4.2.11"
+`,
+			want: map[string]string{"asgiref": "3.7.2", "django": "4.2.11"},
+		},
+		"Pipfile.lock": {
+			path: "Pipfile.lock",
+			content: `{
+  "_meta": {
+    "hash": {"sha256": "abc"},
+    "pipfile-spec": 6,
+    "requires": {"python_version": "3.11"},
+    "sources": [{"name": "pypi", "url": "https://pypi.org/simple", "verify_ssl": true}]
+  },
+  "default": {
+    "flask": {"hashes": ["sha256:abc"], "index": "pypi", "version": "==3.0.2"},
+    "internal-lib": {"git": "https://example.com/lib.git", "ref": "abc123"}
+  },
+  "develop": {
+    "pytest": {"hashes": ["sha256:def"], "version": "==8.1.1"}
+  }
+}`,
+			// _meta is not a set of packages, and decoding it as one would have cost
+			// the whole file rather than that one key.
+			want:   map[string]string{"flask": "3.0.2", "pytest": "8.1.1"},
+			absent: []string{"_meta", "hash", "sources", "internal-lib"},
+		},
+	}
+	for label, item := range cases {
+		if ecosystem, ok := RecognizeLock(item.path); !ok || ecosystem != "pypi" {
+			t.Fatalf("%s: ecosystem=%q ok=%v", label, ecosystem, ok)
+		}
+		found := map[string]string{}
+		for _, entry := range ParseLock(item.path, item.content) {
+			if entry.Scope != "resolved" || entry.Ecosystem != "pypi" {
+				t.Fatalf("%s: %#v", label, entry)
+			}
+			found[entry.Name] = entry.Version
+		}
+		for name, version := range item.want {
+			if found[name] != version {
+				t.Fatalf("%s: want %s@%s, got %#v", label, name, version, found)
+			}
+		}
+		for _, name := range item.absent {
+			if _, ok := found[name]; ok {
+				t.Fatalf("%s: %s is not a resolved package: %#v", label, name, found)
+			}
+		}
+	}
+}
+
+// pipenv writes the pin as the requirement it would install. Left as written it
+// groups apart from the same release resolved by any other tool, and nothing
+// compares it against the version an advisory says the fix landed in.
+func TestPipfileLockStatesTheVersionAlone(t *testing.T) {
+	packages := ParseLock("Pipfile.lock", `{"default":{"requests":{"version":"==2.31.0"}}}`)
+	if len(packages) != 1 || packages[0].Version != "2.31.0" {
+		t.Fatalf("%#v", packages)
+	}
+}
+
 func TestRecognizeLockAndBounds(t *testing.T) {
 	if _, ok := RecognizeLock("go.mod"); ok {
 		t.Fatal("a manifest is not a lock file")

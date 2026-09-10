@@ -26,7 +26,12 @@ func RecognizeLock(filePath string) (string, bool) {
 		return "npm", true
 	case "cargo.lock":
 		return "cargo", true
-	case "poetry.lock":
+	case "poetry.lock", "uv.lock", "pdm.lock", "pipfile.lock":
+		// Poetry is one of four resolvers in ordinary use, and the file it writes
+		// was the only one read. A pyproject states ranges — ">=2.31", "~=4.2" —
+		// and a range is exactly what an advisory cannot judge, so for every
+		// repository resolving with uv, PDM or pipenv the inventory held the
+		// question and never the answer.
 		return "pypi", true
 	default:
 		return "", false
@@ -61,7 +66,10 @@ func ParseLock(filePath, content string) []Package {
 		packages = parseYarnLock(content)
 	case base == "pnpm-lock.yaml":
 		packages = parsePnpmLock(content)
-	case base == "cargo.lock" || base == "poetry.lock":
+	case base == "pipfile.lock":
+		packages = parsePipfileLock(content)
+	case base == "cargo.lock" || base == "poetry.lock" || base == "uv.lock" || base == "pdm.lock":
+		// uv and PDM write the same [[package]] blocks Cargo and Poetry do.
 		packages = parseTOMLLock(content, ecosystem)
 	}
 	for index := range packages {
@@ -228,13 +236,51 @@ func parsePnpmLock(content string) []Package {
 	return out
 }
 
+// pipfileEntry is one resolved package of a Pipfile.lock.
+type pipfileEntry struct {
+	Version string `json:"version"`
+}
+
+// parsePipfileLock reads the two sets pipenv resolves. The remaining top-level
+// key, "_meta", holds hashes and sources rather than packages and its values do
+// not have this shape, so the sets are named instead of walked — decoding the
+// whole document as one map fails on _meta and would drop the file entirely.
+func parsePipfileLock(content string) []Package {
+	var document struct {
+		Default map[string]pipfileEntry `json:"default"`
+		Develop map[string]pipfileEntry `json:"develop"`
+	}
+	if json.Unmarshal([]byte(content), &document) != nil {
+		return nil
+	}
+	var out []Package
+	for _, set := range []map[string]pipfileEntry{document.Default, document.Develop} {
+		for name, entry := range set {
+			// pipenv stores the pin as the requirement it would install, "==2.31.0",
+			// where every other lock file states the number alone. Kept as written it
+			// would group apart from the same release resolved by any other tool, and
+			// no comparison against an advisory's fixed version would succeed.
+			version := strings.TrimPrefix(entry.Version, "==")
+			if version == "" {
+				// A package taken from a VCS ref is pinned by commit, not by version.
+				continue
+			}
+			out = append(out, Package{Name: name, Version: version})
+		}
+	}
+	return out
+}
+
 var (
 	lockPackageBlock = regexp.MustCompile(`(?m)^\[\[package\]\]\s*$`)
 	lockName         = regexp.MustCompile(`(?m)^name\s*=\s*"([^"]+)"`)
 	lockVersion      = regexp.MustCompile(`(?m)^version\s*=\s*"([^"]+)"`)
 )
 
-// parseTOMLLock reads the [[package]] blocks Cargo and Poetry both use.
+// parseTOMLLock reads the [[package]] blocks Cargo, Poetry, uv and PDM all use.
+// The name and version stand at the top of a block in column zero, so the
+// nested tables underneath — a uv block's requires-dist entries, its
+// [package.metadata] — never supply either.
 func parseTOMLLock(content, ecosystem string) []Package {
 	positions := lockPackageBlock.FindAllStringIndex(content, -1)
 	var out []Package
