@@ -100,6 +100,18 @@ func TestCredentialShapesAnInstallationActuallyHolds(t *testing.T) {
 			input:  `<con:password>Sup3rSecret</con:password>`,
 			leaked: "Sup3rSecret", kept: `</con:password>`,
 		},
+		{
+			// Redis and AMQP authenticate with a password and no user name, so
+			// the credential is everything the URL rule required to be there.
+			name:   "a Redis URL, which has no user name",
+			input:  `redis://:s3cr3tvalue@cache.company:6379/0`,
+			leaked: "s3cr3tvalue", kept: "cache.company",
+		},
+		{
+			name:   "an AMQP URL, which has no user name",
+			input:  `spring.rabbitmq.addresses=amqp://:s3cr3tvalue@rabbit.company:5672/`,
+			leaked: "s3cr3tvalue", kept: "rabbit.company",
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			masked, finding := Sanitize(c.input)
@@ -133,9 +145,41 @@ func TestOrdinaryContentIsLeftAlone(t *testing.T) {
 		`fields["password"] = lookup(name)`,
 		`"password" is the field the login form posts`,
 		`the "token" column is never null`,
+		// An assignment ends with its line. "secret" and "token" are ordinary
+		// YAML section headers, and reading past the newline turned the key on
+		// the next line into the value: a Kubernetes volume came back as
+		// "secret: [REDACTED] db-creds", masking the name and keeping nothing
+		// secret, because there is no credential in this manifest at all.
+		"volumes:\n  - name: creds\n    secret:\n      secretName: db-creds\n",
+		"token:\n  path: /run/secrets/token\n  ttl: 3600\n",
+		"password:\n  See the vault entry for this environment.\n",
 	} {
 		if masked, finding := Sanitize(input); masked != input {
 			t.Errorf("ordinary content was masked as %q:\n  in:  %s\n  out: %s", finding, input, masked)
+		}
+	}
+}
+
+// Chunks are cut from the masked content and carry the line numbers of the
+// lines they came from, so a rule that deletes a newline moves every line after
+// it: find-symbol and every snippet then point at the wrong line of the real
+// file, and the drift accumulates over the rest of the file. Two rules did it —
+// the assignment rule ran past the end of its line, and the .netrc rule wrote
+// its three fields back as one line.
+func TestMaskingNeverChangesTheLineCount(t *testing.T) {
+	for _, input := range []string{
+		"machine bitbucket.company\nlogin svc-ci\npassword s3cr3tvalue\n",
+		"volumes:\n  - name: creds\n    secret:\n      secretName: db-creds\n      optional: false\n",
+		"database:\n  host: pg.company\n  password: hunter22\n  port: 5432\n",
+		"# Token\n\ntoken:\n  path: /run/secrets/token\n  ttl: 3600\n",
+		"curl \\\n  -u admin:Passw0rd \\\n  https://api.company/v1/health\n",
+		"<datasource>\n  <password>Sup3rSecret</password>\n  <url>jdbc:postgresql://db.company/app</url>\n</datasource>\n",
+		"export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\nexport REGION=eu-west-1\n",
+	} {
+		masked, _ := Sanitize(input)
+		if before, after := strings.Count(input, "\n"), strings.Count(masked, "\n"); before != after {
+			t.Errorf("lines %d -> %d, so every line number after this point is wrong:\n  in:  %q\n  out: %q",
+				before+1, after+1, input, masked)
 		}
 	}
 }
