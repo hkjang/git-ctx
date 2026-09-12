@@ -226,7 +226,9 @@ API 키, Keycloak secret, Bitbucket PAT, 문서 전체 원문은 로그에 남�
 전에 `[REDACTED]`로 치환한다. URL에 박힌 자격증명(`https://user:token@host`,
 `mongodb://`, `sqlserver://` 등 스킴 무관), Oracle thin 서술자(`scott/tiger@`),
 XML 설정의 `<password>`·`name="password" value="..."` 쌍, `Authorization` 헤더,
-`curl -u user:pass`, `.netrc`의 `login ... password ...`도 함께 치환한다. 호스트는
+`curl -u user:pass`, `.netrc`의 `login ... password ...`도 함께 치환한다. 값이 다음
+줄부터 이어지는 YAML 블록 스칼라(`password: |`, `client_secret: >-`)는 들여쓰기가
+키 이하로 얕아지는 줄 전까지 본문을 줄마다 치환해 줄 수를 그대로 둔다. 호스트는
 남긴다 — 어느 시스템의 자격증명인지가 조치의 출발점이기 때문이다. 탐지 경로와 조치는
 `index_security_events`에 기록되지만 탐지된 원문은 기록하지 않는다.
 

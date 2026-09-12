@@ -112,6 +112,19 @@ func TestCredentialShapesAnInstallationActuallyHolds(t *testing.T) {
 			input:  `spring.rabbitmq.addresses=amqp://:s3cr3tvalue@rabbit.company:5672/`,
 			leaked: "s3cr3tvalue", kept: "rabbit.company",
 		},
+		{
+			// A block scalar puts the value on the following lines, where the
+			// assignment rule cannot see it: the key is followed by a single
+			// character where the rule wants four.
+			name:   "a YAML block scalar, whose value is on the next line",
+			input:  "database:\n  password: |\n    s3cr3tvalue\n  port: 5432\n",
+			leaked: "s3cr3tvalue", kept: "port: 5432",
+		},
+		{
+			name:   "a folded block scalar under a list item",
+			input:  "env:\n  - name: APP\n    client_secret: >-\n      s3cr3tvalue\n",
+			leaked: "s3cr3tvalue", kept: "client_secret",
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			masked, finding := Sanitize(c.input)
@@ -153,6 +166,15 @@ func TestOrdinaryContentIsLeftAlone(t *testing.T) {
 		"volumes:\n  - name: creds\n    secret:\n      secretName: db-creds\n",
 		"token:\n  path: /run/secrets/token\n  ttl: 3600\n",
 		"password:\n  See the vault entry for this environment.\n",
+		// A block scalar hides a value only when its key names a credential. A
+		// pipeline step, a description and a Markdown table all sit next to the
+		// shape without being it.
+		"script: |\n  ./deploy.sh --user admin\n  echo done\n",
+		"description: |\n  Rotate the password once a quarter.\n",
+		"| password | the value the login form posts |\n",
+		"token: > 5 && retries < 2\n",
+		// A block with nothing under it states no value.
+		"password: |\n",
 	} {
 		if masked, finding := Sanitize(input); masked != input {
 			t.Errorf("ordinary content was masked as %q:\n  in:  %s\n  out: %s", finding, input, masked)
@@ -173,6 +195,8 @@ func TestMaskingNeverChangesTheLineCount(t *testing.T) {
 		"database:\n  host: pg.company\n  password: hunter22\n  port: 5432\n",
 		"# Token\n\ntoken:\n  path: /run/secrets/token\n  ttl: 3600\n",
 		"curl \\\n  -u admin:Passw0rd \\\n  https://api.company/v1/health\n",
+		"database:\n  password: |\n    s3cr3tvalue\n\n    second-line\n  port: 5432\n",
+		"api_key: |2\r\n  s3cr3tvalue\r\n",
 		"<datasource>\n  <password>Sup3rSecret</password>\n  <url>jdbc:postgresql://db.company/app</url>\n</datasource>\n",
 		"export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\nexport REGION=eu-west-1\n",
 	} {
@@ -181,6 +205,53 @@ func TestMaskingNeverChangesTheLineCount(t *testing.T) {
 			t.Errorf("lines %d -> %d, so every line number after this point is wrong:\n  in:  %q\n  out: %q",
 				before+1, after+1, input, masked)
 		}
+	}
+}
+
+// A block scalar is the one place a YAML file states a credential where no rule
+// was looking: the value is not on the key's line, so the assignment rule cannot
+// reach it, and a plain password is too short and too orderly for the entropy
+// rule. The block ends where YAML says it ends — at the first line indented no
+// deeper than the key — and everything after that is ordinary content.
+func TestABlockScalarStatesItsValueOnTheFollowingLines(t *testing.T) {
+	input := strings.Join([]string{
+		"apiVersion: v1",
+		"stringData:",
+		"  password: |",
+		"    first-s3cr3t",
+		"",
+		"    second-s3cr3t",
+		"  api_key: >-",
+		"    third-s3cr3t",
+		"  username: app",
+		"notes: |",
+		"  the password is rotated by ops",
+		"",
+	}, "\n")
+
+	masked, finding := Sanitize(input)
+	if finding != "credential_assignment" {
+		t.Fatalf("finding=%q content=%q", finding, masked)
+	}
+	for _, secret := range []string{"first-s3cr3t", "second-s3cr3t", "third-s3cr3t"} {
+		if strings.Contains(masked, secret) {
+			t.Errorf("the block scalar value %q survived:\n%s", secret, masked)
+		}
+	}
+	// The block ends at the dedent, and a key that is not a credential keeps its
+	// value: masking past the block would take ordinary content with it.
+	for _, kept := range []string{"apiVersion: v1", "username: app", "the password is rotated by ops"} {
+		if !strings.Contains(masked, kept) {
+			t.Errorf("content outside the block was masked (%q):\n%s", kept, masked)
+		}
+	}
+	// One replacement per line, indented as it was, so the document still parses
+	// and the line numbers of the chunk still describe the file.
+	if count := strings.Count(masked, "[REDACTED]"); count != 3 {
+		t.Errorf("redactions=%d, expected one per value line:\n%s", count, masked)
+	}
+	if !strings.Contains(masked, "    [REDACTED]\n\n    [REDACTED]") {
+		t.Errorf("the blank line inside the block or the indentation of its value lines was not kept:\n%s", masked)
 	}
 }
 

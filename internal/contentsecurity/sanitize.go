@@ -40,7 +40,28 @@ var privateKeyRE = regexp.MustCompile(`(?i)-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY
 // from the chunk. The line matters beyond the text: chunks are cut from the
 // masked content, so every line number after a swallowed newline described the
 // wrong line of the real file for the rest of that file.
-var secretAssignmentRE = regexp.MustCompile(`(?i)["']?(api[_-]?key|secret[_-]?key|client[_-]?secret|access[_-]?token|auth[_-]?token|refresh[_-]?token|private[_-]?token|password|passwd|passphrase|credential|token|secret)["']?[^\S\r\n]*[:=][^\S\r\n]*(?:"[^"\r\n]{4,}"|'[^'\r\n]{4,}'|[^\s,;#]{4,})`)
+var secretAssignmentRE = regexp.MustCompile(`(?i)["']?(` + secretNames + `)["']?[^\S\r\n]*[:=][^\S\r\n]*(?:"[^"\r\n]{4,}"|'[^'\r\n]{4,}'|[^\s,;#]{4,})`)
+
+// secretNames is the list of field names shared by the rules that recognise a
+// credential by what it is called. Keeping one list means a name added for one
+// syntax is understood in the others too.
+const secretNames = `api[_-]?key|secret[_-]?key|client[_-]?secret|access[_-]?token|auth[_-]?token|refresh[_-]?token|private[_-]?token|password|passwd|passphrase|credential|token|secret`
+
+// A YAML block scalar states the value on the lines after the key, and no
+// assignment rule can reach it: "password: |" has one character where the rule
+// wants four, and the lines that follow say nothing about what they belong to.
+// The shape is how a manifest writes a credential that does not fit on one line
+// or contains characters it would rather not quote — Kubernetes and Helm values,
+// Ansible vars, GitLab CI variables, docker-compose configs — and the body went
+// into the index and back out in a snippet in full. A key and a certificate are
+// caught by the private key rule, and a long random token by the entropy rule,
+// so what was left readable is exactly the plain password and the short token.
+//
+// The indicator ends the line: "|", ">", a chomping "-" or "+", an indentation
+// digit, and nothing else but a comment. Requiring that keeps the rule off the
+// "token: > 5" of a template language and off a Markdown table, whose cells
+// begin with the pipe rather than end with it.
+var blockScalarSecretRE = regexp.MustCompile(`(?im)^([^\S\r\n]*)(?:-[^\S\r\n]+)?["']?(?:` + secretNames + `)["']?[^\S\r\n]*:[^\S\r\n]*[|>][-+0-9]*[^\S\r\n]*(?:#[^\r\n]*)?\r?$`)
 var awsKeyRE = regexp.MustCompile(`\bAKIA[A-Z0-9]{16}\b`)
 
 // Vendor prefixes are matched explicitly rather than left to the entropy rule,
@@ -122,7 +143,7 @@ func Revision() string {
 		privateKeyRE.String(), secretAssignmentRE.String(), awsKeyRE.String(), knownTokenRE.String(),
 		credentialURLRE.String(), oracleDSNRE.String(), xmlSecretElementRE.String(), xmlSecretAttributeRE.String(),
 		curlUserRE.String(), netrcRE.String(), authorizationHeaderRE.String(), entropyCandidateRE.String(),
-		commonHashRE.String(),
+		commonHashRE.String(), blockScalarSecretRE.String(),
 	}, "\x00")))
 	return hex.EncodeToString(sum[:6])
 }
@@ -134,7 +155,11 @@ func Sanitize(content string) (string, string) {
 		return "", "private_key"
 	}
 	finding := ""
-	masked := secretAssignmentRE.ReplaceAllStringFunc(content, func(value string) string {
+	masked, hidden := maskBlockScalars(content)
+	if hidden {
+		finding = "credential_assignment"
+	}
+	masked = secretAssignmentRE.ReplaceAllStringFunc(masked, func(value string) string {
 		finding = "credential_assignment"
 		at := strings.IndexAny(value, ":=")
 		if at < 0 {
@@ -181,6 +206,61 @@ func Sanitize(content string) (string, string) {
 	})
 	return masked, finding
 }
+
+// maskBlockScalars replaces the body of every block scalar whose key names a
+// credential, and reports whether it replaced anything.
+//
+// The body is the run of lines indented deeper than the key, which is how YAML
+// itself decides where the value ends, so a dedent leaves the block and the rest
+// of the document is untouched. Each line is replaced on its own, keeping its
+// indentation: chunks are cut from the masked content and stored with the line
+// numbers they came from, so joining the block into one [REDACTED] would move
+// every line after it in that file.
+func maskBlockScalars(content string) (string, bool) {
+	if !blockScalarSecretRE.MatchString(content) {
+		return content, false
+	}
+	lines := strings.Split(content, "\n")
+	masked := false
+	for index := 0; index < len(lines); index++ {
+		header, _ := splitReturn(lines[index])
+		if !blockScalarSecretRE.MatchString(header) {
+			continue
+		}
+		depth := blockIndent(header)
+		end := index + 1
+		for ; end < len(lines); end++ {
+			body, carriage := splitReturn(lines[end])
+			// A blank line inside a block is part of the block, and blanking it
+			// again would say nothing.
+			if strings.TrimSpace(body) == "" {
+				continue
+			}
+			indent := blockIndent(body)
+			if indent <= depth {
+				break
+			}
+			lines[end] = body[:indent] + "[REDACTED]" + carriage
+			masked = true
+		}
+		index = end - 1
+	}
+	if !masked {
+		return content, false
+	}
+	return strings.Join(lines, "\n"), true
+}
+
+// splitReturn separates a line from the carriage return of a CRLF file, so a
+// replacement can be written back without changing the line ending.
+func splitReturn(line string) (string, string) {
+	if strings.HasSuffix(line, "\r") {
+		return line[:len(line)-1], "\r"
+	}
+	return line, ""
+}
+
+func blockIndent(line string) int { return len(line) - len(strings.TrimLeft(line, " \t")) }
 
 func shannonEntropy(value string) float64 {
 	if value == "" {
