@@ -254,6 +254,13 @@ func parsePipfileLock(content string) []Package {
 		return nil
 	}
 	var out []Package
+	// A package can sit in both default and develop at the same version, and
+	// pipenv writes it twice. Emitting it twice is not a cosmetic duplicate: the
+	// indexer batches these into one INSERT ... ON CONFLICT DO UPDATE, and
+	// Postgres refuses a statement that tries to update the same row twice
+	// ("ON CONFLICT DO UPDATE command cannot affect row a second time"), so the
+	// whole batch fails and the repository is not indexed at all.
+	seen := make(map[string]struct{})
 	for _, set := range []map[string]pipfileEntry{document.Default, document.Develop} {
 		for name, entry := range set {
 			// pipenv stores the pin as the requirement it would install, "==2.31.0",
@@ -265,6 +272,11 @@ func parsePipfileLock(content string) []Package {
 				// A package taken from a VCS ref is pinned by commit, not by version.
 				continue
 			}
+			key := name + "\x00" + version
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
 			out = append(out, Package{Name: name, Version: version})
 		}
 	}
