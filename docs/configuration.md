@@ -754,7 +754,10 @@ Embedding 요청은 한 번의 원격 호출로 병합하며 각 호출자의 �
 지원 매니페스트는 `go.mod`, `package.json`, `pom.xml`, `build.gradle(.kts)`,
 `requirements.txt`, `pyproject.toml`, `Cargo.toml` 이고, **락파일**은 `go.sum`,
 `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`,
-`Cargo.lock`, `poetry.lock` 입니다.
+`Cargo.lock`, `poetry.lock`, `uv.lock`, `pdm.lock`, `Pipfile.lock` 입니다.
+파이썬 락파일이 넷인 것은 해석기가 넷이기 때문입니다 — `pyproject.toml` 은 범위만
+말하고 범위는 공지 판정이 결정하지 못하는 쪽이라, uv·PDM·pipenv 로 해석하는
+저장소는 락파일을 읽어야 해결된 버전이 인벤토리에 들어옵니다.
 
 pip 요구사항 파일은 이름이 여럿이라 다음도 함께 읽습니다 — `requirements-dev.txt`
 처럼 접두사·접미사가 붙은 이름, pip-tools 의 `requirements.in`, 그리고
