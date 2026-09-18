@@ -20,7 +20,7 @@ func (s *Server) toolVisible(ctx context.Context, p auth.Principal, entry *tool)
 	if !entry.allowed(p) {
 		return false
 	}
-	return p.KeyID == "" || contains(p.Scopes, entry.name)
+	return !p.Restricted() || contains(p.Scopes, entry.name)
 }
 
 func (s *Server) toolEnabled(ctx context.Context, name string) bool {

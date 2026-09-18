@@ -277,6 +277,102 @@ Strict Compatibility를 켜면 `resolve-library-id`, `query-docs`만 노출한�
 `reindex-repository`가 추가된다. 관리자 도구는 역할과 API 키 Scope를 동시에 검사하며
 일반 사용자 키나 브라우저 세션에는 노출하지 않는다.
 
+### MCP 를 SSO 로 연결하기 (OAuth 2.1 리소스 서버)
+
+`/mcp` 는 개인 API 키 외에 Keycloak 액세스 토큰으로도 들어올 수 있다. MCP 인가 규격
+(2025-06-18 이후)은 OAuth 2.1 이라 클라이언트에 `/mcp` 주소 하나만 주면, 클라이언트가
+401 응답의 `WWW-Authenticate` 에서 메타데이터 주소를 읽고 거기서 Keycloak 을 찾아
+스스로 로그인해 토큰을 받아 온다. git-ctx 는 **리소스 서버** 다 — 로그인·토큰 발급·
+클라이언트 등록은 Keycloak 이 하고, 이 서버는 `/authorize`·`/token` 을 만들지 않으며
+토큰을 저장하거나 세션으로 바꾸지 않고 요청마다 검사한다.
+
+기본값은 꺼짐이다. 켜지 않은 설치에서는 메타데이터 경로가 404 이고 401 에 헤더가 붙지
+않으며, 키 형식이 아닌 Bearer 값은 종전과 같이 웹 로그인 클라이언트의 토큰으로만 검사한다.
+
+| `mcp` 설정 키 | 표준 이름 | 기본값 | 뜻 |
+|---|---|---|---|
+| `oauthEnabled` | `mcp.oauth.enabled` | `false` | 켜기 스위치. Keycloak 설정(`keycloak.issuerUrl`)이 저장돼 있어야 실제로 동작하고, 없으면 켜 두어도 꺼진 것처럼 동작하며 이유를 로그에 남긴다 |
+| `oauthResource` | `mcp.oauth.resource` | 빈 값 | 리소스 식별자(RFC 8707). 비우면 `ui.publicUrl` + `/mcp`. 프록시 뒤 내부 주소가 아니라 클라이언트가 실제로 접속하는 공개 HTTPS 주소 |
+| `oauthAudience` | `mcp.oauth.audience` | 빈 값 | 허용 대상 목록. 토큰의 `aud` 또는 `azp` 와 비교한다 |
+| `oauthScopes` | `mcp.oauth.scopes` | 관리 도구 세 개를 뺀 전부 | SSO 사용자에게 주는 도구 Scope 상한. 도구 이름만 허용 |
+| (재사용) `keycloak.issuerUrl` · `keycloak.clientId` · `keycloak.usernameClaim` | `oidc.*` | 웹 로그인 설정 | 새로 만들지 않는다 |
+
+설정 키 이름은 이 저장소의 관례(카테고리 + camelCase)로 적었다. `keycloak.issuerUrl` 이
+표준의 `oidc.issuer_url` 인 것과 같은 대응이다. 저장 시점에 검사한다: 리소스 식별자는
+자격증명·쿼리·프래그먼트 없는 HTTPS URL(localhost 예외), Scope 는 MCP 도구 이름,
+허용 대상은 따옴표·꺾쇠 없는 256자 이하 문자열이어야 한다.
+
+```json
+{
+  "oauthEnabled": true,
+  "oauthAudience": ["claude-mcp"],
+  "oauthScopes": ["resolve-library-id", "query-docs", "search-code", "read-file"]
+}
+```
+
+**토큰 검사.** Keycloak JWKS 서명(RS·ES·PS 계열만, `HS*`·`none` 거부), `iss` =
+`keycloak.issuerUrl`, `exp`·`nbf`(허용 시계 오차는 `keycloak.allowedClockSkewSeconds`),
+`typ=ID` 거부(ID 토큰은 로그인 증거이지 API 자격이 아니다), `cnf` 있으면 거부(검증할
+수 없는 소지자 증명), `sub` 비면 거부. 그리고 **대상**: `aud` 에 리소스 식별자가 있거나,
+`aud` 또는 `azp` 가 `oauthAudience` 에 있어야 한다. 실제 Keycloak 26 은 Audience 매퍼
+없이는 `aud` 에 `account` 만 싣고 클라이언트 ID 를 `azp` 에 담으므로, 매퍼를 두지
+않는다면 MCP 클라이언트 ID 를 `oauthAudience` 에 적는다. 웹 로그인 클라이언트
+(`keycloak.clientId`)도 자동으로 허용되지 않는다 — `/mcp` 에서 계속 쓰려면 목록에 적는다.
+
+**계정.** 토큰의 `sub`(없으면 `keycloak.usernameClaim`, 기본 `preferred_username`)로
+**이미 등록된 활성** 사용자만 찾는다. 계정을 만들지 않고, 비활성 계정을 열지 않으며,
+토큰의 role claim 을 플랫폼 역할로 옮기지 않는다 — 역할은 `user_roles` 표에서 읽는다.
+웹으로 한 번 로그인하는 순간이 등록이다.
+
+**권한.** SSO 주체는 그 사용자가 키로 들어왔을 때와 같은 문(도구 Scope 검사·관리
+도구 역할 검사)을 지난다. 범위는 `oauthScopes` 가 정하고, 토큰의 `scope` 에 이 서버의
+도구 이름이 실려 오면 교집합만 준다. 교집합이 비면 빈 목록을 주는 대신 토큰을 거부한다.
+OAuth 토큰은 `/mcp` 에서만 받는다 — REST·관리 API 는 지금처럼 키와 세션(및 웹 로그인
+클라이언트 토큰)만 받는다. 호출 감사(`mcp_calls`)의 키 prefix 열에는 `sso:<클라이언트 ID>`
+로 기록되어 키 호출과 구분된다.
+
+**Keycloak 쪽 할 일.**
+
+1. MCP 클라이언트용 **공개(public) 클라이언트** 를 만든다(예: `claude-mcp`). Standard
+   Flow 켬, PKCE `S256`, Direct Access Grants·Implicit·Service accounts 끔. 웹 로그인
+   클라이언트(`git-ctx`)와 **다른** 클라이언트다.
+2. Valid Redirect URIs 에 쓰는 MCP 클라이언트의 콜백을 정확히 적는다(Claude 는
+   `https://claude.ai/api/mcp/auth_callback`, 로컬 클라이언트는 `http://127.0.0.1:*/callback`
+   류). `*` 하나로 다 여는 것은 금지.
+3. 정식 경로: 그 클라이언트(또는 전용 client scope)에 **Audience 매퍼** — Included Custom
+   Audience = 리소스 식별자(`https://git-ctx.company/mcp`), Add to access token 켬, Add to
+   ID token 끔. 호환 경로: 매퍼 없이 `oauthAudience` 에 클라이언트 ID 를 적는다.
+4. 액세스 토큰 수명은 짧게(5분 안팎). 이 서버는 introspection 을 하지 않으므로 Keycloak
+   에서 로그아웃해도 이미 발급된 토큰은 만료까지 산다.
+
+**확인.**
+
+```bash
+# 메타데이터: 인증 없이 맨 JSON, Access-Control-Allow-Origin: *
+curl -s https://git-ctx.company/.well-known/oauth-protected-resource/mcp
+# {"authorization_servers":["https://sso.company.local/realms/company"],"bearer_methods_supported":["header"],
+#  "resource":"https://git-ctx.company/mcp","resource_name":"git-ctx MCP","scopes_supported":[...]}
+
+# 401 도전: MCP 경로에서만 WWW-Authenticate 가 붙는다
+curl -si -X POST https://git-ctx.company/mcp -H 'Content-Type: application/json' -d '{}' | grep -i www-authenticate
+# WWW-Authenticate: Bearer realm="git-ctx", resource_metadata="https://git-ctx.company/.well-known/oauth-protected-resource/mcp"
+
+# 토큰으로 tools/list
+curl -s -X POST https://git-ctx.company/mcp -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
+```
+
+**거부 메시지별 조치.** 거부는 모두 401 `invalid_token` 이고, 어느 검사가 실패했는지는
+서버 로그의 `mcp sso token refused` 줄(`reason`)과 감사 로그 `mcp.oauth.auth` 항목에 남는다.
+
+| 응답 `detail` | 뜻 | 조치 |
+|---|---|---|
+| `SSO token was not issued for this server (aud=[account], azp="claude-mcp"). Add "claude-mcp" to …` | 대상 검사 실패. 메시지가 본 `aud`/`azp` 를 그대로 보여 준다 | `oauthAudience` 에 그 `azp` 를 적거나, Keycloak 클라이언트에 리소스 식별자 Audience 매퍼를 둔다 |
+| `SSO access token was rejected (signature, issuer, validity period or token type)` | 서명·발급자·만료·`nbf`·`typ=ID`·`cnf`·`HS256` 중 하나. 로그의 `reason` 이 어느 것인지 말한다 | 다른 realm 토큰이면 `keycloak.issuerUrl` 확인, 만료면 클라이언트에서 재로그인, ID 토큰이면 클라이언트가 액세스 토큰을 보내도록 설정 |
+| `SSO token scopes [...] include none of the MCP scopes this server grants to SSO callers [...]` | 토큰이 이 서버의 도구 이름을 scope 로 실었지만 상한과 겹치지 않음 | `oauthScopes` 를 넓히거나 Keycloak client scope 를 고친다 |
+| `This SSO account is not registered here or is disabled; sign in to the web console once first` | `sub` 로 등록된 활성 계정이 없음 | 사용자가 웹 화면에 한 번 로그인한다. 비활성 계정이면 관리자가 사용자 관리에서 활성화한다 |
+| `Keycloak access token validation failed` (헤더 없음) | SSO 접속이 꺼져 있어 종전 검사(웹 로그인 클라이언트)만 탔음 | `oauthEnabled` 를 켜고 Keycloak 설정이 저장돼 있는지 확인한다 |
+
 `security.trustedProxyCidrs`에 등록된 reverse proxy의 전달 헤더만 CIDR 제한과 감사
 IP에 사용한다. 등록되지 않은 클라이언트의 `X-Forwarded-For`는 제거된다.
 

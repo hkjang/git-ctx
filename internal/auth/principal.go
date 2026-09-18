@@ -14,6 +14,18 @@ type Principal struct {
 	KeyPrefix           string
 	Scopes              []string
 	AllowedRepositories []string
+	// OAuthClientID is the Keycloak client (azp) that obtained the SSO access
+	// token this caller presented at /mcp. Empty for keys and sessions.
+	OAuthClientID string
+}
+
+// Restricted reports whether Scopes and AllowedRepositories are a ceiling on
+// this caller. A browser session carries neither and sees everything its roles
+// allow; a key does, and so does an SSO token, whose scopes the administrator
+// chose rather than the caller. Every gate that used to read "has a key" must
+// read this instead, or a token would pass as an unrestricted session.
+func (p Principal) Restricted() bool {
+	return p.KeyID != "" || p.OAuthClientID != ""
 }
 
 type contextKey struct{}

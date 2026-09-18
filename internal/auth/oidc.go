@@ -82,6 +82,10 @@ type OIDCVerifier struct {
 	accessKey      string
 	accessVerifier *oidc.IDTokenVerifier
 	accessExpires  time.Time
+	// resource verifies SSO access tokens presented to /mcp (resourcetoken.go).
+	resource        *oidc.IDTokenVerifier
+	resourceKey     string
+	resourceExpires time.Time
 }
 
 func NewOIDCVerifier(loader func(context.Context) (OIDCConfig, error)) *OIDCVerifier {
@@ -320,9 +324,15 @@ func identityFromClaims(cfg OIDCConfig, subject string, claims map[string]any) (
 	return id, nil
 }
 
-func (v *OIDCVerifier) get(ctx context.Context, cfg OIDCConfig, accessToken bool) (*oidc.IDTokenVerifier, error) {
+// verifierKey names the configuration a cached verifier was built for, so a
+// changed issuer, client or transport setting builds a new one.
+func verifierKey(cfg OIDCConfig) string {
 	transportKey := sha256.Sum256([]byte(fmt.Sprintf("%v|%s|%s", cfg.TLSVerify, cfg.CACertificate, cfg.ProxyURL)))
-	key := strings.TrimSuffix(cfg.IssuerURL, "/") + "|" + cfg.ClientID + "|" + fmt.Sprintf("%x", transportKey)
+	return strings.TrimSuffix(cfg.IssuerURL, "/") + "|" + cfg.ClientID + "|" + fmt.Sprintf("%x", transportKey)
+}
+
+func (v *OIDCVerifier) get(ctx context.Context, cfg OIDCConfig, accessToken bool) (*oidc.IDTokenVerifier, error) {
+	key := verifierKey(cfg)
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if accessToken && v.accessVerifier != nil && v.accessKey == key && time.Now().Before(v.accessExpires) {

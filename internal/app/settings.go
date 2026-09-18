@@ -751,6 +751,9 @@ func (a *App) validateSetting(ctx context.Context, category string, value map[st
 		if size, ok := value["maxRequestBytes"].(float64); ok && (size < 1024 || size > 16<<20) {
 			return errors.New("mcp.maxRequestBytes must be 1024..16777216")
 		}
+		if err := validateMCPOAuthSetting(value); err != nil {
+			return err
+		}
 	case "index":
 		if minutes, ok := value["pollingMinutes"].(float64); ok && (minutes < 1 || minutes > 10080) {
 			return errors.New("index.pollingMinutes must be 1..10080")

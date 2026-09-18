@@ -81,6 +81,13 @@ func (a *App) authenticate(next http.Handler) http.Handler {
 				raw = bearer
 			}
 		}
+		// A 401 from /mcp carries the OAuth challenge when SSO is on, so an MCP
+		// client can find Keycloak on its own; the same refusal anywhere else
+		// is plain. presented says whether a credential was offered and refused.
+		deny := func(code, detail string, presented bool) {
+			a.mcpChallenge(w, r, presented)
+			problem(w, http.StatusUnauthorized, code, detail)
+		}
 		if raw != "" {
 			info, err := a.keys.AuthenticateRequest(r.Context(), raw, a.requestIP(r))
 			if err != nil {
@@ -97,19 +104,19 @@ func (a *App) authenticate(next http.Handler) http.Handler {
 					return
 				}
 				a.recordRejectedKey(r, raw)
-				problem(w, http.StatusUnauthorized, "invalid_token", "API key is invalid, expired, disabled, or revoked")
+				deny("invalid_token", "API key is invalid, expired, disabled, or revoked", true)
 				return
 			}
 			uid, kid, prefix := info.UserID, info.KeyID, info.Prefix
 			var subject, username, bitbucketSlug, gitlabID, aclGroupText string
 			if err := a.store.DB.QueryRowContext(r.Context(), a.store.Rebind(`SELECT u.subject,u.username,COALESCE(i.bitbucket_user_slug,''),COALESCE(i.gitlab_user_id,''),COALESCE(i.bitbucket_groups,'') FROM users u LEFT JOIN user_identities i ON i.user_id=u.id WHERE u.id=? AND u.status='active'`), uid).Scan(&subject, &username, &bitbucketSlug, &gitlabID, &aclGroupText); err != nil {
-				problem(w, 401, "invalid_token", "User is inactive")
+				deny("invalid_token", "User is inactive", true)
 				return
 			}
 			roles, _ := a.userRoles(r.Context(), uid)
 			if uid == "bootstrap-admin" {
 				if !a.bootstrapAvailable(r.Context()) {
-					problem(w, 401, "invalid_token", "Bootstrap administrator is no longer available")
+					deny("invalid_token", "Bootstrap administrator is no longer available", true)
 					return
 				}
 				roles = []string{"platform-admin"}
@@ -140,10 +147,29 @@ func (a *App) authenticate(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r.WithContext(auth.WithPrincipal(r.Context(), auth.Principal{UserID: id, Subject: id, Username: id, Roles: []string{"platform-admin"}})))
 			return
 		}
+		if token != "" && r.URL.Path == mcpPath && looksLikeJWT(token) {
+			// An SSO access token at the MCP endpoint. Checked against this
+			// server's own identity (mcpoauth.go), not the web sign-in client's,
+			// and mapped onto an account that already exists. Switched off, the
+			// token falls through to the check every other path runs.
+			if settings, _, inactive := a.mcpOAuthActive(r.Context()); inactive == "" {
+				p, refusal := a.oauthPrincipal(r.Context(), r, token, settings)
+				if refusal != nil {
+					a.logOAuthRefusal(r, refusal)
+					a.audit(r, auth.Principal{UserID: "anonymous"}, "mcp.oauth.auth", "sso_token", "", "failure", map[string]any{"reason": refusal.reason.Error()})
+					deny("invalid_token", refusal.message, true)
+					return
+				}
+				next.ServeHTTP(w, r.WithContext(auth.WithPrincipal(r.Context(), p)))
+				return
+			} else if settings.Enabled {
+				slog.Warn("mcp sso is enabled but not active", "reason", inactive)
+			}
+		}
 		if token != "" {
 			identity, err := a.oidc.VerifyAccessToken(r.Context(), token)
 			if err != nil {
-				problem(w, http.StatusUnauthorized, "invalid_token", "Keycloak access token validation failed")
+				deny("invalid_token", "Keycloak access token validation failed", true)
 				return
 			}
 			userID, err := a.upsertIdentity(r.Context(), identity)
@@ -161,7 +187,7 @@ func (a *App) authenticate(next http.Handler) http.Handler {
 			})))
 			return
 		}
-		problem(w, http.StatusUnauthorized, "authentication_required", "Use a Keycloak bearer token or MCP API key")
+		deny("authentication_required", "Use a Keycloak bearer token or MCP API key", false)
 	})
 }
 

@@ -12,7 +12,7 @@ import (
 
 func (a *App) testResolve(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	if p.KeyID != "" && !stringContains(p.Scopes, "resolve-library-id") {
+	if p.Restricted() && !stringContains(p.Scopes, "resolve-library-id") {
 		problem(w, 403, "forbidden", "API key is not allowed to call resolve-library-id")
 		return
 	}
@@ -29,7 +29,7 @@ func (a *App) testResolve(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "search_failed", err.Error())
 		return
 	}
-	if p.KeyID != "" && len(p.AllowedRepositories) > 0 {
+	if p.Restricted() && len(p.AllowedRepositories) > 0 {
 		filtered := items[:0]
 		for _, item := range items {
 			if repositoryAllowed(item.ID, p.AllowedRepositories) {
@@ -42,7 +42,7 @@ func (a *App) testResolve(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) testQuery(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	if p.KeyID != "" && !stringContains(p.Scopes, "query-docs") {
+	if p.Restricted() && !stringContains(p.Scopes, "query-docs") {
 		problem(w, 403, "forbidden", "API key is not allowed to call query-docs")
 		return
 	}
@@ -54,7 +54,7 @@ func (a *App) testQuery(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "libraryId and query are required")
 		return
 	}
-	if p.KeyID != "" && !repositoryAllowed(baseLibraryID(in.LibraryID), p.AllowedRepositories) {
+	if p.Restricted() && !repositoryAllowed(baseLibraryID(in.LibraryID), p.AllowedRepositories) {
 		problem(w, 403, "forbidden", "Library is unavailable or access is denied")
 		return
 	}
@@ -68,7 +68,7 @@ func (a *App) testQuery(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) testSearchCode(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	if p.KeyID != "" && !stringContains(p.Scopes, "search-code") {
+	if p.Restricted() && !stringContains(p.Scopes, "search-code") {
 		problem(w, 403, "forbidden", "API key is not allowed to call search-code")
 		return
 	}
@@ -89,7 +89,7 @@ func (a *App) testSearchCode(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "search_failed", err.Error())
 		return
 	}
-	if p.KeyID != "" && len(p.AllowedRepositories) > 0 {
+	if p.Restricted() && len(p.AllowedRepositories) > 0 {
 		repositories := result.Repositories[:0]
 		for _, item := range result.Repositories {
 			if repositoryAllowed(item.LibraryID, p.AllowedRepositories) {
@@ -109,7 +109,7 @@ func (a *App) testSearchCode(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) testFindFile(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	if p.KeyID != "" && !stringContains(p.Scopes, "find-file") {
+	if p.Restricted() && !stringContains(p.Scopes, "find-file") {
 		problem(w, http.StatusForbidden, "forbidden", "API key is not allowed to call find-file")
 		return
 	}
@@ -131,7 +131,7 @@ func (a *App) testFindFile(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusBadRequest, "search_failed", err.Error())
 		return
 	}
-	if p.KeyID != "" && len(p.AllowedRepositories) > 0 {
+	if p.Restricted() && len(p.AllowedRepositories) > 0 {
 		files := result.Files[:0]
 		for _, item := range result.Files {
 			if repositoryAllowed(item.LibraryID, p.AllowedRepositories) {
@@ -145,7 +145,7 @@ func (a *App) testFindFile(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) testReadFile(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	if p.KeyID != "" && !stringContains(p.Scopes, "read-file") {
+	if p.Restricted() && !stringContains(p.Scopes, "read-file") {
 		problem(w, http.StatusForbidden, "forbidden", "API key is not allowed to call read-file")
 		return
 	}
@@ -166,7 +166,7 @@ func (a *App) testReadFile(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusBadRequest, "read_failed", err.Error())
 		return
 	}
-	if p.KeyID != "" && !repositoryAllowed(file.LibraryID, p.AllowedRepositories) {
+	if p.Restricted() && !repositoryAllowed(file.LibraryID, p.AllowedRepositories) {
 		problem(w, http.StatusForbidden, "forbidden", "File is unavailable or access is denied")
 		return
 	}
@@ -175,7 +175,7 @@ func (a *App) testReadFile(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) testSemanticSearch(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	if p.KeyID != "" && !stringContains(p.Scopes, "search-semantic") {
+	if p.Restricted() && !stringContains(p.Scopes, "search-semantic") {
 		problem(w, http.StatusForbidden, "forbidden", "API key is not allowed to call search-semantic")
 		return
 	}
@@ -194,7 +194,7 @@ func (a *App) testSemanticSearch(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusBadRequest, "search_failed", err.Error())
 		return
 	}
-	if p.KeyID != "" && len(p.AllowedRepositories) > 0 {
+	if p.Restricted() && len(p.AllowedRepositories) > 0 {
 		hits := result.Hits[:0]
 		for _, item := range result.Hits {
 			if repositoryAllowed(item.LibraryID, p.AllowedRepositories) {
@@ -210,7 +210,7 @@ func (a *App) testSemanticSearch(w http.ResponseWriter, r *http.Request) {
 // operator handling an advisory does not have to reach for an MCP client.
 func (a *App) testDependencyUsage(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	if p.KeyID != "" && !stringContains(p.Scopes, "find-dependency-usage") {
+	if p.Restricted() && !stringContains(p.Scopes, "find-dependency-usage") {
 		problem(w, http.StatusForbidden, "forbidden", "API key is not allowed to call find-dependency-usage")
 		return
 	}
@@ -230,7 +230,7 @@ func (a *App) testDependencyUsage(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusBadRequest, "search_failed", err.Error())
 		return
 	}
-	if p.KeyID != "" && len(p.AllowedRepositories) > 0 {
+	if p.Restricted() && len(p.AllowedRepositories) > 0 {
 		users := result.Users[:0]
 		for _, item := range result.Users {
 			if repositoryAllowed(item.LibraryID, p.AllowedRepositories) {
@@ -244,7 +244,7 @@ func (a *App) testDependencyUsage(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) testDependents(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	if p.KeyID != "" && !stringContains(p.Scopes, "find-dependents") {
+	if p.Restricted() && !stringContains(p.Scopes, "find-dependents") {
 		problem(w, http.StatusForbidden, "forbidden", "API key is not allowed to call find-dependents")
 		return
 	}
@@ -262,7 +262,7 @@ func (a *App) testDependents(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusBadRequest, "search_failed", err.Error())
 		return
 	}
-	if p.KeyID != "" && len(p.AllowedRepositories) > 0 {
+	if p.Restricted() && len(p.AllowedRepositories) > 0 {
 		dependents := result.Dependents[:0]
 		for _, item := range result.Dependents {
 			if repositoryAllowed(item.LibraryID, p.AllowedRepositories) {
@@ -276,7 +276,7 @@ func (a *App) testDependents(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) testMergeRequests(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	if p.KeyID != "" && !stringContains(p.Scopes, "search-merge-requests") {
+	if p.Restricted() && !stringContains(p.Scopes, "search-merge-requests") {
 		problem(w, http.StatusForbidden, "forbidden", "API key is not allowed to call search-merge-requests")
 		return
 	}
@@ -296,7 +296,7 @@ func (a *App) testMergeRequests(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusBadRequest, "search_failed", err.Error())
 		return
 	}
-	if p.KeyID != "" && len(p.AllowedRepositories) > 0 {
+	if p.Restricted() && len(p.AllowedRepositories) > 0 {
 		requests := result.Requests[:0]
 		for _, item := range result.Requests {
 			if repositoryAllowed(item.LibraryID, p.AllowedRepositories) {
@@ -310,7 +310,7 @@ func (a *App) testMergeRequests(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) testFileHistory(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	if p.KeyID != "" && !stringContains(p.Scopes, "get-file-history") {
+	if p.Restricted() && !stringContains(p.Scopes, "get-file-history") {
 		problem(w, http.StatusForbidden, "forbidden", "API key is not allowed to call get-file-history")
 		return
 	}
@@ -330,7 +330,7 @@ func (a *App) testFileHistory(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusBadRequest, "history_failed", err.Error())
 		return
 	}
-	if p.KeyID != "" && !repositoryAllowed(history.LibraryID, p.AllowedRepositories) {
+	if p.Restricted() && !repositoryAllowed(history.LibraryID, p.AllowedRepositories) {
 		problem(w, http.StatusForbidden, "forbidden", "File is unavailable or access is denied")
 		return
 	}
@@ -339,7 +339,7 @@ func (a *App) testFileHistory(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) testDirectory(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	if p.KeyID != "" && !stringContains(p.Scopes, "list-directory") {
+	if p.Restricted() && !stringContains(p.Scopes, "list-directory") {
 		problem(w, http.StatusForbidden, "forbidden", "API key is not allowed to call list-directory")
 		return
 	}
@@ -358,7 +358,7 @@ func (a *App) testDirectory(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusBadRequest, "listing_failed", err.Error())
 		return
 	}
-	if p.KeyID != "" && !repositoryAllowed(listing.LibraryID, p.AllowedRepositories) {
+	if p.Restricted() && !repositoryAllowed(listing.LibraryID, p.AllowedRepositories) {
 		problem(w, http.StatusForbidden, "forbidden", "Directory is unavailable or access is denied")
 		return
 	}
@@ -367,7 +367,7 @@ func (a *App) testDirectory(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) testRepositoryMap(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	if p.KeyID != "" && !stringContains(p.Scopes, "get-repository-map") {
+	if p.Restricted() && !stringContains(p.Scopes, "get-repository-map") {
 		problem(w, 403, "forbidden", "API key is not allowed to call get-repository-map")
 		return
 	}
@@ -379,7 +379,7 @@ func (a *App) testRepositoryMap(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "libraryId is required")
 		return
 	}
-	if p.KeyID != "" && !repositoryAllowed(baseLibraryID(in.LibraryID), p.AllowedRepositories) {
+	if p.Restricted() && !repositoryAllowed(baseLibraryID(in.LibraryID), p.AllowedRepositories) {
 		problem(w, 403, "forbidden", "Library is unavailable or access is denied")
 		return
 	}
@@ -402,7 +402,7 @@ func (a *App) testRepositoryMap(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) testSymbols(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	if p.KeyID != "" && !stringContains(p.Scopes, "find-symbol") {
+	if p.Restricted() && !stringContains(p.Scopes, "find-symbol") {
 		problem(w, 403, "forbidden", "API key is not allowed to call find-symbol")
 		return
 	}
@@ -417,7 +417,7 @@ func (a *App) testSymbols(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "query is required")
 		return
 	}
-	if p.KeyID != "" && in.LibraryID != "" && !repositoryAllowed(baseLibraryID(in.LibraryID), p.AllowedRepositories) {
+	if p.Restricted() && in.LibraryID != "" && !repositoryAllowed(baseLibraryID(in.LibraryID), p.AllowedRepositories) {
 		problem(w, 403, "forbidden", "Library is unavailable or access is denied")
 		return
 	}
@@ -426,7 +426,7 @@ func (a *App) testSymbols(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "search_failed", err.Error())
 		return
 	}
-	if p.KeyID != "" && len(p.AllowedRepositories) > 0 {
+	if p.Restricted() && len(p.AllowedRepositories) > 0 {
 		filtered := items[:0]
 		for _, item := range items {
 			if repositoryAllowed(item.LibraryID, p.AllowedRepositories) {
@@ -439,7 +439,7 @@ func (a *App) testSymbols(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) testSymbolContext(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	if p.KeyID != "" && !stringContains(p.Scopes, "get-symbol-context") {
+	if p.Restricted() && !stringContains(p.Scopes, "get-symbol-context") {
 		problem(w, 403, "forbidden", "API key is not allowed to call get-symbol-context")
 		return
 	}
@@ -452,7 +452,7 @@ func (a *App) testSymbolContext(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "libraryId and symbol are required")
 		return
 	}
-	if p.KeyID != "" && !repositoryAllowed(baseLibraryID(in.LibraryID), p.AllowedRepositories) {
+	if p.Restricted() && !repositoryAllowed(baseLibraryID(in.LibraryID), p.AllowedRepositories) {
 		problem(w, 403, "forbidden", "Library is unavailable or access is denied")
 		return
 	}
@@ -465,7 +465,7 @@ func (a *App) testSymbolContext(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) testDependencies(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	if p.KeyID != "" && !stringContains(p.Scopes, "trace-dependencies") {
+	if p.Restricted() && !stringContains(p.Scopes, "trace-dependencies") {
 		problem(w, 403, "forbidden", "API key is not allowed to call trace-dependencies")
 		return
 	}
@@ -479,7 +479,7 @@ func (a *App) testDependencies(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "libraryId and symbol are required")
 		return
 	}
-	if p.KeyID != "" && !repositoryAllowed(baseLibraryID(in.LibraryID), p.AllowedRepositories) {
+	if p.Restricted() && !repositoryAllowed(baseLibraryID(in.LibraryID), p.AllowedRepositories) {
 		problem(w, 403, "forbidden", "Library is unavailable or access is denied")
 		return
 	}
@@ -502,7 +502,7 @@ func (a *App) refAnalysis(w http.ResponseWriter, r *http.Request, impact bool) {
 	if impact {
 		scope = "get-change-impact"
 	}
-	if p.KeyID != "" && !stringContains(p.Scopes, scope) {
+	if p.Restricted() && !stringContains(p.Scopes, scope) {
 		problem(w, 403, "forbidden", "API key is not allowed to call "+scope)
 		return
 	}
@@ -516,7 +516,7 @@ func (a *App) refAnalysis(w http.ResponseWriter, r *http.Request, impact bool) {
 		problem(w, 400, "invalid_request", "libraryId, baseRef and headRef are required")
 		return
 	}
-	if p.KeyID != "" && !repositoryAllowed(baseLibraryID(in.LibraryID), p.AllowedRepositories) {
+	if p.Restricted() && !repositoryAllowed(baseLibraryID(in.LibraryID), p.AllowedRepositories) {
 		problem(w, 403, "forbidden", "Library is unavailable or access is denied")
 		return
 	}
@@ -538,7 +538,7 @@ func (a *App) refAnalysis(w http.ResponseWriter, r *http.Request, impact bool) {
 }
 func (a *App) testContextPack(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	if p.KeyID != "" && !stringContains(p.Scopes, "get-context-pack") {
+	if p.Restricted() && !stringContains(p.Scopes, "get-context-pack") {
 		problem(w, 403, "forbidden", "API key is not allowed to call get-context-pack")
 		return
 	}
@@ -559,7 +559,7 @@ func (a *App) testContextPack(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) testRunbooks(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	if p.KeyID != "" && !stringContains(p.Scopes, "find-runbook") {
+	if p.Restricted() && !stringContains(p.Scopes, "find-runbook") {
 		problem(w, 403, "forbidden", "API key is not allowed to call find-runbook")
 		return
 	}
@@ -572,7 +572,7 @@ func (a *App) testRunbooks(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "query is required")
 		return
 	}
-	if p.KeyID != "" && in.LibraryID != "" && !repositoryAllowed(baseLibraryID(in.LibraryID), p.AllowedRepositories) {
+	if p.Restricted() && in.LibraryID != "" && !repositoryAllowed(baseLibraryID(in.LibraryID), p.AllowedRepositories) {
 		problem(w, 403, "forbidden", "Library is unavailable or access is denied")
 		return
 	}
@@ -585,7 +585,7 @@ func (a *App) testRunbooks(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) testContextExport(w http.ResponseWriter, r *http.Request) {
 	p, _ := auth.FromContext(r.Context())
-	if p.KeyID != "" && !stringContains(p.Scopes, "export-context") {
+	if p.Restricted() && !stringContains(p.Scopes, "export-context") {
 		problem(w, 403, "forbidden", "API key is not allowed to call export-context")
 		return
 	}
@@ -597,7 +597,7 @@ func (a *App) testContextExport(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "libraryIds and query are required")
 		return
 	}
-	if p.KeyID != "" {
+	if p.Restricted() {
 		for _, id := range in.LibraryIDs {
 			if !repositoryAllowed(baseLibraryID(id), p.AllowedRepositories) {
 				problem(w, 403, "forbidden", "Context is unavailable or access is denied")

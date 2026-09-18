@@ -389,7 +389,7 @@ func (t *tool) allowed(p auth.Principal) bool {
 	if len(t.adminRoles) == 0 {
 		return true
 	}
-	if p.KeyID == "" {
+	if !p.Restricted() {
 		return false
 	}
 	for _, role := range t.adminRoles {

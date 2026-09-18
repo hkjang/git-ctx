@@ -257,6 +257,10 @@ const integrationSettingFields = {
     ["strictCompatibility", "Context7 Strict Compatibility (2개 도구만 노출)", "boolean", false],
     ["allowedOrigins", "허용 Origin (쉼표 구분)", "array", ""],
     ["maxRequestBytes", "최대 요청 크기(Byte)", "number", 1048576],
+    ["oauthEnabled", "SSO(OAuth) 토큰으로 MCP 접속 허용", "boolean", false],
+    ["oauthResource", "리소스 식별자 (비우면 공개 주소 + /mcp)", "url", ""],
+    ["oauthAudience", "허용 대상 — Keycloak 클라이언트 ID (쉼표 구분)", "array", ""],
+    ["oauthScopes", "SSO 사용자에게 주는 도구 Scope (쉼표 구분, 비우면 관리 도구 제외 전부)", "array", ""],
   ],
   search: [
     [
@@ -2171,6 +2175,14 @@ function renderSettingFields(category, value) {
       "재순위는 query-docs 답변에만 적용됩니다. search-code와 search-semantic의 순서는 바뀌지 않습니다.",
     rerankLimit:
       "query-docs가 재순위 모델에 넘길 상위 후보 수입니다.",
+    oauthEnabled:
+      "켜면 /mcp 가 개인 API 키 외에 Keycloak 액세스 토큰(OAuth 2.1)도 받습니다. Keycloak 설정이 저장되어 있어야 동작하며, 키·REST·관리 API 는 달라지지 않습니다.",
+    oauthResource:
+      "토큰의 aud 가 가리켜야 하는 공개 HTTPS 주소입니다. 프록시 뒤 내부 주소가 아니라 클라이언트가 실제로 접속하는 주소를 적습니다.",
+    oauthAudience:
+      "Audience 매퍼 없이 발급된 Keycloak 26 토큰은 aud 에 account 만 싣고 클라이언트 ID 를 azp 에 담습니다. MCP 클라이언트용 Keycloak 클라이언트 ID 를 여기 적으면 매퍼 없이 통과합니다.",
+    oauthScopes:
+      "SSO 로 들어온 사용자가 볼 수 있는 도구의 상한입니다. 토큰의 role 은 권한으로 쓰지 않으며, 관리 도구는 이 목록에 있어도 플랫폼 역할이 있어야 보입니다.",
   };
   $("#setting-fields").hidden = fields.length === 0;
   $("#test-connection").hidden = !connectionTestCategories.includes(category);
@@ -2276,6 +2288,8 @@ function renderSettingFields(category, value) {
             applySearchRetrievalFieldState();
           if (category === "model" && ["provider", "rerankerEnabled"].includes(field.dataset.settingKey))
             applyModelFieldState();
+          if (category === "mcp" && ["oauthEnabled", "oauthResource"].includes(field.dataset.settingKey))
+            applyMCPOAuthFieldState();
           refreshSettingDirty();
         } catch {
           field.setCustomValidity("올바른 JSON을 입력하세요.");
@@ -2306,6 +2320,33 @@ function renderSettingFields(category, value) {
   if (category === "vector") applyVectorFieldState();
   if (category === "search") applySearchRetrievalFieldState();
   if (category === "model") applyModelFieldState();
+  if (category === "mcp") applyMCPOAuthFieldState();
+}
+
+// The two addresses an MCP client needs to connect over SSO, shown next to
+// the switch so an administrator can hand them out without deriving them.
+// The resource identifier follows the field as it is typed; when the field
+// is empty the server uses the public address, which is what this console
+// was opened from.
+function applyMCPOAuthFieldState() {
+  if ($("#category")?.value !== "mcp") return;
+  document.querySelector("#mcp-oauth-connect")?.remove();
+  const scopesLabel = document.querySelector('#setting-fields [data-field-key="oauthScopes"]');
+  const enabled = document.querySelector('[data-setting-key="oauthEnabled"]')?.checked === true;
+  if (!scopesLabel || !enabled) return;
+  const typed = document.querySelector('[data-setting-key="oauthResource"]')?.value.trim();
+  const resource = typed || `${location.origin}/mcp`;
+  const metadata = `${resource.replace(/\/mcp$/, "")}/.well-known/oauth-protected-resource/mcp`;
+  const panel = document.createElement("div");
+  panel.id = "mcp-oauth-connect";
+  panel.className = "wide result-panel";
+  panel.innerHTML = `<strong>SSO 연결 정보</strong><small class="field-help">MCP 클라이언트에는 MCP 주소 하나만 주면 됩니다. 401 응답의 WWW-Authenticate 가 메타데이터 주소를 가리키고, 클라이언트가 거기서 Keycloak 을 찾아 스스로 로그인합니다. 저장한 뒤 <code>curl -i ${esc(metadata)}</code> 로 확인하세요.</small>
+    <div class="button-row"><code>${esc(resource)}</code><button type="button" class="secondary" data-copy-value="${esc(resource)}">MCP 주소 복사</button></div>
+    <div class="button-row"><code>${esc(metadata)}</code><button type="button" class="secondary" data-copy-value="${esc(metadata)}">메타데이터 주소 복사</button></div>`;
+  panel.querySelectorAll("[data-copy-value]").forEach(
+    (button) => (button.onclick = () => copyText(button.dataset.copyValue)),
+  );
+  scopesLabel.after(panel);
 }
 
 function applySearchRetrievalFieldState() {

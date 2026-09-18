@@ -469,6 +469,11 @@ func (a *App) routes() {
 	a.mux.HandleFunc("GET /auth/callback", a.callback)
 	a.mux.HandleFunc("POST /auth/logout", a.logout)
 	a.mux.Handle("/mcp", a.mcpAccess(a.authenticate(http.HandlerFunc(a.mcp.ServeHTTP))))
+	// RFC 9728: where an MCP client refused at /mcp goes to find Keycloak.
+	// Both spellings, because clients disagree on whether the resource path
+	// is appended (mcpoauth.go).
+	a.mux.HandleFunc("GET /.well-known/oauth-protected-resource", a.protectedResourceMetadata)
+	a.mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", a.protectedResourceMetadata)
 	a.mux.HandleFunc("POST /webhooks/bitbucket", a.receiveWebhook)
 	a.mux.HandleFunc("POST /webhooks/gitlab", a.receiveWebhook)
 	a.mux.Handle("GET /api/v1/me", a.authenticate(http.HandlerFunc(a.me)))

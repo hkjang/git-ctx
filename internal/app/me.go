@@ -42,7 +42,7 @@ func (a *App) meRepositories(w http.ResponseWriter, r *http.Request) {
 			problem(w, 500, "internal_error", err.Error())
 			return
 		}
-		if p.KeyID != "" && !repositoryAllowed(id, p.AllowedRepositories) {
+		if p.Restricted() && !repositoryAllowed(id, p.AllowedRepositories) {
 			continue
 		}
 		item := map[string]any{"libraryId": id, "name": name, "description": description, "defaultBranch": branch, "reputation": reputation}

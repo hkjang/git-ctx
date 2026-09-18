@@ -423,8 +423,20 @@
               ["Context7 Strict Compatibility", "끔", "켜면 resolve-library-id 와 query-docs 두 도구만 노출합니다. Context7 전용 클라이언트 호환이 필요할 때만 사용합니다."],
               ["허용 Origin", "https://ide.company.com", "브라우저 기반 MCP 클라이언트가 있을 때만 지정합니다. localhost 외에는 HTTPS 만 허용됩니다."],
               ["최대 요청 크기", "1048576", "1KiB~16MiB. 큰 컨텍스트를 보내는 클라이언트가 413 을 받으면 늘립니다."],
+              ["SSO(OAuth) 토큰으로 MCP 접속 허용", "끔", "켜면 /mcp 가 Keycloak 액세스 토큰도 받습니다(MCP OAuth 2.1). Keycloak 설정이 먼저 저장되어 있어야 하며, 키·REST·관리 API 는 그대로입니다."],
+              ["리소스 식별자", "비움", "토큰의 aud 가 가리켜야 하는 공개 주소 + /mcp. 비우면 사용자 화면의 공개 주소(ui.publicUrl)로 만듭니다."],
+              ["허용 대상", "MCP 클라이언트의 Keycloak 클라이언트 ID", "Audience 매퍼 없이 발급된 토큰은 azp 로 통과시킵니다. 거부 메시지가 본 azp 값을 알려 줍니다."],
+              ["SSO Scope", "비움", "SSO 사용자에게 주는 도구 상한. 비우면 관리 도구 세 개를 뺀 전부입니다."],
             ],
           },
+        },
+        {
+          title: "1-1. SSO(OAuth) 접속의 규칙",
+          body: [
+            "이 서버는 리소스 서버입니다. 로그인·토큰 발급은 Keycloak 이 하고 여기서는 토큰의 서명·발급자·만료·대상을 검사만 합니다. 토큰을 저장하거나 세션으로 바꾸지 않습니다.",
+            "계정을 만들지 않습니다. 토큰의 sub 로 이미 등록된 활성 사용자만 찾고, 없으면 '웹으로 먼저 로그인하세요' 로 거부합니다. 토큰의 role 은 권한으로 쓰지 않습니다.",
+            "Keycloak 에서는 MCP 클라이언트용 공개(public) 클라이언트를 따로 만들고(PKCE S256, Standard Flow 만), Valid Redirect URIs 에 실제 클라이언트 콜백만 적습니다. 자세한 순서는 docs/configuration.md 의 'MCP 를 SSO 로 연결하기' 절에 있습니다.",
+          ],
         },
         {
           title: "2. 도구 활성화와 응답 예산",
@@ -972,6 +984,16 @@
             "401 이면 키가 만료·폐기되었거나 헤더 이름이 다릅니다.",
             "403 이면 키 Scope 에 해당 도구가 없습니다. API 키 화면에서 Scope 를 편집하세요.",
           ],
+        },
+        {
+          title: "3. 키 없이 SSO 로 연결하기",
+          body: [
+            "관리자가 MCP 설정에서 'SSO(OAuth) 토큰으로 MCP 접속 허용' 을 켠 환경에서는 헤더 없이 URL 하나만 등록합니다. 클라이언트가 401 응답에서 Keycloak 을 찾아 브라우저 로그인 창을 띄우고, 이미 Keycloak 에 로그인돼 있으면 화면이 거의 뜨지 않습니다.",
+            "먼저 이 웹 화면에 한 번 로그인해 두어야 합니다. SSO 토큰은 이미 등록된 계정만 엽니다.",
+            "SSO 로 들어오면 관리자가 정한 Scope 상한 안의 도구만 보입니다. 더 넓은 범위나 저장소 제한이 필요하면 개인 키를 씁니다.",
+          ],
+          code:
+            '{\n  "mcpServers": {\n    "git-ctx": {\n      "url": "https://git-ctx.company.com/mcp"\n    }\n  }\n}',
         },
       ],
     },

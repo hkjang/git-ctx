@@ -30,7 +30,7 @@ func handleResolveLibraryId(s *Server, r *http.Request, p auth.Principal, args m
 
 func handleQueryDocs(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
 	libraryID := stringArg(args, "libraryId")
-	if p.KeyID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+	if p.Restricted() && !libraryAllowed(libraryID, p.AllowedRepositories) {
 		err = errors.New("library is unavailable or access is denied")
 	} else {
 		text, err = s.search.Query(r.Context(), principalACLs(p), libraryID, stringArg(args, "query"))
@@ -127,7 +127,7 @@ func handleReadFile(s *Server, r *http.Request, p auth.Principal, args map[strin
 	var file search.FileContent
 	file, err = s.search.ReadFile(r.Context(), principalACLs(p), stringArg(args, "libraryId"), stringArg(args, "repository"),
 		stringArg(args, "path"), stringArg(args, "ref"), intArg(args, "startLine", 0), intArg(args, "endLine", 0))
-	if err == nil && p.KeyID != "" && !libraryAllowed(file.LibraryID, p.AllowedRepositories) {
+	if err == nil && p.Restricted() && !libraryAllowed(file.LibraryID, p.AllowedRepositories) {
 		err = errors.New("file is unavailable or access is denied")
 	}
 	if err == nil {
@@ -201,7 +201,7 @@ func handleGetFileHistory(s *Server, r *http.Request, p auth.Principal, args map
 	var history search.FileHistory
 	history, err = s.search.FileHistory(r.Context(), principalACLs(p), stringArg(args, "libraryId"), stringArg(args, "repository"),
 		stringArg(args, "path"), stringArg(args, "ref"), intArg(args, "limit", 20))
-	if err == nil && p.KeyID != "" && !libraryAllowed(history.LibraryID, p.AllowedRepositories) {
+	if err == nil && p.Restricted() && !libraryAllowed(history.LibraryID, p.AllowedRepositories) {
 		err = errors.New("file is unavailable or access is denied")
 	}
 	if err == nil {
@@ -215,7 +215,7 @@ func handleListDirectory(s *Server, r *http.Request, p auth.Principal, args map[
 	var listing search.DirectoryListing
 	listing, err = s.search.ListDirectory(r.Context(), principalACLs(p), stringArg(args, "libraryId"), stringArg(args, "repository"),
 		stringArg(args, "path"), stringArg(args, "ref"))
-	if err == nil && p.KeyID != "" && !libraryAllowed(listing.LibraryID, p.AllowedRepositories) {
+	if err == nil && p.Restricted() && !libraryAllowed(listing.LibraryID, p.AllowedRepositories) {
 		err = errors.New("directory is unavailable or access is denied")
 	}
 	if err == nil {
@@ -227,7 +227,7 @@ func handleListDirectory(s *Server, r *http.Request, p auth.Principal, args map[
 
 func handleGetRepositoryMap(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
 	libraryID := stringArg(args, "libraryId")
-	if p.KeyID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+	if p.Restricted() && !libraryAllowed(libraryID, p.AllowedRepositories) {
 		err = errors.New("library is unavailable or access is denied")
 	} else {
 		var item search.RepositoryMap
@@ -241,7 +241,7 @@ func handleGetRepositoryMap(s *Server, r *http.Request, p auth.Principal, args m
 
 func handleFindSymbol(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
 	libraryID := stringArg(args, "libraryId")
-	if p.KeyID != "" && libraryID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+	if p.Restricted() && libraryID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
 		err = errors.New("library is unavailable or access is denied")
 	} else {
 		var items []search.SymbolResult
@@ -264,7 +264,7 @@ func handleFindSymbol(s *Server, r *http.Request, p auth.Principal, args map[str
 
 func handleGetSymbolContext(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
 	libraryID := stringArg(args, "libraryId")
-	if p.KeyID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+	if p.Restricted() && !libraryAllowed(libraryID, p.AllowedRepositories) {
 		err = errors.New("library is unavailable or access is denied")
 	} else {
 		var item search.SymbolResult
@@ -278,7 +278,7 @@ func handleGetSymbolContext(s *Server, r *http.Request, p auth.Principal, args m
 
 func handleTraceDependencies(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
 	libraryID := stringArg(args, "libraryId")
-	if p.KeyID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+	if p.Restricted() && !libraryAllowed(libraryID, p.AllowedRepositories) {
 		err = errors.New("library is unavailable or access is denied")
 	} else {
 		var items []search.DependencyResult
@@ -292,7 +292,7 @@ func handleTraceDependencies(s *Server, r *http.Request, p auth.Principal, args 
 
 func handleCompareRefs(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
 	libraryID := stringArg(args, "libraryId")
-	if p.KeyID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+	if p.Restricted() && !libraryAllowed(libraryID, p.AllowedRepositories) {
 		err = errors.New("library is unavailable or access is denied")
 	} else {
 		var item search.RefComparison
@@ -306,7 +306,7 @@ func handleCompareRefs(s *Server, r *http.Request, p auth.Principal, args map[st
 
 func handleGetChangeImpact(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
 	libraryID := stringArg(args, "libraryId")
-	if p.KeyID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+	if p.Restricted() && !libraryAllowed(libraryID, p.AllowedRepositories) {
 		err = errors.New("library is unavailable or access is denied")
 	} else {
 		var item search.ChangeImpact
@@ -329,7 +329,7 @@ func handleGetContextPack(s *Server, r *http.Request, p auth.Principal, args map
 
 func handleFindRunbook(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
 	libraryID := stringArg(args, "libraryId")
-	if p.KeyID != "" && libraryID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+	if p.Restricted() && libraryID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
 		err = errors.New("library is unavailable or access is denied")
 	} else {
 		var items []search.RunbookResult
@@ -356,7 +356,7 @@ func handleFindRunbook(s *Server, r *http.Request, p auth.Principal, args map[st
 
 func handleExportContext(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
 	libraries := stringSliceArg(args, "libraryIds")
-	if p.KeyID != "" {
+	if p.Restricted() {
 		for _, id := range libraries {
 			if !libraryAllowed(id, p.AllowedRepositories) {
 				err = errors.New("context is unavailable or access is denied")
@@ -372,7 +372,7 @@ func handleExportContext(s *Server, r *http.Request, p auth.Principal, args map[
 
 func handleExplainSearchResult(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
 	libraryID := stringArg(args, "libraryId")
-	if p.KeyID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+	if p.Restricted() && !libraryAllowed(libraryID, p.AllowedRepositories) {
 		err = errors.New("library is unavailable or access is denied")
 	} else {
 		var item search.SearchExplanation
@@ -402,7 +402,7 @@ func handleReindexRepository(s *Server, r *http.Request, p auth.Principal, args 
 
 func handleBuildContext(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
 	libraryID := stringArg(args, "libraryId")
-	if p.KeyID != "" && libraryID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+	if p.Restricted() && libraryID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
 		return "", false, errors.New("library is unavailable or access is denied")
 	}
 	var bundle search.ContextBundle
@@ -419,7 +419,7 @@ func handleBuildContext(s *Server, r *http.Request, p auth.Principal, args map[s
 
 func handleFindCodeOwner(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
 	libraryID := stringArg(args, "libraryId")
-	if p.KeyID != "" && libraryID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+	if p.Restricted() && libraryID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
 		return "", false, errors.New("library is unavailable or access is denied")
 	}
 	var result search.OwnershipResult
@@ -428,7 +428,7 @@ func handleFindCodeOwner(s *Server, r *http.Request, p auth.Principal, args map[
 	if err != nil {
 		return "", false, err
 	}
-	if p.KeyID != "" && !libraryAllowed(result.LibraryID, p.AllowedRepositories) {
+	if p.Restricted() && !libraryAllowed(result.LibraryID, p.AllowedRepositories) {
 		return "", false, errors.New("path is unavailable or access is denied")
 	}
 	return search.FormatOwners(result), len(result.Owners) == 0, nil
@@ -492,7 +492,7 @@ func rebuildDependencyVersions(result search.DependencyUsage) search.DependencyU
 
 func handleFindTests(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
 	libraryID := stringArg(args, "libraryId")
-	if p.KeyID != "" && libraryID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+	if p.Restricted() && libraryID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
 		return "", false, errors.New("library is unavailable or access is denied")
 	}
 	var result search.TestSearch
@@ -540,7 +540,7 @@ func handleArchitectureMap(s *Server, r *http.Request, p auth.Principal, args ma
 
 func handleAssessChangeRisk(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
 	libraryID := stringArg(args, "libraryId")
-	if p.KeyID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+	if p.Restricted() && !libraryAllowed(libraryID, p.AllowedRepositories) {
 		return "", false, errors.New("library is unavailable or access is denied")
 	}
 	var result search.ChangeAssessment
@@ -554,7 +554,7 @@ func handleAssessChangeRisk(s *Server, r *http.Request, p auth.Principal, args m
 
 func handleRepositoryHealth(s *Server, r *http.Request, p auth.Principal, args map[string]any) (text string, empty bool, err error) {
 	libraryID := stringArg(args, "libraryId")
-	if p.KeyID != "" && !libraryAllowed(libraryID, p.AllowedRepositories) {
+	if p.Restricted() && !libraryAllowed(libraryID, p.AllowedRepositories) {
 		return "", false, errors.New("library is unavailable or access is denied")
 	}
 	var result search.RepositoryHealth
