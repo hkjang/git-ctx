@@ -292,7 +292,7 @@ Strict Compatibility를 켜면 `resolve-library-id`, `query-docs`만 노출한�
 | `mcp` 설정 키 | 표준 이름 | 기본값 | 뜻 |
 |---|---|---|---|
 | `oauthEnabled` | `mcp.oauth.enabled` | `false` | 켜기 스위치. Keycloak 설정(`keycloak.issuerUrl`)이 저장돼 있어야 실제로 동작하고, 없으면 켜 두어도 꺼진 것처럼 동작하며 이유를 로그에 남긴다 |
-| `oauthResource` | `mcp.oauth.resource` | 빈 값 | 리소스 식별자(RFC 8707). 비우면 `ui.publicUrl` + `/mcp`. 프록시 뒤 내부 주소가 아니라 클라이언트가 실제로 접속하는 공개 HTTPS 주소 |
+| `oauthResource` | `mcp.oauth.resource` | 빈 값 | 리소스 식별자(RFC 8707). 비우면 `ui.publicUrl` + `/mcp`. 둘 다 없으면(공개 주소가 기본값 그대로면) 요청의 Host 로 만들지 않고 스위치를 켜 두어도 꺼진 것처럼 동작한다. 프록시 뒤 내부 주소가 아니라 클라이언트가 실제로 접속하는 공개 HTTPS 주소 |
 | `oauthAudience` | `mcp.oauth.audience` | 빈 값 | 허용 대상 목록. 토큰의 `aud` 또는 `azp` 와 비교한다 |
 | `oauthScopes` | `mcp.oauth.scopes` | 관리 도구 세 개를 뺀 전부 | SSO 사용자에게 주는 도구 Scope 상한. 도구 이름만 허용 |
 | (재사용) `keycloak.issuerUrl` · `keycloak.clientId` · `keycloak.usernameClaim` | `oidc.*` | 웹 로그인 설정 | 새로 만들지 않는다 |

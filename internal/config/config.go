@@ -7,6 +7,10 @@ import (
 	"strings"
 )
 
+// DefaultPublicURL is the compiled-in public address, used until an operator
+// sets ui.publicUrl. It names no installation in particular.
+const DefaultPublicURL = "http://localhost:4747"
+
 type Config struct {
 	ListenAddress  string
 	DatabaseDriver string
@@ -51,7 +55,7 @@ func FromEnv() (Config, error) {
 		MasterKey:           string(master[:]),
 		RecoveryKey:         recoveryKey,
 		PreviousRecoveryKey: strings.TrimSpace(os.Getenv("GIT_CTX_PREVIOUS_RECOVERY_KEY")),
-		PublicURL:           "http://localhost:4747",
+		PublicURL:           DefaultPublicURL,
 		BackupDirectory:     "backups",
 	}
 	return c, nil

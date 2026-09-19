@@ -96,8 +96,15 @@ const ssoResource = "https://git-ctx.company/mcp"
 // registered active account, one disabled one, and SSO for MCP still off.
 func ssoFixture(t *testing.T, name string) (*App, *fakeIdP) {
 	t.Helper()
+	return ssoFixtureAt(t, name, "https://git-ctx.company")
+}
+
+// ssoFixtureAt is ssoFixture with the public URL the process was started
+// with; config.DefaultPublicURL is an installation nobody configured.
+func ssoFixtureAt(t *testing.T, name, publicURL string) (*App, *fakeIdP) {
+	t.Helper()
 	idp := newFakeIdP(t)
-	a, err := New(context.Background(), config.Config{DatabaseDriver: "sqlite", DatabaseDSN: "file:" + name + "?mode=memory&cache=shared&_foreign_keys=on&_busy_timeout=5000", KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: "https://git-ctx.company"})
+	a, err := New(context.Background(), config.Config{DatabaseDriver: "sqlite", DatabaseDSN: "file:" + name + "?mode=memory&cache=shared&_foreign_keys=on&_busy_timeout=5000", KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap", PublicURL: publicURL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,6 +206,66 @@ func TestSSOForMCPIsOffByDefault(t *testing.T) {
 	}
 	if rec := ssoRequest(a, "/mcp", "", mcpInitialize); rec.Header().Get("WWW-Authenticate") != "" {
 		t.Fatalf("anonymous challenge while off: %q", rec.Header().Get("WWW-Authenticate"))
+	}
+}
+
+// A resource identifier is never made up from the request. With neither
+// mcp.oauthResource nor ui.publicUrl set, an installation still running on
+// the compiled-in public URL has no identity a token's aud could be held to,
+// so SSO for MCP stays inactive until one is configured — not "any Host the
+// caller sends", and not the same http://localhost:4747/mcp on every install.
+func TestSSOStaysInactiveWithoutAResourceIdentifier(t *testing.T) {
+	a, idp := ssoFixtureAt(t, "sso-no-resource", config.DefaultPublicURL)
+	saveSetting(t, a, "mcp", `{"oauthEnabled":true,"oauthAudience":["claude-mcp"]}`)
+
+	var log bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&log, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	if _, _, inactive := a.mcpOAuthActive(context.Background()); !strings.Contains(inactive, "ui.publicUrl") {
+		t.Fatalf("inactive reason=%q", inactive)
+	}
+	for _, path := range []string{"/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"} {
+		if rec := ssoRequest(a, path, "", ""); rec.Code != http.StatusNotFound {
+			t.Fatalf("%s without a resource=%d body=%s", path, rec.Code, rec.Body.String())
+		}
+	}
+	if !strings.Contains(log.String(), "mcp sso is enabled but not active") {
+		t.Fatalf("no warning about the inactive switch: %s", log.String())
+	}
+	// A token whose aud is exactly what the Host header would have produced
+	// is refused all the same, and no challenge invites the client to retry.
+	for _, aud := range []string{"http://localhost:4747/mcp", "http://example.com/mcp"} {
+		req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(mcpInitialize))
+		req.Host = strings.TrimSuffix(strings.TrimPrefix(aud, "http://"), "/mcp")
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("MCP-Protocol-Version", "2025-06-18")
+		req.Header.Set("Authorization", "Bearer "+idp.token("kc-alice", "claude-mcp", []string{aud}, nil))
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), "Keycloak access token validation failed") {
+			t.Fatalf("aud=%s: code=%d body=%s", aud, rec.Code, rec.Body.String())
+		}
+		if rec.Header().Get("WWW-Authenticate") != "" {
+			t.Fatalf("aud=%s: challenge=%q", aud, rec.Header().Get("WWW-Authenticate"))
+		}
+	}
+	// A token via the allowed-audience list is refused too: the switch is
+	// inactive as a whole, not merely missing one comparison value.
+	if rec := ssoRequest(a, "/mcp", idp.token("kc-alice", "claude-mcp", []string{"account"}, nil), mcpInitialize); rec.Code != http.StatusUnauthorized || rec.Header().Get("WWW-Authenticate") != "" {
+		t.Fatalf("azp token without a resource=%d challenge=%q", rec.Code, rec.Header().Get("WWW-Authenticate"))
+	}
+
+	// ui.publicUrl is what the documentation says fills the gap.
+	saveSetting(t, a, "ui", `{"publicUrl":"https://console.company/"}`)
+	rec := ssoRequest(a, "/.well-known/oauth-protected-resource/mcp", "", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"resource":"https://console.company/mcp"`) {
+		t.Fatalf("metadata after ui.publicUrl=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if names := listTools(t, a, idp.token("kc-alice", "claude-mcp", []string{"https://console.company/mcp"}, nil)); len(names) == 0 {
+		t.Fatalf("token for the configured resource opened nothing")
 	}
 }
 
@@ -388,8 +455,25 @@ func TestSSOTokenChecksEveryClaimAndLogsWhichOneFailed(t *testing.T) {
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("%s: code=%d body=%s", tc.name, rec.Code, rec.Body.String())
 		}
-		if !strings.Contains(log.String(), "mcp sso token refused") || !strings.Contains(log.String(), tc.logged) {
+		refusedLine := ""
+		for _, line := range strings.Split(log.String(), "\n") {
+			if strings.Contains(line, "mcp sso token refused") {
+				refusedLine = line
+			}
+		}
+		if refusedLine == "" || !strings.Contains(refusedLine, tc.logged) {
 			t.Fatalf("%s: the log does not say which check failed (want %q): %s", tc.name, tc.logged, log.String())
+		}
+		// The refusal line itself carries the request id the middleware
+		// stamped on the response, so an operator can join it to the
+		// http_request line (which has its own request_id, hence the line
+		// rather than the whole buffer).
+		requestID := rec.Header().Get("X-Request-ID")
+		if requestID == "" {
+			t.Fatalf("%s: response carries no X-Request-ID", tc.name)
+		}
+		if !strings.Contains(refusedLine, "request_id="+requestID) {
+			t.Fatalf("%s: the refusal line does not carry request_id=%s: %s", tc.name, requestID, refusedLine)
 		}
 	}
 	var audited int

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"git-ctx/internal/auth"
+	"git-ctx/internal/config"
 	"git-ctx/internal/toolcatalog"
 )
 
@@ -42,8 +43,9 @@ const mcpPath = "/mcp"
 // .audience / .scopes, the way keycloak.issuerUrl spells oidc.issuer_url.
 type mcpOAuthSettings struct {
 	Enabled bool
-	// Resource is the identifier this server claims (RFC 8707). Empty means
-	// the public URL plus /mcp.
+	// Resource is the identifier this server claims (RFC 8707): the setting
+	// when the administrator gave one, otherwise ui.publicUrl plus /mcp, which
+	// mcpOAuthActive fills in. Never derived from the request.
 	Resource string
 	// Audiences are values an administrator accepts in aud or azp besides the
 	// resource identifier — in practice the MCP client's Keycloak client ID.
@@ -153,8 +155,10 @@ func validateMCPOAuthSetting(value map[string]any) error {
 
 // mcpOAuthActive reports whether SSO tokens are accepted at /mcp right now,
 // and if not, why. Enabled is not enough: without a Keycloak issuer there is
-// nothing to verify against, and a metadata document that names no
-// authorization server sends the client in a loop.
+// nothing to verify against, a metadata document that names no
+// authorization server sends the client in a loop, and without a resource
+// identifier there is nothing a token's aud could be held to. When active,
+// the returned settings carry the resolved Resource.
 func (a *App) mcpOAuthActive(ctx context.Context) (mcpOAuthSettings, string, string) {
 	settings := a.mcpOAuthSettings(ctx)
 	if !settings.Enabled {
@@ -164,26 +168,34 @@ func (a *App) mcpOAuthActive(ctx context.Context) (mcpOAuthSettings, string, str
 	if err != nil || strings.TrimSpace(cfg.IssuerURL) == "" {
 		return settings, "", "Keycloak is not configured (keycloak.issuerUrl is empty)"
 	}
+	if settings.Resource == "" {
+		settings.Resource = a.mcpResource(ctx)
+	}
+	if settings.Resource == "" {
+		return settings, "", "no resource identifier (set mcp.oauthResource or ui.publicUrl)"
+	}
 	return settings, strings.TrimSuffix(cfg.IssuerURL, "/"), ""
 }
 
-// mcpResource is the identifier this deployment claims: what the metadata
-// document advertises and what a token's aud must name. It is the public
-// address the client actually connects to, never the address behind a proxy.
-// The Host header is the last resort when nothing is configured — anybody
-// can send any Host, so a configured value always wins.
-func (a *App) mcpResource(ctx context.Context, r *http.Request, settings mcpOAuthSettings) string {
-	if settings.Resource != "" {
-		return settings.Resource
+// mcpResource is the identifier this deployment claims when mcp.oauthResource
+// is empty: the public address the client actually connects to, plus /mcp.
+// Only a configured public URL counts. The compiled-in default would make
+// every installation claim the same identifier, and the request's Host
+// header is whatever the caller chose to send — neither is an identity a
+// token's aud can be checked against, so with nothing configured there is
+// no resource at all and SSO stays inactive.
+func (a *App) mcpResource(ctx context.Context) string {
+	if settings, err := a.loadSettingMap(ctx, "ui"); err == nil {
+		if value, ok := settings["publicUrl"].(string); ok {
+			if parsed, err := url.Parse(value); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+				return strings.TrimSuffix(value, "/") + mcpPath
+			}
+		}
 	}
-	if public := a.publicURL(ctx); public != "" {
-		return public + mcpPath
+	if a.cfg.PublicURL == "" || a.cfg.PublicURL == config.DefaultPublicURL {
+		return ""
 	}
-	scheme := "http"
-	if requestIsSecure(r) {
-		scheme = "https"
-	}
-	return scheme + "://" + r.Host + mcpPath
+	return strings.TrimSuffix(a.cfg.PublicURL, "/") + mcpPath
 }
 
 // mcpMetadataURL is where a refused client is sent to learn the above.
@@ -209,9 +221,8 @@ func (a *App) protectedResourceMetadata(w http.ResponseWriter, r *http.Request) 
 	// Browser-hosted MCP clients read this document cross-origin. Only this
 	// document is opened; /mcp itself keeps its Origin allow-list.
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	resource := a.mcpResource(r.Context(), r, settings)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"resource":                 resource,
+		"resource":                 settings.Resource,
 		"authorization_servers":    []string{issuer},
 		"bearer_methods_supported": []string{"header"},
 		"scopes_supported":         settings.Scopes,
@@ -231,7 +242,7 @@ func (a *App) mcpChallenge(w http.ResponseWriter, r *http.Request, presented boo
 	if inactive != "" {
 		return
 	}
-	value := fmt.Sprintf(`Bearer realm="git-ctx", resource_metadata=%q`, mcpMetadataURL(a.mcpResource(r.Context(), r, settings)))
+	value := fmt.Sprintf(`Bearer realm="git-ctx", resource_metadata=%q`, mcpMetadataURL(settings.Resource))
 	if presented {
 		value += `, error="invalid_token"`
 	}
@@ -256,9 +267,10 @@ type oauthRefusal struct {
 
 // oauthPrincipal turns an SSO access token presented at /mcp into a
 // principal, or says why it will not. Called only once the request has been
-// found to carry a JWT-shaped bearer and SSO acceptance is active.
-func (a *App) oauthPrincipal(ctx context.Context, r *http.Request, token string, settings mcpOAuthSettings) (auth.Principal, *oauthRefusal) {
-	resource := a.mcpResource(ctx, r, settings)
+// found to carry a JWT-shaped bearer and SSO acceptance is active, so
+// settings.Resource is resolved.
+func (a *App) oauthPrincipal(ctx context.Context, token string, settings mcpOAuthSettings) (auth.Principal, *oauthRefusal) {
+	resource := settings.Resource
 	verified, err := a.oidc.VerifyResourceToken(ctx, token, resource, settings.Audiences)
 	if err != nil {
 		var audience *auth.AudienceError
@@ -321,7 +333,9 @@ func (a *App) oauthPrincipal(ctx context.Context, r *http.Request, token string,
 
 // logOAuthRefusal records which check failed. The caller only ever learns
 // the message; without this line an operator cannot tell a bad signature
-// from a wrong issuer from an expired token.
-func (a *App) logOAuthRefusal(r *http.Request, refusal *oauthRefusal) {
-	slog.Warn("mcp sso token refused", "reason", refusal.reason, "client_ip", auth.ClientIP(r.Context()))
+// from a wrong issuer from an expired token. The request id is the one the
+// logging middleware stamped on the response, so the line joins the
+// http_request line and the audit row for the same call.
+func (a *App) logOAuthRefusal(w http.ResponseWriter, r *http.Request, refusal *oauthRefusal) {
+	slog.Warn("mcp sso token refused", "request_id", w.Header().Get("X-Request-ID"), "reason", refusal.reason, "client_ip", auth.ClientIP(r.Context()))
 }

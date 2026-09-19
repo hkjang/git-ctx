@@ -83,9 +83,13 @@ type OIDCVerifier struct {
 	accessVerifier *oidc.IDTokenVerifier
 	accessExpires  time.Time
 	// resource verifies SSO access tokens presented to /mcp (resourcetoken.go).
-	resource        *oidc.IDTokenVerifier
-	resourceKey     string
-	resourceExpires time.Time
+	// resourceErr is the last failed discovery for resourceKey, kept until
+	// resourceErrExpires so an outage is not re-discovered on every token.
+	resource           *oidc.IDTokenVerifier
+	resourceKey        string
+	resourceExpires    time.Time
+	resourceErr        error
+	resourceErrExpires time.Time
 }
 
 func NewOIDCVerifier(loader func(context.Context) (OIDCConfig, error)) *OIDCVerifier {

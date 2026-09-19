@@ -153,9 +153,9 @@ func (a *App) authenticate(next http.Handler) http.Handler {
 			// and mapped onto an account that already exists. Switched off, the
 			// token falls through to the check every other path runs.
 			if settings, _, inactive := a.mcpOAuthActive(r.Context()); inactive == "" {
-				p, refusal := a.oauthPrincipal(r.Context(), r, token, settings)
+				p, refusal := a.oauthPrincipal(r.Context(), token, settings)
 				if refusal != nil {
-					a.logOAuthRefusal(r, refusal)
+					a.logOAuthRefusal(w, r, refusal)
 					a.audit(r, auth.Principal{UserID: "anonymous"}, "mcp.oauth.auth", "sso_token", "", "failure", map[string]any{"reason": refusal.reason.Error()})
 					deny("invalid_token", refusal.message, true)
 					return

@@ -119,35 +119,72 @@ func (v *OIDCVerifier) VerifyResourceToken(ctx context.Context, raw, resource st
 	return out, nil
 }
 
-// resourceVerifier is cached like the sign-in verifiers, but built on a
-// context that outlives the request: the provider keeps it for later key
-// fetches, and a key rotation must not fail because the first caller hung up.
+// resourceDiscoveryFailureTTL is how long a failed discovery is remembered.
+// Long enough that a Keycloak outage does not turn every /mcp request into
+// a fresh network round trip; short enough that it recovers on its own.
+const resourceDiscoveryFailureTTL = 30 * time.Second
+
+// resourceVerifier is cached like the sign-in verifiers. v.mu is shared with
+// the web sign-in verifiers, so it is held only to read and write the cache,
+// never across the network: discovery runs outside the lock on the request's
+// own context, and a caller that hangs up or times out gets its context error
+// back instead of waiting on the identity provider. A discovery that fails
+// is remembered for resourceDiscoveryFailureTTL so a burst of tokens during
+// an outage does not become a burst of discovery requests.
+//
+// The verifier itself is built on a context that outlives the request: the
+// key set keeps it for later fetches, and a key rotation must not fail
+// because the first caller hung up.
 func (v *OIDCVerifier) resourceVerifier(ctx context.Context, cfg OIDCConfig) (*oidc.IDTokenVerifier, error) {
 	key := verifierKey(cfg)
+	now := time.Now()
 	v.mu.Lock()
-	defer v.mu.Unlock()
-	if v.resource != nil && v.resourceKey == key && time.Now().Before(v.resourceExpires) {
-		return v.resource, nil
+	if v.resource != nil && v.resourceKey == key && now.Before(v.resourceExpires) {
+		verifier := v.resource
+		v.mu.Unlock()
+		return verifier, nil
 	}
-	oidcCtx, err := oidcContext(context.WithoutCancel(ctx), cfg)
+	if v.resourceErr != nil && v.resourceKey == key && now.Before(v.resourceErrExpires) {
+		err := v.resourceErr
+		v.mu.Unlock()
+		return nil, err
+	}
+	v.mu.Unlock()
+
+	discoveryCtx, err := oidcContext(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
-	provider, err := oidc.NewProvider(oidcCtx, strings.TrimSuffix(cfg.IssuerURL, "/"))
+	provider, err := oidc.NewProvider(discoveryCtx, strings.TrimSuffix(cfg.IssuerURL, "/"))
 	if err != nil {
-		return nil, fmt.Errorf("OIDC discovery: %w", err)
+		err = fmt.Errorf("OIDC discovery: %w", err)
+		// The caller's own cancellation says nothing about the provider; only
+		// a failure the provider produced is worth remembering.
+		if ctx.Err() == nil {
+			v.mu.Lock()
+			v.resource, v.resourceKey = nil, key
+			v.resourceErr, v.resourceErrExpires = err, time.Now().Add(resourceDiscoveryFailureTTL)
+			v.mu.Unlock()
+		}
+		return nil, err
+	}
+	keySetCtx, err := oidcContext(context.WithoutCancel(ctx), cfg)
+	if err != nil {
+		return nil, err
 	}
 	skew := time.Duration(cfg.AllowedClockSkewSeconds) * time.Second
 	// The audience is compared above against more than one acceptable value;
 	// the library compares against exactly one, so it is told to stand aside.
-	v.resource = provider.VerifierContext(oidcCtx, &oidc.Config{
+	verifier := provider.VerifierContext(keySetCtx, &oidc.Config{
 		SkipClientIDCheck:    true,
 		SupportedSigningAlgs: resourceSigningAlgs,
 		Now:                  func() time.Time { return time.Now().Add(-skew) },
 	})
-	v.resourceKey = key
-	v.resourceExpires = time.Now().Add(10 * time.Minute)
-	return v.resource, nil
+	v.mu.Lock()
+	v.resource, v.resourceKey, v.resourceExpires = verifier, key, time.Now().Add(10*time.Minute)
+	v.resourceErr, v.resourceErrExpires = nil, time.Time{}
+	v.mu.Unlock()
+	return verifier, nil
 }
 
 func numberClaim(m map[string]any, key string) (float64, bool) {
