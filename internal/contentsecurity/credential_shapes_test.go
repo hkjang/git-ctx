@@ -275,3 +275,37 @@ func TestTheMaskingRevisionTracksTheRules(t *testing.T) {
 		t.Error("a changed rule left the masking revision alone, so no ref would be read again")
 	}
 }
+
+func TestCurlMaskingPreservesCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name, input, want, finding string
+	}{
+		{"short flag", "curl -u admin:Passw0rd https://api.company/v1/health", "curl -u [REDACTED] https://api.company/v1/health", "credential_assignment"},
+		{"long flag and option", "curl --silent --user admin:Passw0rd https://api.company/v1/health", "curl --silent --user [REDACTED] https://api.company/v1/health", "credential_assignment"},
+		{"surrounding text and whitespace", "Before\n\tcurl\t--silent\t-u\tadmin:Passw0rd\thttps://api.company/v1/health\nAfter\n", "Before\n\tcurl\t--silent\t-u\t[REDACTED]\thttps://api.company/v1/health\nAfter\n", "credential_assignment"},
+		{"newline after flag", "curl --user\n\tadmin:Passw0rd https://api.company/v1/health\n", "curl --user\n\t[REDACTED] https://api.company/v1/health\n", "credential_assignment"},
+		{"no authentication", "curl --silent https://api.company/v1/health", "curl --silent https://api.company/v1/health", ""},
+		{"another program", "other -u admin:Passw0rd https://api.company/v1/health", "other -u admin:Passw0rd https://api.company/v1/health", ""},
+		{"prefix limit", "curl " + strings.Repeat("x", 201) + " -u admin:Passw0rd", "curl " + strings.Repeat("x", 201) + " -u admin:Passw0rd", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, finding := Sanitize(tc.input)
+			if got != tc.want || finding != tc.finding {
+				t.Errorf("command or finding mismatch (finding=%q)", finding)
+			}
+			if strings.Count(got, "\n") != strings.Count(tc.input, "\n") {
+				t.Error("line count changed")
+			}
+			if again, _ := Sanitize(got); again != got {
+				t.Error("masking is not idempotent")
+			}
+		})
+	}
+}
+
+func TestCurlMaskingChangesRevision(t *testing.T) {
+	if Revision() == "edeca363cffe" {
+		t.Fatal("curl masking must invalidate the previous index policy revision")
+	}
+	t.Logf("masking revision: %s", Revision())
+}
