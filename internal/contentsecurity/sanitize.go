@@ -61,7 +61,7 @@ const secretNames = `api[_-]?key|secret[_-]?key|client[_-]?secret|access[_-]?tok
 // digit, and nothing else but a comment. Requiring that keeps the rule off the
 // "token: > 5" of a template language and off a Markdown table, whose cells
 // begin with the pipe rather than end with it.
-var blockScalarSecretRE = regexp.MustCompile(`(?im)^([^\S\r\n]*)(?:-[^\S\r\n]+)?["']?(?:` + secretNames + `)["']?[^\S\r\n]*:[^\S\r\n]*[|>][-+0-9]*[^\S\r\n]*(?:#[^\r\n]*)?\r?$`)
+var blockScalarSecretRE = regexp.MustCompile(`(?im)^([^\S\r\n]*(?:-[^\S\r\n]+)?)["']?(?:` + secretNames + `)["']?[^\S\r\n]*:[^\S\r\n]*[|>][-+0-9]*[^\S\r\n]*(?:#[^\r\n]*)?\r?$`)
 var awsKeyRE = regexp.MustCompile(`\bAKIA[A-Z0-9]{16}\b`)
 
 // Vendor prefixes are matched explicitly rather than left to the entropy rule,
@@ -224,10 +224,13 @@ func maskBlockScalars(content string) (string, bool) {
 	masked := false
 	for index := 0; index < len(lines); index++ {
 		header, _ := splitReturn(lines[index])
-		if !blockScalarSecretRE.MatchString(header) {
+		match := blockScalarSecretRE.FindStringSubmatch(header)
+		if match == nil {
 			continue
 		}
-		depth := blockIndent(header)
+		// Include the list dash and its following spaces: siblings align
+		// with the key, not with the dash.
+		depth := len(match[1])
 		end := index + 1
 		for ; end < len(lines); end++ {
 			body, carriage := splitReturn(lines[end])
