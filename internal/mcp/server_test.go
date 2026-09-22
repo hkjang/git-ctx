@@ -670,13 +670,17 @@ func TestTruncationKeepsTextValid(t *testing.T) {
 
 	// A clamped answer must also stay valid, including the pathological case
 	// where a single unbroken line has to be cut mid-way.
-	dense := "## 결과\n" + strings.Repeat("가나다라마바사아자차카타파하", 400)
-	clamped := clampResponse(dense, 3000)
-	if !utf8.ValidString(clamped) {
-		t.Fatal("clampResponse produced invalid UTF-8")
-	}
-	if len(clamped) > 3000 {
-		t.Fatalf("clamped=%d bytes", len(clamped))
+	for _, unit := range []string{"é", "가나다라마바사아자차카타파하", "😀", "aé가😀Z"} {
+		dense := "## 결과\n" + strings.Repeat(unit, 4000)
+		for budget := 3000; budget < 3012; budget++ {
+			clamped := clampResponse(dense, budget)
+			if !utf8.ValidString(clamped) {
+				t.Errorf("%q budget %d produced invalid UTF-8", unit, budget)
+			}
+			if len(clamped) > budget {
+				t.Errorf("%q budget %d: clamped=%d bytes", unit, budget, len(clamped))
+			}
+		}
 	}
 }
 
@@ -1060,5 +1064,61 @@ func TestServerInstructionsDescribeWhatThisServerDoes(t *testing.T) {
 	// manual.
 	if size := len(serverInstructions); size > 4000 {
 		t.Errorf("the instructions have grown to %d bytes; they are sent to every client", size)
+	}
+}
+
+func TestReadFileTruncationPreservesSourceCharacters(t *testing.T) {
+	s := fixture(t)
+	if _, err := s.store.DB.Exec(`INSERT INTO mcp_tools(name,enabled,cache_seconds) VALUES('read-file',1,300)
+ ON CONFLICT(name) DO UPDATE SET cache_seconds=300`); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	for i, unit := range []string{"é", "가", "😀", "aé가😀Z"} {
+		original := strings.Repeat(unit, 4000)
+		path := fmt.Sprintf("utf8-%d.txt", i)
+		if _, err := s.store.DB.Exec(`INSERT INTO repository_files(repository_id,ref_name,path,base_name,size_bytes,content_indexed,commit_id) VALUES('r1','main',?,?,?,1,'4fa21bd')`, path, path, len(original)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.store.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES(?,'r1','main','4fa21bd',?,1,1,'','document',?,'utf8')`, path, path, original); err != nil {
+			t.Fatal(err)
+		}
+		for budget := 3000; budget < 3012; budget++ {
+			t.Run(fmt.Sprintf("%s/%d", unit, budget), func(t *testing.T) {
+				var first string
+				for attempt := 0; attempt < 2; attempt++ {
+					out := callAs(t, s, auth.Principal{UserID: "u1", Subject: "alice", ACLPrincipal: "alice"}, fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read-file","arguments":{"libraryId":"/kcb/clustara","path":%q,"ref":"main","maxBytes":%d}}}`, path, budget))
+					result, ok := out["result"].(map[string]any)
+					if !ok || result["isError"] != false {
+						t.Fatalf("read-file failed: %#v", out)
+					}
+					text := result["content"].([]any)[0].(map[string]any)["text"].(string)
+					if !utf8.ValidString(text) || strings.ContainsRune(text, '\uFFFD') {
+						t.Error("JSON response contains damaged source characters")
+					}
+					_, content, opened := strings.Cut(text, "```txt\n")
+					kept, tail, closed := strings.Cut(content, "\n```")
+					if !opened || !closed || len(kept) < budget*6/10 || len(kept) >= len(original) || !strings.HasPrefix(original, kept) {
+						t.Errorf("read-file did not preserve a substantial original prefix (%d bytes)", len(kept))
+					}
+					if !strings.Contains(tail, "### Truncated") || !strings.Contains(tail, "### Notes") {
+						t.Error("missing truncation notice or Notes")
+					}
+					if attempt == 0 {
+						first = text
+					} else if text != first {
+						t.Error("cache hit changed the answer")
+					}
+					var total, hits, truncated int
+					if err := s.store.DB.QueryRow(`SELECT COUNT(*),COALESCE(SUM(cache_hit),0),COALESCE(SUM(truncated),0) FROM mcp_calls WHERE tool='read-file'`).Scan(&total, &hits, &truncated); err != nil {
+						t.Fatal(err)
+					}
+					if total != calls*2+attempt+1 || hits != calls+attempt || truncated != total {
+						t.Fatalf("cache/audit: calls=%d hits=%d truncated=%d, prior pairs=%d attempt=%d", total, hits, truncated, calls, attempt)
+					}
+				}
+				calls++
+			})
+		}
 	}
 }
