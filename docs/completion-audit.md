@@ -35,6 +35,23 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-09-22 v0.77.15 릴리스 전 검증 결과:
+
+```text
+UTF-8 모든 바이트 경계·실제 read-file 캐시 미스/히트  PASS
+태그 없는 빌드·전체 테스트                           PASS
+FTS5 빌드·전체 테스트·race·vet                       PASS
+버전 메타데이터 정합성·회귀 시험                     PASS
+빌드 모드 교차·기존 릴리스 DB 업그레이드              PASS
+콘솔 구문·계약 시험                                 PASS
+govulncheck ./... (v1.7.0)                          PASS (취약점 없음)
+Kubernetes Kustomize·:4747·v0.77.15 렌더링           PASS
+Docker linux/amd64·UID 10001·v0.77.15 빌드           태그 푸시 후 CI 수행
+```
+
+긴 줄을 예산에 맞춰 자를 때 원본 텍스트에서 UTF-8 경계를 찾도록 수정했다.
+PostgreSQL·pgvector·Vault 통합 및 Docker 아카이브 검증은 릴리스 CI에서 수행한다.
+
 2026-08-26 v0.77.14 릴리스 전 검증 결과:
 
 ```text
