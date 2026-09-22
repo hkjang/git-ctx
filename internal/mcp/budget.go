@@ -102,7 +102,7 @@ func cutAtBoundary(text string, limit int) string {
 	if at := strings.LastIndexByte(window, '\n'); enough(at) {
 		return text[:at]
 	}
-	return runeSafeCut(window, len(window))
+	return runeSafeCut(text, limit)
 }
 
 // closeOpenFence terminates a code fence the cut landed inside. Without it the
