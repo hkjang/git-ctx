@@ -35,6 +35,25 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-09-23 v0.77.16 릴리스 전 검증 결과:
+
+```text
+read-file·export 절단의 UTF-8 경계(pad 0~3·이모지)       PASS
+수정 전 코드에서 UTF-8·JSON 단언 모두 실패 재현          PASS
+태그 없는 빌드·전체 테스트                               PASS
+FTS5 빌드·전체 테스트·전체 race·vet·gofmt                PASS
+버전 메타데이터 정합성·회귀 시험                         PASS
+빌드 모드 교차·기존 릴리스 DB 업그레이드                  PASS
+콘솔 구문·계약 시험                                     PASS
+govulncheck ./... (v1.7.0)                              PASS (취약점 없음)
+Kubernetes Kustomize·:4747·v0.77.16 렌더링               PASS
+Docker linux/amd64·UID 10001·v0.77.16 빌드               태그 푸시 후 CI 수행
+```
+
+v0.77.15가 MCP 쪽에서 고친 것과 같은 절단 문제를, 상류인 검색 서비스의
+ReadFile(192KiB)·ExportContext(200000B) 두 자리에서도 문자 경계로 물러나 자르게 했다.
+PostgreSQL·pgvector·Vault 통합 및 Docker 아카이브 검증은 릴리스 CI에서 수행한다.
+
 2026-09-22 v0.77.15 릴리스 전 검증 결과:
 
 ```text
