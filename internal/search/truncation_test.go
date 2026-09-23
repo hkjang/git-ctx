@@ -81,7 +81,7 @@ func TestReadFileTruncatesOnACharacterBoundary(t *testing.T) {
 		if !strings.HasPrefix(body, out.Content) {
 			t.Fatalf("pad=%d: the returned content is not a prefix of the file", pad)
 		}
-		// encoding/json writes invalid UTF-8 as the escape sequence �, so
+		// encoding/json writes invalid UTF-8 as a \ufffd escape sequence, so
 		// the raw character never appears in the encoded text — decode it back
 		// to see what the caller of the REST playground actually receives.
 		encoded, err := json.Marshal(out)
@@ -95,7 +95,7 @@ func TestReadFileTruncatesOnACharacterBoundary(t *testing.T) {
 		if err := json.Unmarshal(encoded, &decoded); err != nil {
 			t.Fatalf("pad=%d unmarshal: %v", pad, err)
 		}
-		if strings.ContainsRune(decoded.Content, '�') || !strings.HasPrefix(body, decoded.Content) {
+		if strings.ContainsRune(decoded.Content, utf8.RuneError) || !strings.HasPrefix(body, decoded.Content) {
 			t.Fatalf("pad=%d: the JSON round trip did not return a prefix of the file", pad)
 		}
 		diagnostics := strings.Join(out.Diagnostics, " ")
