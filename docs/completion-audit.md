@@ -35,6 +35,26 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-09-25 v0.77.17 릴리스 전 검증 결과:
+
+```text
+cacheKey 가 호출자의 ACL 주체를 변경하지 않음(제한·무제한)   PASS
+수정 전 코드에서 제한 분기만 실패 재현                      PASS
+순서만 다른 같은 주체 집합 → 같은 캐시 키                    PASS
+태그 없는 빌드·전체 테스트                                 PASS
+FTS5 빌드·전체 테스트·전체 race·vet·gofmt                   PASS
+버전 메타데이터 정합성·회귀 시험                            PASS
+콘솔 구문·계약 시험                                        PASS
+govulncheck ./... (v1.7.0)                                 PASS (취약점 없음)
+Kubernetes Kustomize·:4747·v0.77.17 렌더링                  PASS
+Docker linux/amd64·UID 10001·v0.77.17 빌드                  태그 푸시 후 CI 수행
+```
+
+캐시 키 계산이 `principalACLs` 가 그대로 넘겨준 호출자의 `ACLPrincipals` 를 제자리
+정렬하던 것을, 같은 함수가 `AllowedRepositories` 에 이미 쓰던 복사 관용구로 맞췄다.
+접근 판정과 캐시 키 값은 바뀌지 않으며 잘못된 응답이 나가던 사례는 확인되지 않았다.
+PostgreSQL·pgvector·Vault 통합 및 Docker 아카이브 검증은 릴리스 CI에서 수행한다.
+
 2026-09-23 v0.77.16 릴리스 전 검증 결과:
 
 ```text
