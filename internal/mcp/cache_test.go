@@ -3,10 +3,56 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
+
+	"git-ctx/internal/auth"
 )
+
+// TestCacheKeyLeavesCallerPrincipalsUntouched pins down that building a cache
+// key has no side effect on the principal the caller still holds. The key folds
+// the ACL principals in sorted order, and principalACLs returns the caller's own
+// slice for a restricted principal, so sorting in place would silently reorder
+// the principals that the tool handlers and the freshness note read afterwards.
+func TestCacheKeyLeavesCallerPrincipalsUntouched(t *testing.T) {
+	server := fixture(t)
+	args := map[string]any{"query": "GPU", "libraryId": "/kcb/clustara"}
+	for _, testCase := range []struct {
+		name  string
+		roles []string
+	}{
+		{name: "restricted principal", roles: nil},
+		{name: "unrestricted principal", roles: []string{"platform-admin"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			given := []string{"zeta", "alice", "middle"}
+			principal := auth.Principal{
+				UserID:        "u1",
+				Subject:       "alice",
+				ACLPrincipals: slices.Clone(given),
+				Roles:         testCase.roles,
+			}
+			key := server.cacheKey(context.Background(), principal, "search-code", args)
+			if !slices.Equal(principal.ACLPrincipals, given) {
+				t.Fatalf("cacheKey mutated the caller's ACL principals: got %v, want %v", principal.ACLPrincipals, given)
+			}
+
+			// The sort exists so that the same principal set produces the same
+			// key regardless of the order it arrives in. That has to survive.
+			reordered := auth.Principal{
+				UserID:        "u1",
+				Subject:       "alice",
+				ACLPrincipals: []string{"middle", "zeta", "alice"},
+				Roles:         testCase.roles,
+			}
+			if other := server.cacheKey(context.Background(), reordered, "search-code", args); other != key {
+				t.Fatalf("the same principal set in a different order produced a different key:\n%q\n%q", key, other)
+			}
+		})
+	}
+}
 
 func enableToolCache(t *testing.T, server *Server) {
 	t.Helper()
