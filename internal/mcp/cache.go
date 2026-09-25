@@ -29,7 +29,10 @@ const maxToolCacheEntries = 10000
 
 func (s *Server) cacheKey(ctx context.Context, p auth.Principal, tool string, args map[string]any) string {
 	raw, _ := json.Marshal(args)
-	principals := principalACLs(p)
+	// Both slices are copied before sorting: principalACLs can return the
+	// caller's own ACL principals, and computing a key must not reorder the
+	// principals the request still uses afterwards.
+	principals := append([]string(nil), principalACLs(p)...)
 	sort.Strings(principals)
 	repositories := append([]string(nil), p.AllowedRepositories...)
 	sort.Strings(repositories)
