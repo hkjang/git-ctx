@@ -3,6 +3,8 @@ package calltrace
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -71,5 +73,55 @@ func TestSummaryAndStepLimit(t *testing.T) {
 	last := steps[len(steps)-1]
 	if last.Stage != "trace" || last.Results != 10 {
 		t.Fatalf("the dropped steps must be stated: %#v", last)
+	}
+}
+
+// A remote deadline never reaches Fail bare: the source clients return the error
+// of net/http, which wraps the context error in *url.Error, and the callers wrap
+// it again with the stage they were in. If only the bare value counted as a
+// timeout the diagnostic sentence would say the call ran out of time while the
+// audit row said "error", so an operator could not count timeouts by status.
+func TestFailClassifiesWrappedDeadlinesAsTimeout(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		status string
+	}{
+		{name: "bare deadline", err: context.DeadlineExceeded, status: StatusTimeout},
+		{name: "wrapped by the caller", err: fmt.Errorf("query gitlab: %w", context.DeadlineExceeded), status: StatusTimeout},
+		{
+			name:   "wrapped by net/http",
+			err:    &url.Error{Op: "Get", URL: "https://gitlab.example/api", Err: context.DeadlineExceeded},
+			status: StatusTimeout,
+		},
+		{name: "an ordinary failure", err: errors.New("boom"), status: StatusError},
+		{name: "no error at all", err: nil, status: StatusError},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, recorder := New(context.Background())
+			recorder.Start("source-query", "gitlab").Fail(testCase.err)
+
+			steps := recorder.Steps()
+			if len(steps) != 1 {
+				t.Fatalf("steps=%#v", steps)
+			}
+			if steps[0].Status != testCase.status {
+				t.Fatalf("status=%q, want %q", steps[0].Status, testCase.status)
+			}
+			// dispatch clips the detail at 300 characters before storing it, so the
+			// value handed over has to be the whole message of the wrapping error.
+			detail := ""
+			if testCase.err != nil {
+				detail = testCase.err.Error()
+			}
+			if steps[0].Detail != detail {
+				t.Fatalf("detail=%q, want %q", steps[0].Detail, detail)
+			}
+			want := "source-query gitlab: " + testCase.status
+			if summary := recorder.Summary(); summary != want {
+				t.Fatalf("summary=%q, want %q", summary, want)
+			}
+		})
 	}
 }
