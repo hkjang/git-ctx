@@ -1,6 +1,7 @@
 package contentsecurity
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -255,11 +256,77 @@ func TestABlockScalarStatesItsValueOnTheFollowingLines(t *testing.T) {
 	}
 }
 
+// Compare the whole document so sibling fields, headers and whitespace cannot
+// disappear unnoticed. Exercise both line endings and the optional final newline.
+func TestBlockScalarBoundariesUseTheKeyColumn(t *testing.T) {
+	for _, c := range []struct {
+		name, input, want string
+	}{
+		{
+			"first list key",
+			"items:\n  - password: |\n      hunter2\n    name: public-service\n    port: 8080\n  - name: next\n",
+			"items:\n  - password: |\n      [REDACTED]\n    name: public-service\n    port: 8080\n  - name: next\n",
+		},
+		{
+			"empty list block",
+			"items:\n  - password: |\n    name: public-service\n  - name: next\n",
+			"items:\n  - password: |\n    name: public-service\n  - name: next\n",
+		},
+		{
+			"ordinary mapping and literal colon",
+			"database:\n  password: |2\n    hunter2\n\n    name: literal\n  name: public-service\n  port: 8080\n",
+			"database:\n  password: |2\n    [REDACTED]\n\n    [REDACTED]\n  name: public-service\n  port: 8080\n",
+		},
+		{
+			"later list key",
+			"items:\n  - name: public-service\n    password: >-\n      hunter2\n    port: 8080\n  - name: next\n",
+			"items:\n  - name: public-service\n    password: >-\n      [REDACTED]\n    port: 8080\n  - name: next\n",
+		},
+		{
+			"nested list",
+			"groups:\n  - items:\n      - password: |\n          hunter2\n        name: public-service\n        port: 8080\n      - name: next\n    name: group\n",
+			"groups:\n  - items:\n      - password: |\n          [REDACTED]\n        name: public-service\n        port: 8080\n      - name: next\n    name: group\n",
+		},
+		{
+			"multiple spaces after dash",
+			"items:\n  -   password: |2 # keep header\n        hunter2\n  \n        name: literal\n      name: public-service\n      port: 8080\n  - name: next\n",
+			"items:\n  -   password: |2 # keep header\n        [REDACTED]\n  \n        [REDACTED]\n      name: public-service\n      port: 8080\n  - name: next\n",
+		},
+	} {
+		for _, ending := range []string{"\n", "\r\n"} {
+			for _, finalNewline := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%q/final=%t", c.name, ending, finalNewline), func(t *testing.T) {
+					input, want := c.input, c.want
+					if !finalNewline {
+						input, want = strings.TrimSuffix(input, "\n"), strings.TrimSuffix(want, "\n")
+					}
+					input, want = strings.ReplaceAll(input, "\n", ending), strings.ReplaceAll(want, "\n", ending)
+					wantFinding := "credential_assignment"
+					if input == want {
+						wantFinding = ""
+					}
+					for pass := 1; pass <= 2; pass++ {
+						masked, finding := Sanitize(input)
+						if masked != want || finding != wantFinding {
+							t.Fatalf("pass %d: content=%q finding=%q; want content=%q finding=%q", pass, masked, finding, want, wantFinding)
+						}
+						input = masked
+					}
+				})
+			}
+		}
+	}
+}
+
 // The rules decide what a stored chunk contains, so improving them has to be a
 // reason to read a ref again. Without this the credentials a new rule catches
 // stay readable in every chunk indexed before it, and nothing says so.
 func TestTheMaskingRevisionTracksTheRules(t *testing.T) {
 	before := Revision()
+	if before == "edeca363cffe" {
+		t.Fatal("the list block boundary fix must invalidate the old masking revision")
+	}
+	t.Logf("masking revision: %s", before)
 	if before == "" || len(before) < 8 {
 		t.Fatalf("the masking revision is not a fingerprint: %q", before)
 	}
@@ -268,9 +335,9 @@ func TestTheMaskingRevisionTracksTheRules(t *testing.T) {
 	}
 	// A rule added or edited must move it. Swapping one pattern for another
 	// stands in for that edit.
-	original := netrcRE.String()
-	defer func() { netrcRE = regexp.MustCompile(original) }()
-	netrcRE = regexp.MustCompile(original + `x?`)
+	original := blockScalarSecretRE.String()
+	defer func() { blockScalarSecretRE = regexp.MustCompile(original) }()
+	blockScalarSecretRE = regexp.MustCompile(original + `x?`)
 	if Revision() == before {
 		t.Error("a changed rule left the masking revision alone, so no ref would be read again")
 	}
