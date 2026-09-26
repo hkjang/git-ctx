@@ -14,6 +14,7 @@ package calltrace
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 )
@@ -109,7 +110,11 @@ func (s *Span) Fail(err error) {
 		return
 	}
 	status := StatusError
-	if err == context.DeadlineExceeded {
+	// The deadline arrives wrapped: net/http returns it inside *url.Error and the
+	// callers add the stage they were in, so a value comparison would file a
+	// timeout as a plain error and the audit rows would disagree with the
+	// diagnostic sentence the caller writes from the same error.
+	if errors.Is(err, context.DeadlineExceeded) {
 		status = StatusTimeout
 	}
 	detail := ""
