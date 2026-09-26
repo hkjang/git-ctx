@@ -35,6 +35,29 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-09-26 v0.77.18 릴리스 전 검증 결과:
+
+```text
+감싸인 데드라인을 timeout 으로 분류(호출자·net/http 래핑)   PASS
+수정 전 코드에서 두 래핑 케이스만 실패 재현                 PASS
+bare 데드라인·일반 오류·nil 동작 무변경 대조군              PASS
+Step.Detail 전문 보존·Summary() 정확 일치                   PASS
+태그 없는 빌드·전체 테스트                                 PASS
+FTS5 빌드·전체 테스트·전체 race·vet·gofmt                   PASS
+버전 메타데이터 정합성·회귀 시험                            PASS
+콘솔 구문·계약 시험                                        PASS
+govulncheck ./... (v1.7.0)                                 PASS (취약점 없음)
+Kubernetes Kustomize·:4747·v0.77.18 렌더링                  PASS
+Docker linux/amd64·UID 10001·v0.77.18 빌드                  태그 푸시 후 CI 수행
+```
+
+`Span.Fail` 이 데드라인을 값으로 비교해 `net/http` 의 `*url.Error` 와 호출자가 덧붙인
+단계 이름에 감싸인 실제 타임아웃을 `error` 로 기록하던 것을, 저장소의 다른 12곳과 같은
+`errors.Is` 로 맞췄다. 같은 오류를 읽는 `internal/search/service.go:3326`(→`Fail`)과
+3415(`errors.Is`)의 비대칭이 근거였다. 상태 문자열 상수 값과 호출부는 바꾸지 않았고,
+이미 저장된 행은 바뀌지 않는다. PostgreSQL·pgvector·Vault 통합 및 Docker 아카이브
+검증은 릴리스 CI에서 수행한다.
+
 2026-09-25 v0.77.17 릴리스 전 검증 결과:
 
 ```text
