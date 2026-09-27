@@ -2,12 +2,14 @@ package embedding
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 type runtimeTestProvider struct {
@@ -187,5 +189,61 @@ func TestRuntimeLeaderCancellationDoesNotPoisonCoalescedWaiters(t *testing.T) {
 	snapshot := manager.Snapshot("model")
 	if provider.calls.Load() != 1 || snapshot.Requests != 1 || snapshot.Failures != 0 || snapshot.Coalesced != 1 {
 		t.Fatalf("provider calls=%d snapshot=%#v", provider.calls.Load(), snapshot)
+	}
+}
+
+// finish clips the recorded failure to 300 bytes before Snapshot publishes it as
+// LastError, which the administration console serialises into its health JSON
+// (internal/app/health.go). Diagnostics in this platform are written in Korean,
+// so a clip that lands inside a character used to leave a half character behind:
+// invalid UTF-8 that encoding/json then rewrites as a replacement character in
+// the operator's copy of the endpoint's own message. The padding table places a
+// three-byte character across the limit and clear of it, so the cases that never
+// straddled the boundary act as an unchanged-behaviour control.
+func TestRuntimeLastErrorClipsOnCharacterBoundaries(t *testing.T) {
+	const limit = 300
+	for _, pad := range []int{limit - 3, limit - 2, limit - 1, limit} {
+		message := strings.Repeat("a", pad) + strings.Repeat("한", 10)
+		manager := NewRuntime()
+		_, err := manager.Guard("model", RuntimePolicy{}, func() (Provider, error) {
+			return nil, errors.New(message)
+		})
+		if err == nil || err.Error() != message {
+			t.Fatalf("pad=%d: guard error=%v", pad, err)
+		}
+		snapshot := manager.Snapshot("model")
+		if !utf8.ValidString(snapshot.LastError) {
+			t.Errorf("pad=%d: LastError is not valid UTF-8: %q", pad, snapshot.LastError)
+		}
+		if !strings.HasSuffix(snapshot.LastError, "…") {
+			t.Errorf("pad=%d: LastError lost its ellipsis suffix: %q", pad, snapshot.LastError)
+		}
+		if head := strings.TrimSuffix(snapshot.LastError, "…"); !strings.HasPrefix(message, head) {
+			t.Errorf("pad=%d: LastError is not a prefix of the original error: %q", pad, head)
+		}
+		// The whole point of clipping on a boundary is what the console shows, so
+		// assert on the serialised form too. encoding/json renders an invalid byte
+		// as the six-character escape backslash-u-f-f-f-d and never as the literal
+		// replacement character, so searching for that character would pass
+		// unconditionally. The needle is assembled rather than spelled out so it
+		// cannot turn back into the literal character on its way into this file.
+		encoded, marshalErr := json.Marshal(snapshot)
+		if marshalErr != nil {
+			t.Fatalf("pad=%d: marshal: %v", pad, marshalErr)
+		}
+		if replacement := `\u` + "fffd"; strings.Contains(string(encoded), replacement) {
+			t.Errorf("pad=%d: the health JSON escapes a replacement character: %s", pad, encoded)
+		}
+	}
+	// An error inside the limit is still recorded untouched.
+	manager := NewRuntime()
+	short := strings.Repeat("한", 10)
+	if _, err := manager.Guard("short", RuntimePolicy{}, func() (Provider, error) {
+		return nil, errors.New(short)
+	}); err == nil {
+		t.Fatal("expected the factory error to surface")
+	}
+	if got := manager.Snapshot("short").LastError; got != short {
+		t.Errorf("LastError = %q, want the error recorded unchanged as %q", got, short)
 	}
 }
