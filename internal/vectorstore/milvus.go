@@ -279,9 +279,20 @@ func (m *milvusStore) Status(ctx context.Context) (Status, error) {
 
 func (m *milvusStore) Close() error { return nil }
 
+// truncate bounds a diagnostic body before it is embedded in an error the
+// administration console reports verbatim. It retreats off a continuation byte
+// so the cut never splits a character and leaves the operator a replacement
+// character in the server's own words. Same contract as source.truncateError,
+// mcp.runeSafeCut and search.cutAtRuneBoundary, each kept local to its package;
+// this one adds no ellipsis, because callers embed its result in a message whose
+// wording is the established contract.
 func truncate(value string, limit int) string {
 	if len(value) <= limit {
 		return value
 	}
-	return value[:limit]
+	cut := limit
+	for cut > 0 && value[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return value[:cut]
 }

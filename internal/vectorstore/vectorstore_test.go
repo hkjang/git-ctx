@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"git-ctx/internal/source"
 )
@@ -60,6 +61,48 @@ func TestMilvusHTTPErrorCarriesStatus(t *testing.T) {
 	_, err = vectorStore.Status(context.Background())
 	if source.StatusOf(err) != http.StatusServiceUnavailable || !strings.Contains(err.Error(), "milvus 503 Service Unavailable: milvus is starting") {
 		t.Fatalf("status=%d err=%v", source.StatusOf(err), err)
+	}
+}
+
+// A Milvus error body is truncated to 400 bytes and then carried verbatim into
+// the administration console's health JSON: Status's error reaches
+// TestConnection, which app.searchBackendHealth writes into the response as
+// "<provider> unreachable: <error>". Milvus servers report in the operator's own
+// language, so truncating inside a character left a half character in the text
+// the operator reads. The padding table straddles the limit and clears it, so
+// the cases that never crossed a character act as an unchanged-behaviour control.
+func TestMilvusHTTPErrorStaysValidUTF8(t *testing.T) {
+	const limit = 400
+	for _, pad := range []int{limit - 3, limit - 2, limit - 1, limit} {
+		body := strings.Repeat("a", pad) + strings.Repeat("한", 10)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(body))
+		}))
+		vectorStore, err := Open(FromMap(map[string]any{
+			"provider": "milvus", "baseUrl": server.URL, "dimensions": float64(4),
+		}), "")
+		if err != nil {
+			server.Close()
+			t.Fatalf("pad=%d: open: %v", pad, err)
+		}
+		_, err = vectorStore.Status(context.Background())
+		vectorStore.Close()
+		server.Close()
+		if err == nil {
+			t.Fatalf("pad=%d: the 503 must surface as an error", pad)
+		}
+		if !utf8.ValidString(err.Error()) {
+			t.Errorf("pad=%d: the Milvus error is not valid UTF-8: %q", pad, err.Error())
+		}
+		// Everything before the cut must survive, and truncate must not start
+		// announcing itself with a suffix the way its siblings do.
+		if want := "milvus 503 Service Unavailable: " + strings.Repeat("a", pad); !strings.Contains(err.Error(), want) {
+			t.Errorf("pad=%d: error lost text before the cut: %q", pad, err.Error())
+		}
+		if strings.Contains(err.Error(), "…") {
+			t.Errorf("pad=%d: truncate must not add a suffix: %q", pad, err.Error())
+		}
 	}
 }
 

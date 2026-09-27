@@ -179,11 +179,21 @@ func (r *Runtime) finish(identity string, policy RuntimePolicy, err error) {
 	}
 }
 
+// clipRuntimeError bounds a recorded failure message. It retreats off a
+// continuation byte so the clip never splits a character: the result reaches an
+// operator through Snapshot().LastError in the administration console's health
+// JSON, where a half character would be rendered as a replacement character in
+// the endpoint's own words. Same contract as source.truncateError,
+// mcp.runeSafeCut and search.cutAtRuneBoundary, each kept local to its package.
 func clipRuntimeError(value string, limit int) string {
 	if len(value) <= limit {
 		return value
 	}
-	return value[:limit] + "…"
+	cut := limit
+	for cut > 0 && value[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return value[:cut] + "…"
 }
 
 func (r *Runtime) cacheKey(identity, text string) string {
