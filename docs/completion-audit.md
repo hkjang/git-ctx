@@ -35,6 +35,31 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-09-27 v0.77.19 릴리스 전 검증 결과:
+
+```text
+임베딩·Milvus 진단문을 글자 경계에서 절단                   PASS
+수정 전 코드에서 경계에 걸친 패딩만 실패 재현               PASS
+걸치지 않는 패딩 동작 무변경 대조군                         PASS
+관리 콘솔 JSON 에 U+FFFD 이스케이프 없음                    PASS
+예산 상수·임베딩 말줄임표·Milvus 문구 무변경                PASS
+태그 없는 빌드·전체 테스트                                 PASS
+FTS5 빌드·전체 테스트·전체 race·vet·gofmt                   PASS
+버전 메타데이터 정합성·회귀 시험                            PASS
+콘솔 구문·계약 시험                                        PASS
+govulncheck ./... (v1.7.0)                                 PASS (취약점 없음)
+Kubernetes Kustomize·:4747·v0.77.19 렌더링                  PASS
+Docker linux/amd64·UID 10001·v0.77.19 빌드                  태그 푸시 후 CI 수행
+```
+
+`embedding.clipRuntimeError` 와 `vectorstore.truncate` 가 `value[:limit]` 로 바이트
+경계에서 잘라 비ASCII 진단문의 마지막 글자를 쪼개던 것을, 이미 옳던 형제 절단기
+(`source.truncateError`·`mcp.runeSafeCut`·`search.cutAtRuneBoundary`)와 같은 연속 바이트
+후퇴로 맞췄다. 두 결과 모두 관리 콘솔 상태 JSON 에 실려 `encoding/json` 이 깨진 꼬리를
+U+FFFD 로 바꿔 내보내던 것이 근거였다. 예산 상수와 문구는 바꾸지 않았고, 실제 `Runtime.Guard`
+와 실제 `Open`+`httptest` 503 응답을 쓰는 경계 패딩 표로 회귀 시험했다. PostgreSQL·pgvector·
+Vault 통합 및 Docker 아카이브 검증은 릴리스 CI에서 수행한다.
+
 2026-09-26 v0.77.18 릴리스 전 검증 결과:
 
 ```text
