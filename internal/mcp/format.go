@@ -176,10 +176,7 @@ func formatFileContent(file search.FileContent) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "## %s\n\n`%s` · ref `%s` · lines %d-%d of %d · %s\n\n",
 		file.Path, file.LibraryID, file.Ref, file.StartLine, file.EndLine, file.TotalLines, file.Origin)
-	fence := "```"
-	if strings.Contains(file.Content, "```") {
-		fence = "````"
-	}
+	fence := contentFence(file.Content)
 	fmt.Fprintf(&b, "%s%s\n%s\n%s\n", fence, languageHint(file.Path), file.Content, fence)
 	fmt.Fprintf(&b, "\nSource: `%s://%s/%s@%s/%s#L%d-L%d`\n", file.SourceType, file.ProjectKey, file.RepositorySlug,
 		citationRevision(file.CommitID, file.Ref), file.Path, file.StartLine, file.EndLine)
@@ -190,6 +187,38 @@ func formatFileContent(file search.FileContent) string {
 		}
 	}
 	return b.String()
+}
+
+// contentFence is a fence long enough to hold the content it wraps.
+//
+// A repository holds files that show fenced blocks of their own: a README
+// documenting how to write one, a Python docstring or a JSDoc comment with a
+// usage example. The content's own fence closed the block the answer had opened,
+// and from there the citation, the Notes and the truncation notice were read as
+// part of the file — the last fence of the answer opening one more block that
+// never closes.
+//
+// read-file escalated to four backticks once the content held three, which
+// covers the common case and not the README that shows a three-backtick block
+// inside a four-backtick one. get-symbol-context did not escalate at all, so the
+// same file read through the symbol tool broke where it did not break through
+// read-file. One rule for both: a fence longer than the longest run of backticks
+// in the content, never shorter than three.
+func contentFence(content string) string {
+	longest, run := 0, 0
+	for index := 0; index < len(content); index++ {
+		if content[index] != '`' {
+			run = 0
+			continue
+		}
+		if run++; run > longest {
+			longest = run
+		}
+	}
+	if longest < 3 {
+		return "```"
+	}
+	return strings.Repeat("`", longest+1)
 }
 
 // languageHint labels the fenced block so clients highlight it correctly.
@@ -389,8 +418,9 @@ func formatSymbols(items []search.SymbolResult) string {
 }
 
 func formatSymbolContext(item search.SymbolResult) string {
-	return fmt.Sprintf("## %s\n\n- Kind: %s\n- Language: %s\n- Signature: `%s`\n- Source: bitcontext://%s@%s/%s#L%d-L%d\n\n%s\n\n```%s\n%s\n```\n",
-		item.QualifiedName, item.Kind, item.Language, item.Signature, item.LibraryID, citationRevision(item.CommitID, item.Ref), item.FilePath, item.LineStart, item.LineEnd, item.Documentation, item.Language, item.Content)
+	fence := contentFence(item.Content)
+	return fmt.Sprintf("## %s\n\n- Kind: %s\n- Language: %s\n- Signature: `%s`\n- Source: bitcontext://%s@%s/%s#L%d-L%d\n\n%s\n\n%s%s\n%s\n%s\n",
+		item.QualifiedName, item.Kind, item.Language, item.Signature, item.LibraryID, citationRevision(item.CommitID, item.Ref), item.FilePath, item.LineStart, item.LineEnd, item.Documentation, fence, item.Language, item.Content, fence)
 }
 
 func formatDependencies(items []search.DependencyResult) string {
