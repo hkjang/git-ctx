@@ -35,6 +35,33 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-09-28 v0.77.20 릴리스 전 검증 결과:
+
+```text
+MCP 응답 펜스를 감싸는 내용 길이에 맞춤                     PASS
+수정 전 코드에서 두 도구 경로 모두 실패 재현                PASS
+답변 끝에 열린 채 남은 블록 없음                            PASS
+내용이 블록 하나에 온전히 담김                              PASS
+3백틱 내용은 종전과 같이 4백틱 (기존 계약 무변경)           PASS
+태그 없는 빌드·전체 테스트                                 PASS
+FTS5 빌드·전체 테스트·전체 race·vet·gofmt                   PASS
+버전 메타데이터 정합성·회귀 시험                            PASS
+콘솔 구문·계약 시험                                        PASS
+govulncheck ./... (로컬 v1.6.0, CI 는 v1.7.0)                PASS (취약점 없음)
+Kubernetes Kustomize·:4747·v0.77.20 렌더링                  PASS
+Docker linux/amd64·UID 10001·v0.77.20 빌드                  태그 푸시 후 CI 수행
+```
+
+`formatFileContent` 는 내용에 백틱 세 개가 있으면 네 개로만 올리고 `formatSymbolContext` 는
+아예 올리지 않아, 코드 펜스를 그대로 담은 저장소 파일이 답변이 연 블록을 내용 한가운데서
+닫았다. 그 뒤의 `Source:` 인용·`### Notes`·절단 공지가 파일 본문으로 읽히고 답변의 마지막
+펜스가 닫히지 않는 블록을 하나 더 열던 것이 근거였다. 두 경로를 새 헬퍼 `contentFence`
+하나로 통일했다 — 내용의 가장 긴 백틱 연속보다 한 개 긴 펜스, 최소 세 개. 실제 sqlite
+fixture 와 실제 `mcp.Server.ServeHTTP` 의 `tools/call` 로 두 도구를 호출해 응답을
+CommonMark 방식으로 읽는 표로 회귀 시험했다. 절단 시 닫는 펜스 길이(`closeOpenFence`)는
+선존 제약으로 남겨 별도 회차로 분리했다. PostgreSQL·pgvector·Vault 통합 및 Docker 아카이브
+검증은 릴리스 CI에서 수행한다.
+
 2026-09-27 v0.77.19 릴리스 전 검증 결과:
 
 ```text
