@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -127,4 +128,90 @@ func backtickRun(line string) int {
 		count++
 	}
 	return count
+}
+
+// Exercise the formatter, budget and cached responses through tools/call. A
+// fence inside the stored file forces both formatters to choose a longer one.
+func TestTruncatedToolAnswersKeepNoticesOutsideCode(t *testing.T) {
+	for _, inner := range []string{"", "```python\nexample()\n```\n", "````markdown\n```python\nexample()\n```\n````\n", "inline `````` example\n"} {
+		t.Run(inner, func(t *testing.T) {
+			s := fixture(t)
+			content := inner + strings.Repeat("retained source line with enough text to fill the budget\n", 100)
+			lines := strings.Count(content, "\n") + 1
+			for _, statement := range []struct {
+				query string
+				args  []any
+			}{
+				{`INSERT INTO code_symbols(id,repository_id,ref_name,commit_id,file_path,name,qualified_name,symbol_kind,language,signature,documentation,line_start,line_end,content_hash)
+				VALUES('sf','r1','main','4fa21bd','fenced.py','fenced','fenced','function','python','def fenced():','',1,?,'sfh')`, []any{lines}},
+				{`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash)
+				VALUES('cf','r1','main','4fa21bd','fenced.py',1,?,'fenced','code',?,'cfh')`, []any{lines, content}},
+				{`INSERT INTO repository_files(repository_id,ref_name,path,base_name,size_bytes,content_indexed,commit_id)
+				VALUES('r1','main','fenced.py','fenced.py',?,1,'4fa21bd')`, []any{len(content)}},
+			} {
+				if _, err := s.store.DB.Exec(statement.query, statement.args...); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, tool := range []string{"read-file", "get-symbol-context"} {
+				t.Run(tool, func(t *testing.T) {
+					if _, err := s.store.DB.Exec(`INSERT INTO mcp_tools(name,enabled,cache_seconds) VALUES(?,1,300)
+ON CONFLICT(name) DO UPDATE SET cache_seconds=300`, tool); err != nil {
+						t.Fatal(err)
+					}
+					for _, budget := range []int{2000, 2000, 12000} {
+						request := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":%q,"arguments":{"libraryId":"/kcb/clustara","ref":"main","path":"fenced.py","symbol":"fenced","maxBytes":%d}}}`, tool, budget)
+						out := call(t, s, request)
+						result, ok := out["result"].(map[string]any)
+						if !ok || result["isError"] == true {
+							t.Fatalf("call failed: %#v", out)
+						}
+						text := result["content"].([]any)[0].(map[string]any)["text"].(string)
+						blocks, open := markdownBlocks(text)
+						if open || len(blocks) != 1 {
+							t.Errorf("budget %d: answer has %d code blocks, unterminated=%v", budget, len(blocks), open)
+						}
+						if len(blocks) == 0 || !strings.Contains(blocks[0], "retained source line") {
+							t.Fatal("answer lost the stored file content")
+						}
+						if strings.Contains(text, "### Truncated") != (budget == 2000) || (tool == "read-file" && !strings.Contains(text, "### Notes")) {
+							t.Fatal("missing notes or unexpected truncation state")
+						}
+						for _, block := range blocks {
+							if strings.Contains(block, "### Truncated") || strings.Contains(block, "### Notes") {
+								t.Errorf("budget %d: tool notice rendered inside file content", budget)
+							}
+						}
+						if budget == 12000 && !strings.Contains(blocks[0], content) {
+							t.Fatal("larger budget did not return the full content")
+						}
+					}
+					var calls, hits int
+					if err := s.store.DB.QueryRow(`SELECT COUNT(*), COALESCE(SUM(cache_hit),0) FROM mcp_calls WHERE tool=?`, tool).Scan(&calls, &hits); err != nil {
+						t.Fatal(err)
+					}
+					if calls != 3 || hits != 1 {
+						t.Fatalf("calls=%d cache hits=%d, want 3 and 1", calls, hits)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestTruncationDoesNotReopenClosedCodeBlocks(t *testing.T) {
+	for _, prefix := range []string{
+		"````text\n```\n````\n",
+		"```text\ninline ``` example\n```\n",
+		"```text\nbody\n````` \t\n",
+		"```text\nbody\n```\n\n```text\nsecond\n```\n",
+	} {
+		text := prefix + strings.Repeat("prose after the closed code block\n", 150)
+		got := clampResponse(text, 2000)
+		// Everything retained after the original prefix is prose, including the
+		// notice. Adding any fence here would turn that notice into code.
+		if !strings.HasPrefix(got, prefix) || strings.Contains(strings.TrimPrefix(got, prefix), "```") {
+			t.Errorf("truncation added a spurious fence after %q", prefix)
+		}
+	}
 }

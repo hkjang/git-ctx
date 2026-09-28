@@ -109,13 +109,30 @@ func cutAtBoundary(text string, limit int) string {
 // notice explaining the truncation, and the notes after it, are read as part of
 // the file that was being shown.
 func closeOpenFence(text string) string {
-	if strings.Count(text, "\n```")%2 == 0 && !strings.HasPrefix(text, "```") {
-		return text
+	fence := 0
+	for _, line := range strings.Split(text, "\n") {
+		// The formatters emit backtick fences. Up to three leading spaces
+		// are allowed; inline backticks and shorter nested fences are content.
+		trimmed := strings.TrimLeft(line, " ")
+		if len(line)-len(trimmed) > 3 {
+			continue
+		}
+		run := 0
+		for run < len(trimmed) && trimmed[run] == '`' {
+			run++
+		}
+		if fence == 0 {
+			if run >= 3 && !strings.Contains(trimmed[run:], "`") {
+				fence = run
+			}
+		} else if run >= fence && strings.Trim(trimmed[run:], " \t\r") == "" {
+			fence = 0
+		}
 	}
-	if strings.Count(text, "```")%2 == 0 {
-		return text
+	if fence > 0 {
+		return text + "\n" + strings.Repeat("`", fence)
 	}
-	return text + "\n```"
+	return text
 }
 
 // thousands formats a byte count the way the notice reads best.
