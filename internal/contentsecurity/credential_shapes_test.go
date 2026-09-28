@@ -125,6 +125,13 @@ func TestCredentialShapesAnInstallationActuallyHolds(t *testing.T) {
 			input:  "env:\n  - name: APP\n    client_secret: >-\n      s3cr3tvalue\n",
 			leaked: "s3cr3tvalue", kept: "client_secret",
 		},
+		{
+			// A header folded after the scheme was masked, but the rule wrote
+			// the newline back as a space and the lines below it moved.
+			name:   "an Authorization header split after the scheme",
+			input:  "Authorization: Bearer\n  abcdefghijklmnop1234\nAccept: */*\n",
+			leaked: "abcdefghijklmnop1234", kept: "Bearer\n  [REDACTED]\nAccept",
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			masked, finding := Sanitize(c.input)
@@ -185,11 +192,14 @@ func TestOrdinaryContentIsLeftAlone(t *testing.T) {
 // Chunks are cut from the masked content and carry the line numbers of the
 // lines they came from, so a rule that deletes a newline moves every line after
 // it: find-symbol and every snippet then point at the wrong line of the real
-// file, and the drift accumulates over the rest of the file. Two rules did it —
-// the assignment rule ran past the end of its line, and the .netrc rule wrote
-// its three fields back as one line.
+// file, and the drift accumulates over the rest of the file. Three rules did it —
+// the assignment rule ran past the end of its line, the .netrc rule wrote its
+// three fields back as one line, and the Authorization rule replaced the
+// whitespace after the scheme with one space.
 func TestMaskingNeverChangesTheLineCount(t *testing.T) {
 	for _, input := range []string{
+		"Authorization: Bearer\n  abcdefghijklmnop1234\nAccept: */*\n",
+		"headers:\n  Authorization:\n    Basic YWRtaW46aHVudGVyMg==\n  Accept: application/json\n",
 		"machine bitbucket.company\nlogin svc-ci\npassword s3cr3tvalue\n",
 		"volumes:\n  - name: creds\n    secret:\n      secretName: db-creds\n      optional: false\n",
 		"database:\n  host: pg.company\n  password: hunter22\n  port: 5432\n",
