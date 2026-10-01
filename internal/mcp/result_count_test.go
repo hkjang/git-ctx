@@ -124,6 +124,84 @@ func TestTruncatedSearchCodeCountsAndKeepsWholeHits(t *testing.T) {
 	}
 }
 
+// markdownWithSubsections is a documentation file that uses `#### ` subsections of
+// its own and keeps a `### ` heading for later. Read through read-file, those
+// `#### ` lines are the *content being shown*, not code-search hits, so neither
+// the counter nor the cut may treat them as result boundaries.
+func markdownWithSubsections() string {
+	var b strings.Builder
+	b.WriteString("# GPU Runbook\n")
+	for i := 0; i < 24; i++ {
+		fmt.Fprintf(&b, "\n#### Symptom %02d\n\nDCGM exporter stops reporting after the node pool drains; wait for the restart.\n", i)
+	}
+	// Plain prose between the last subsection and the next `### `: this is the
+	// stretch a cut that prefers the `#### ` throws away.
+	for i := 0; i < 8; i++ {
+		fmt.Fprintf(&b, "\nParagraph %02d: the gap closes on its own once the exporter has rejoined the pool.\n", i)
+	}
+	b.WriteString("\n### Escalation\n")
+	for i := 0; i < 24; i++ {
+		fmt.Fprintf(&b, "\nStep %02d: page the platform on-call and attach the exporter log tail.\n", i)
+	}
+	return b.String()
+}
+
+func readMarkdownFile(t *testing.T, s *Server, budget int) string {
+	t.Helper()
+	content := markdownWithSubsections()
+	if _, err := s.store.DB.Exec(`INSERT INTO repository_files(repository_id,ref_name,path,base_name,size_bytes,content_indexed,commit_id) VALUES('r1','main','docs/runbook-subsections.md','runbook-subsections.md',?,1,'4fa21bd')`, len(content)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.store.DB.Exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('sub1','r1','main','4fa21bd','docs/runbook-subsections.md',1,200,'GPU Runbook','document',?,'sub')`, content); err != nil {
+		t.Fatal(err)
+	}
+	return answerText(t, s, fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read-file","arguments":{"libraryId":"/kcb/clustara","path":"docs/runbook-subsections.md","ref":"main","maxBytes":%d}}}`, budget))
+}
+
+// A truncated read-file answer must still be cut at the latest boundary the file
+// offers. Preferring a `#### ` line of the content over the later `### ` heading
+// silently delivers less of the file for the same budget.
+func TestReadFileCutIgnoresContentSubsectionHeadings(t *testing.T) {
+	for _, budget := range []int{3400, 4000} {
+		t.Run(fmt.Sprint(budget), func(t *testing.T) {
+			s := fixture(t)
+			text := readMarkdownFile(t, s, budget)
+			if !strings.Contains(text, "### Truncated") {
+				t.Fatalf("this call was supposed to exceed the budget:\n%s", text)
+			}
+			body := answerBody(text)
+			// The prose past the last subsection offers the ladder a paragraph and a
+			// `### ` boundary, so a cut that ignores the content's `#### ` lines reaches
+			// into it. Stopping at the last `#### ` instead drops the final subsection
+			// and every paragraph after it.
+			if !strings.Contains(body, "#### Symptom 23") {
+				t.Errorf("the cut dropped the last `#### ` subsection of the file; %d bytes delivered:\n%s", len(body), body)
+			}
+			if !strings.Contains(body, "Paragraph 00:") {
+				t.Errorf("the cut stopped at a `#### ` subsection instead of the later boundary; %d bytes delivered:\n%s", len(body), body)
+			}
+		})
+	}
+}
+
+// The audited count of a read-file answer describes the sections of the file, not
+// the `#### ` subsections its text happens to use.
+func TestReadFileCountIgnoresContentSubsectionHeadings(t *testing.T) {
+	s := fixture(t)
+	text := readMarkdownFile(t, s, MaxResponseBytes)
+	subsections := strings.Count(text, "\n#### ")
+	if subsections == 0 {
+		t.Fatalf("the file was supposed to arrive with its `#### ` subsections:\n%s", text)
+	}
+	got := auditedResultCount(t, s, "read-file")
+	if got == subsections {
+		t.Errorf("mcp_calls.result_count=%d is the number of `#### ` subsections in the file being shown", got)
+	}
+	if want := strings.Count(text, "\n### "); got != want {
+		t.Errorf("mcp_calls.result_count=%d, want the unchanged `### ` count %d", got, want)
+	}
+}
+
 // The deepest-heading rule must not reach any formatter that writes its results
 // as `### ` sections or `- ` items. These counts were measured against the
 // unchanged counter and must not move.

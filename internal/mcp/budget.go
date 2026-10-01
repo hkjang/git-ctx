@@ -69,21 +69,39 @@ func boolInt(value bool) int {
 // it can never push the answer back over the budget.
 const responseNoticeBytes = 320
 
-// sectionCount counts the result entries of a formatted answer. Most formatters
-// use a `### ` heading per result, and the list formatters use a `- ` item, so
-// the deepest heading level an answer reaches is the one that counts its
-// results: formatCodeSearch (format.go:118) writes one `#### ` heading per source
-// hit beneath the `### Repository Matches` / `### Source Matches` / `### Notes`
-// structure, and counting its `### ` headings reported three results whatever
-// the number of hits.
+// sectionCount counts the result entries of a formatted answer. The formatters
+// use a `### ` heading per result, and the list formatters use a `- ` item. One
+// exception counts deeper: formatCodeSearch (format.go:118) writes a `#### `
+// heading per source hit beneath the `### Repository Matches` / `### Source
+// Matches` / `### Notes` structure, so counting its `### ` headings reported
+// three results whatever the number of hits.
 func sectionCount(text string) int {
-	if count := strings.Count(text, "\n#### "); count > 0 {
-		return count
+	if at := codeSearchHits(text); at >= 0 {
+		if count := strings.Count(text[at:], "\n#### "); count > 0 {
+			return count
+		}
 	}
 	if count := strings.Count(text, "\n### "); count > 0 {
 		return count
 	}
 	return strings.Count(text, "\n- ")
+}
+
+// codeSearchHits locates the hit region of a code search — everything from the
+// `### Source Matches (` heading on — and returns -1 for every other answer.
+//
+// The `#### ` rules belong to that region alone. A `#### ` line anywhere else is
+// a heading of the *content being shown*: read-file, query-docs and
+// export-context hand back markdown that uses subsections of its own, and
+// treating those as result boundaries both miscounted them and cut them short.
+// A documentation file with `#### ` subsections mid-window and a `### ` heading
+// later lost a fifth of its delivered bytes at the same budget, because the cut
+// preferred an earlier content subsection over the later heading.
+func codeSearchHits(text string) int {
+	if !strings.HasPrefix(text, "## Code Search\n") {
+		return -1
+	}
+	return strings.Index(text, "\n### Source Matches (")
 }
 
 // cutAtBoundary keeps as much of the answer as the room allows, ending it
@@ -101,13 +119,15 @@ func cutAtBoundary(text string, limit int) string {
 	}
 	window := text[:limit]
 	enough := func(at int) bool { return at > 0 && at*10 >= limit*6 }
-	// A result boundary first, and the deepest one the answer has: a code search
-	// writes a hit per `#### ` heading, so cutting at its `### Source Matches`
-	// heading dropped every hit, while cutting mid-hit left a heading with no
-	// snippet and no Source citation. An answer with no `#### ` gets -1 here and
-	// falls straight through.
-	if at := strings.LastIndex(window, "\n#### "); enough(at) {
-		return text[:at]
+	// A result boundary first. Inside a code search's hit region that boundary is
+	// a `#### ` heading: cutting at the `### Source Matches` heading above it
+	// dropped every hit, while cutting mid-hit left a heading with no snippet and
+	// no Source citation. Only a code search gets this rule — see codeSearchHits
+	// for what a `#### ` line means in any other answer.
+	if hits := codeSearchHits(window); hits >= 0 {
+		if at := strings.LastIndex(window[hits:], "\n#### "); at >= 0 && enough(hits+at) {
+			return text[:hits+at]
+		}
 	}
 	if at := strings.LastIndex(window, "\n### "); enough(at) {
 		return text[:at]
