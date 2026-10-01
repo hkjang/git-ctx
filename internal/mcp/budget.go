@@ -69,9 +69,17 @@ func boolInt(value bool) int {
 // it can never push the answer back over the budget.
 const responseNoticeBytes = 320
 
-// sectionCount counts the result entries of a formatted answer. The formatters
-// use a `### ` heading per result, and the list formatters use a `- ` item.
+// sectionCount counts the result entries of a formatted answer. Most formatters
+// use a `### ` heading per result, and the list formatters use a `- ` item, so
+// the deepest heading level an answer reaches is the one that counts its
+// results: formatCodeSearch (format.go:118) writes one `#### ` heading per source
+// hit beneath the `### Repository Matches` / `### Source Matches` / `### Notes`
+// structure, and counting its `### ` headings reported three results whatever
+// the number of hits.
 func sectionCount(text string) int {
+	if count := strings.Count(text, "\n#### "); count > 0 {
+		return count
+	}
 	if count := strings.Count(text, "\n### "); count > 0 {
 		return count
 	}
@@ -93,6 +101,14 @@ func cutAtBoundary(text string, limit int) string {
 	}
 	window := text[:limit]
 	enough := func(at int) bool { return at > 0 && at*10 >= limit*6 }
+	// A result boundary first, and the deepest one the answer has: a code search
+	// writes a hit per `#### ` heading, so cutting at its `### Source Matches`
+	// heading dropped every hit, while cutting mid-hit left a heading with no
+	// snippet and no Source citation. An answer with no `#### ` gets -1 here and
+	// falls straight through.
+	if at := strings.LastIndex(window, "\n#### "); enough(at) {
+		return text[:at]
+	}
 	if at := strings.LastIndex(window, "\n### "); enough(at) {
 		return text[:at]
 	}
