@@ -35,6 +35,35 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-10-01 v0.77.21 릴리스 전 검증 결과:
+
+```text
+절단된 코드 블록을 연 펜스 길이 그대로 닫음                 PASS
+인라인 백틱·중첩 펜스를 펜스로 오집계하지 않음              PASS
+코드 검색 결과 개수가 실제 적중 건수와 일치                 PASS
+예산 절단 시 적중 하나를 인용까지 온전히 남김               PASS
+read-file·query-docs·export-context 동작 무변경             PASS
+수정 전 코드에서 세 시험 모두 실패 재현                     PASS
+태그 없는 빌드·전체 테스트                                  PASS
+FTS5 빌드·전체 테스트·전체 race·vet·gofmt                   PASS
+버전 메타데이터 정합성·회귀 시험                            PASS
+콘솔 구문·계약 시험                                         PASS
+govulncheck ./... (로컬 v1.6.0, CI 는 v1.7.0)               PASS (취약점 없음)
+Kubernetes Kustomize·:4747·v0.77.21 렌더링                  PASS
+Docker linux/amd64·UID 10001·v0.77.21 빌드                  태그 푸시 후 CI 수행
+```
+
+`closeOpenFence` 는 ``` 개수의 짝만 보고 언제나 백틱 세 개로 닫아, v0.77.20 이 `contentFence` 로
+네 개 이상으로 연 블록이 절단되면 닫히지 않았다. 인라인 백틱과 내용 속 중첩 펜스까지 집계해 짝이
+맞아 보이면 열린 블록을 그냥 두던 것도 같은 자리였다. 줄 단위로 펜스 상태를 따라가 여는 길이
+그대로 닫도록 고쳤다. 같은 절단 경로에서 `formatCodeSearch` 의 적중은 `### ` 이 아니라 `#### `
+제목이므로 `sectionCount` 는 적중 수와 무관하게 언제나 셋을 보고하고 `cutAtBoundary` 는
+`### Source Matches` 에서 잘라 적중을 전부 떨어뜨렸다. `codeSearchHits` 로 `## Code Search` 의 적중
+구역에서만 `#### ` 를 경계로 쓰도록 좁혀, 자체 소제목을 쓰는 `read-file`·`query-docs`·
+`export-context` 의 내용은 종전과 같이 다룬다. 실제 sqlite fixture 와 실제 `mcp.Server.ServeHTTP`
+의 `tools/call` 로 회귀 시험했고, 수정 전 코드에서 세 시험이 모두 실패함을 먼저 확인했다.
+PostgreSQL·pgvector·Vault 통합 및 Docker 이미지 검증은 릴리스 CI에서 수행한다.
+
 2026-09-28 v0.77.20 릴리스 전 검증 결과:
 
 ```text
