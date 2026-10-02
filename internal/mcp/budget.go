@@ -75,16 +75,82 @@ const responseNoticeBytes = 320
 // heading per source hit beneath the `### Repository Matches` / `### Source
 // Matches` / `### Notes` structure, so counting its `### ` headings reported
 // three results whatever the number of hits.
+//
+// Only the `### ` and `- ` rules skip what sits inside a code fence, because
+// only the formatters they count for put content in one. formatCodeSearch writes
+// its snippets as prose, so the hit region holds no fence of the answer's own
+// and a snippet that happens to show one would otherwise hide every hit under
+// it from the count.
 func sectionCount(text string) int {
 	if at := codeSearchHits(text); at >= 0 {
 		if count := strings.Count(text[at:], "\n#### "); count > 0 {
 			return count
 		}
 	}
-	if count := strings.Count(text, "\n### "); count > 0 {
+	if count := countUnfenced(text, "### "); count > 0 {
 		return count
 	}
-	return strings.Count(text, "\n- ")
+	return countUnfenced(text, "- ")
+}
+
+// unfencedLines visits the lines of text that lie outside a code fence, passing
+// the offset of the newline before each one — the position the boundary rules
+// below search for. The first line has no preceding newline and so is never a
+// boundary, which is also how the formatters write an answer: every one of them
+// opens with its own `## ` title.
+//
+// Everything a formatter puts inside a fence is the content being shown, not the
+// structure of the answer, and reading the two as one thing cost an agent both
+// bytes and an honest count. A document with a `### ` heading of its own had the
+// cut stop there — a twelve-thousand-byte read-file answered with eight
+// thousand, the notice still saying it had been cut to the budget — and had that
+// heading audited as a result section. The `- ` fallback read the content the
+// same way: a symbol body listing its steps as `- ` items recorded one result
+// per step.
+//
+// The scan is the one closeOpenFence uses to find an unterminated fence, so the
+// layer that closes a fence and the layer that counts and cuts now agree on
+// where the fences are.
+func unfencedLines(text string, visit func(at int, line string)) {
+	fence, start := 0, 0
+	for {
+		line, next := text[start:], len(text)+1
+		if end := strings.IndexByte(line, '\n'); end >= 0 {
+			line, next = line[:end], start+end+1
+		}
+		if fence == 0 && start > 0 {
+			visit(start-1, line)
+		}
+		fence = lineFence(fence, line)
+		if next > len(text) {
+			return
+		}
+		start = next
+	}
+}
+
+// countUnfenced counts the lines of text that start with prefix outside a code
+// fence.
+func countUnfenced(text, prefix string) int {
+	count := 0
+	unfencedLines(text, func(_ int, line string) {
+		if strings.HasPrefix(line, prefix) {
+			count++
+		}
+	})
+	return count
+}
+
+// lastUnfenced returns the offset of the last line of text that starts with
+// prefix outside a code fence, or -1 when there is none.
+func lastUnfenced(text, prefix string) int {
+	last := -1
+	unfencedLines(text, func(at int, line string) {
+		if strings.HasPrefix(line, prefix) {
+			last = at
+		}
+	})
+	return last
 }
 
 // codeSearchHits locates the hit region of a code search — everything from the
@@ -129,7 +195,11 @@ func cutAtBoundary(text string, limit int) string {
 			return text[:hits+at]
 		}
 	}
-	if at := strings.LastIndex(window, "\n### "); enough(at) {
+	// A `### ` line inside a fence is a heading of the content being shown —
+	// read-file and get-symbol-context wrap a whole file or symbol body in one —
+	// so it is not a seam between results. Cutting there handed back a third of
+	// the budget less than the caller asked for. See sectionCount.
+	if at := lastUnfenced(window, "### "); enough(at) {
 		return text[:at]
 	}
 	if at := strings.LastIndex(window, "\n\n"); enough(at) {
@@ -147,28 +217,38 @@ func cutAtBoundary(text string, limit int) string {
 func closeOpenFence(text string) string {
 	fence := 0
 	for _, line := range strings.Split(text, "\n") {
-		// The formatters emit backtick fences. Up to three leading spaces
-		// are allowed; inline backticks and shorter nested fences are content.
-		trimmed := strings.TrimLeft(line, " ")
-		if len(line)-len(trimmed) > 3 {
-			continue
-		}
-		run := 0
-		for run < len(trimmed) && trimmed[run] == '`' {
-			run++
-		}
-		if fence == 0 {
-			if run >= 3 && !strings.Contains(trimmed[run:], "`") {
-				fence = run
-			}
-		} else if run >= fence && strings.Trim(trimmed[run:], " \t\r") == "" {
-			fence = 0
-		}
+		fence = lineFence(fence, line)
 	}
 	if fence > 0 {
 		return text + "\n" + strings.Repeat("`", fence)
 	}
 	return text
+}
+
+// lineFence applies one line to the fence state and returns the new one: the
+// length of the backtick run holding a block open, or zero outside one.
+//
+// The formatters emit backtick fences. Up to three leading spaces are allowed;
+// inline backticks and shorter nested fences are content.
+func lineFence(fence int, line string) int {
+	trimmed := strings.TrimLeft(line, " ")
+	if len(line)-len(trimmed) > 3 {
+		return fence
+	}
+	run := 0
+	for run < len(trimmed) && trimmed[run] == '`' {
+		run++
+	}
+	if fence == 0 {
+		if run >= 3 && !strings.Contains(trimmed[run:], "`") {
+			return run
+		}
+		return 0
+	}
+	if run >= fence && strings.Trim(trimmed[run:], " \t\r") == "" {
+		return 0
+	}
+	return fence
 }
 
 // thousands formats a byte count the way the notice reads best.
