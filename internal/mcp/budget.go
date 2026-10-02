@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"git-ctx/internal/toolcatalog"
 )
 
 // Response budgeting. An answer is cut at a section or line boundary so a
@@ -28,7 +30,10 @@ const (
 //   - the trailing Notes section survives, because that is where the tool
 //     explains which retrieval path ran and what the ACL filtered. Losing it
 //     would turn "indexing, answered live" into an unexplained short answer.
-func clampResponse(text string, budget int) string {
+//
+// tool names the tool that produced the answer, which is what says whether the
+// content it carries sits inside a fence — see fencesContent.
+func clampResponse(tool, text string, budget int) string {
 	if budget <= 0 || len(text) <= budget {
 		return text
 	}
@@ -42,13 +47,13 @@ func clampResponse(text string, budget int) string {
 	if reserved > budget/3 {
 		body, notes, reserved = text, "", 0
 	}
-	total := sectionCount(body)
+	total := sectionCount(tool, body)
 	room := budget - reserved - responseNoticeBytes
 	if room < MinResponseBytes/2 {
 		room = budget / 2
 	}
-	kept := cutAtBoundary(body, room)
-	shown := sectionCount(kept)
+	kept := cutAtBoundary(tool, body, room)
+	shown := sectionCount(tool, kept)
 	notice := fmt.Sprintf("\n\n### Truncated\n- This answer was cut to the %s byte budget of this tool; %s bytes were produced.\n",
 		thousands(budget), thousands(len(text)))
 	if total > 0 {
@@ -76,21 +81,47 @@ const responseNoticeBytes = 320
 // Matches` / `### Notes` structure, so counting its `### ` headings reported
 // three results whatever the number of hits.
 //
-// Only the `### ` and `- ` rules skip what sits inside a code fence, because
-// only the formatters they count for put content in one. formatCodeSearch writes
-// its snippets as prose, so the hit region holds no fence of the answer's own
-// and a snippet that happens to show one would otherwise hide every hit under
-// it from the count.
-func sectionCount(text string) int {
+// The `### ` and `- ` rules skip what sits inside a code fence for the tools
+// fencesContent names and for no others.
+func sectionCount(tool, text string) int {
 	if at := codeSearchHits(text); at >= 0 {
 		if count := strings.Count(text[at:], "\n#### "); count > 0 {
 			return count
 		}
 	}
+	if !fencesContent(tool) {
+		if count := strings.Count(text, "\n### "); count > 0 {
+			return count
+		}
+		return strings.Count(text, "\n- ")
+	}
 	if count := countUnfenced(text, "### "); count > 0 {
 		return count
 	}
 	return countUnfenced(text, "- ")
+}
+
+// fencesContent names the tools whose answer wraps the content it shows in a
+// code fence of the answer's own, so a `### ` heading or a `- ` item inside that
+// fence is part of the content and not a seam between results.
+//
+// Only formatFileContent (read-file) and formatSymbolContext
+// (get-symbol-context) do that, and both reach for contentFence (format.go:207),
+// which picks a fence longer than the longest backtick run in the content. The
+// content therefore cannot close the block early, and the answer's own structure
+// — the citation, the Notes — always lands outside it.
+//
+// Every other formatter writes the indexed content as prose: formatSemanticSearch
+// (format.go:257) and formatRunbooks (format.go:485) put a whole chunk under a
+// `### ` heading, formatChangeRequests (format.go:310) a merge-request
+// description, formatCodeSearch (format.go:118) a snippet. A chunk carries
+// whatever markdown the source file had, and the chunker splits on headings
+// without tracking fences (indexer.go:1110), so an unbalanced backtick run in one
+// chunk is ordinary. Reading those runs as the answer's own fences hid every hit
+// below one from the count and from the cut: a search-semantic answer with eleven
+// hits audited as eight.
+func fencesContent(tool string) bool {
+	return tool == toolcatalog.ReadFile || tool == toolcatalog.GetSymbolContext
 }
 
 // unfencedLines visits the lines of text that lie outside a code fence, passing
@@ -99,10 +130,10 @@ func sectionCount(text string) int {
 // boundary, which is also how the formatters write an answer: every one of them
 // opens with its own `## ` title.
 //
-// Everything a formatter puts inside a fence is the content being shown, not the
-// structure of the answer, and reading the two as one thing cost an agent both
-// bytes and an honest count. A document with a `### ` heading of its own had the
-// cut stop there — a twelve-thousand-byte read-file answered with eight
+// What a fencesContent tool puts inside its fence is the content being shown, not
+// the structure of the answer, and reading the two as one thing cost an agent
+// both bytes and an honest count. A document with a `### ` heading of its own had
+// the cut stop there — a twelve-thousand-byte read-file answered with eight
 // thousand, the notice still saying it had been cut to the budget — and had that
 // heading audited as a result section. The `- ` fallback read the content the
 // same way: a symbol body listing its steps as `- ` items recorded one result
@@ -179,7 +210,7 @@ func codeSearchHits(text string) int {
 // before the content starts, and cutting there returned a header and nothing
 // else: read-file asked for twelve thousand bytes and answered with six
 // hundred, while the notice said the answer had been cut to the budget.
-func cutAtBoundary(text string, limit int) string {
+func cutAtBoundary(tool, text string, limit int) string {
 	if limit >= len(text) {
 		return text
 	}
@@ -195,11 +226,18 @@ func cutAtBoundary(text string, limit int) string {
 			return text[:hits+at]
 		}
 	}
-	// A `### ` line inside a fence is a heading of the content being shown —
-	// read-file and get-symbol-context wrap a whole file or symbol body in one —
-	// so it is not a seam between results. Cutting there handed back a third of
-	// the budget less than the caller asked for. See sectionCount.
-	if at := lastUnfenced(window, "### "); enough(at) {
+	// For a fencesContent tool a `### ` line inside the fence is a heading of the
+	// content being shown, not a seam between results, and cutting there handed
+	// back a third of the budget less than the caller asked for. For every other
+	// tool the hits themselves are the prose, so a backtick run the content
+	// happens to carry must not move the boundary: skipping past it left a
+	// heading with no snippet and no Source citation, which is what this rule
+	// exists to prevent.
+	if fencesContent(tool) {
+		if at := lastUnfenced(window, "### "); enough(at) {
+			return text[:at]
+		}
+	} else if at := strings.LastIndex(window, "\n### "); enough(at) {
 		return text[:at]
 	}
 	if at := strings.LastIndex(window, "\n\n"); enough(at) {

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"git-ctx/internal/toolcatalog"
 )
 
 // A truncated answer has to be most of the budget it says it was cut to.
@@ -27,7 +29,7 @@ func TestATruncatedAnswerUsesTheBudgetItWasGiven(t *testing.T) {
 	answer := dense.String()
 
 	for _, budget := range []int{3000, 8000, 12000, 20000} {
-		cut := clampResponse(answer, budget)
+		cut := clampResponse(toolcatalog.ReadFile, answer, budget)
 		if len(cut) > budget+responseNoticeBytes {
 			t.Errorf("budget %d produced %d bytes", budget, len(cut))
 		}
@@ -63,7 +65,7 @@ func TestASectionedAnswerStillEndsOnASection(t *testing.T) {
 	results.WriteString("\n### Notes\n- acl: unrestricted.\n")
 	answer := results.String()
 
-	cut := clampResponse(answer, 4000)
+	cut := clampResponse(toolcatalog.SearchCode, answer, 4000)
 	body := cut[:strings.Index(cut, "### Truncated")]
 	if !strings.HasSuffix(strings.TrimRight(body, "\n"), "#L1-L9") {
 		t.Errorf("the answer does not end on a whole result:\n%s", body[max(0, len(body)-200):])
@@ -80,7 +82,7 @@ func TestCutAtBoundaryPreservesUTF8(t *testing.T) {
 		t.Run(unit, func(t *testing.T) {
 			original := strings.Repeat(unit, 20)
 			for limit := 0; limit <= len(original)+1; limit++ {
-				got := cutAtBoundary(original, limit)
+				got := cutAtBoundary(toolcatalog.ReadFile, original, limit)
 				if !utf8.ValidString(got) || !strings.HasPrefix(original, got) {
 					t.Errorf("limit %d: invalid original prefix %q", limit, got)
 				}
@@ -126,7 +128,7 @@ func TestCutAtBoundaryKeepsBoundaryPreferences(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			want := tc.want
-			if got := cutAtBoundary(tc.text, 100); got != tc.text[:want] {
+			if got := cutAtBoundary(toolcatalog.ReadFile, tc.text, 100); got != tc.text[:want] {
 				t.Fatalf("kept %d bytes, want %d", len(got), want)
 			}
 		})
@@ -139,7 +141,7 @@ func TestSingleLineTruncationKeepsFenceAndNotes(t *testing.T) {
 		for budget := 3000; budget < 3012; budget++ {
 			t.Run(fmt.Sprintf("%s/%d", unit, budget), func(t *testing.T) {
 				original := "## File\n\n```txt\n" + strings.Repeat(unit, 4000) + "\n```\n" + notes
-				got := clampResponse(original, budget)
+				got := clampResponse(toolcatalog.ReadFile, original, budget)
 				body, _, found := strings.Cut(got, "\n\n### Truncated\n")
 				if !found || !strings.HasSuffix(body, "\n```") || strings.Count(got, "```") != 2 {
 					t.Fatal("missing truncation notice or closed fence")

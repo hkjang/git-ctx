@@ -372,8 +372,8 @@ func (s *Server) finishCall(w http.ResponseWriter, r *http.Request, req request,
 		// The cache holds the whole answer, so a later call with a larger budget
 		// still gets everything; only what is sent now is bounded.
 		produced = len(text)
-		results, mode = sectionCount(text), retrievalMode(text)
-		text = clampResponse(text, budget)
+		results, mode = sectionCount(tool, text), retrievalMode(text)
+		text = clampResponse(tool, text, budget)
 		truncated = len(text) != produced
 		// Added here rather than inside each tool, for two reasons: the age is
 		// read now rather than when a cached answer was first built, and a note

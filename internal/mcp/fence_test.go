@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"git-ctx/internal/toolcatalog"
 )
 
 // A file that shows a fenced block of its own must not end the block the answer
@@ -207,7 +209,7 @@ func TestTruncationDoesNotReopenClosedCodeBlocks(t *testing.T) {
 		"```text\nbody\n```\n\n```text\nsecond\n```\n",
 	} {
 		text := prefix + strings.Repeat("prose after the closed code block\n", 150)
-		got := clampResponse(text, 2000)
+		got := clampResponse(toolcatalog.ReadFile, text, 2000)
 		// Everything retained after the original prefix is prose, including the
 		// notice. Adding any fence here would turn that notice into code.
 		if !strings.HasPrefix(got, prefix) || strings.Contains(strings.TrimPrefix(got, prefix), "```") {
