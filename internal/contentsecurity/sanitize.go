@@ -127,6 +127,31 @@ var authorizationHeaderRE = regexp.MustCompile(`(?i)\b(authorization\s*[:=]\s*)(
 var entropyCandidateRE = regexp.MustCompile(`[A-Za-z0-9+/=_-]{32,}`)
 var commonHashRE = regexp.MustCompile(`(?i)^(?:[a-f0-9]{40}|[a-f0-9]{64})$`)
 
+// A variable reference in the value's place is how a file keeps the credential
+// out of itself: docker-compose and .env.example write password: ${DB_PASSWORD},
+// CI YAML writes Bearer ${API_TOKEN}, a Maven settings.xml writes
+// <password>${env.PW}</password>, a Spring context value="${db.password}", and
+// a Python config %(API_KEY)s. Every rule above took the reference for the
+// credential, so a repository whose files hold no secret at all raised a
+// security event per file, and the snippet lost the one thing the line said —
+// which variable the value comes from.
+//
+// The reference has to be the whole value. ${VAR:-hunter2} states a default,
+// which is where a real value gets written down, and ${VAR}suffix or $VAR/path
+// carries more than the reference; both are still masked. Keeping the match
+// this narrow is deliberate: this is the one place the rules mask less.
+var placeholderRE = regexp.MustCompile(`^(?:\$\{[A-Za-z_][A-Za-z0-9_.]*\}|\$[A-Za-z_][A-Za-z0-9_]*|%\([A-Za-z_][A-Za-z0-9_.]*\)s)$`)
+
+// isPlaceholder reports whether a value, once its surrounding whitespace and
+// quotes are removed, is nothing but a single variable reference.
+func isPlaceholder(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
+		value = value[1 : len(value)-1]
+	}
+	return placeholderRE.MatchString(value)
+}
+
 // Revision fingerprints the masking rules themselves.
 //
 // A stored chunk was masked by the rules in force when it was indexed, so
@@ -143,7 +168,7 @@ func Revision() string {
 		privateKeyRE.String(), secretAssignmentRE.String(), awsKeyRE.String(), knownTokenRE.String(),
 		credentialURLRE.String(), oracleDSNRE.String(), xmlSecretElementRE.String(), xmlSecretAttributeRE.String(),
 		curlUserRE.String(), netrcRE.String(), authorizationHeaderRE.String(), entropyCandidateRE.String(),
-		commonHashRE.String(), blockScalarSecretRE.String(),
+		commonHashRE.String(), blockScalarSecretRE.String(), placeholderRE.String(),
 	}, "\x00")))
 	return hex.EncodeToString(sum[:6])
 }
@@ -160,16 +185,26 @@ func Sanitize(content string) (string, string) {
 		finding = "credential_assignment"
 	}
 	masked = secretAssignmentRE.ReplaceAllStringFunc(masked, func(value string) string {
-		finding = "credential_assignment"
 		at := strings.IndexAny(value, ":=")
 		if at < 0 {
+			finding = "credential_assignment"
 			return "[REDACTED]"
 		}
+		if isPlaceholder(value[at+1:]) {
+			return value
+		}
+		finding = "credential_assignment"
 		return value[:at+1] + " [REDACTED]"
 	})
 	masked = awsKeyRE.ReplaceAllStringFunc(masked, func(string) string { finding = "cloud_access_key"; return "[REDACTED]" })
 	masked = knownTokenRE.ReplaceAllStringFunc(masked, func(string) string { finding = "known_token"; return "[REDACTED]" })
 	masked = credentialURLRE.ReplaceAllStringFunc(masked, func(value string) string {
+		// The password is what follows the first colon after the scheme, up to
+		// the "@" that ends the match; the user name is not judged.
+		userinfo := value[len(credentialURLRE.FindStringSubmatch(value)[1]) : len(value)-1]
+		if isPlaceholder(userinfo[strings.Index(userinfo, ":")+1:]) {
+			return value
+		}
 		finding = "credential_dsn"
 		return credentialURLRE.ReplaceAllString(value, "${1}[REDACTED]@")
 	})
@@ -178,22 +213,42 @@ func Sanitize(content string) (string, string) {
 		return oracleDSNRE.ReplaceAllString(value, "${1}[REDACTED]@")
 	})
 	masked = xmlSecretElementRE.ReplaceAllStringFunc(masked, func(value string) string {
+		if isPlaceholder(xmlSecretElementRE.FindStringSubmatch(value)[2]) {
+			return value
+		}
 		finding = "credential_assignment"
 		return xmlSecretElementRE.ReplaceAllString(value, "<${1}>[REDACTED]</")
 	})
 	masked = xmlSecretAttributeRE.ReplaceAllStringFunc(masked, func(value string) string {
+		// The value runs from the end of the attribute prefix to the closing quote.
+		if isPlaceholder(value[len(xmlSecretAttributeRE.FindStringSubmatch(value)[1]) : len(value)-1]) {
+			return value
+		}
 		finding = "credential_assignment"
 		return xmlSecretAttributeRE.ReplaceAllString(value, `${1}[REDACTED]"`)
 	})
 	masked = curlUserRE.ReplaceAllStringFunc(masked, func(value string) string {
+		// The credential follows the flag as user:password, and the user name
+		// cannot contain a colon.
+		credential := value[curlUserRE.FindStringSubmatchIndex(value)[3]:]
+		if isPlaceholder(credential[strings.Index(credential, ":")+1:]) {
+			return value
+		}
 		finding = "credential_assignment"
 		return curlUserRE.ReplaceAllString(value, "${1}[REDACTED]")
 	})
 	masked = netrcRE.ReplaceAllStringFunc(masked, func(value string) string {
+		if isPlaceholder(value[netrcRE.FindStringSubmatchIndex(value)[5]:]) {
+			return value
+		}
 		finding = "credential_assignment"
 		return netrcRE.ReplaceAllString(value, "${1}[REDACTED]${2}[REDACTED]")
 	})
 	masked = authorizationHeaderRE.ReplaceAllStringFunc(masked, func(value string) string {
+		// The token is what follows the scheme and the whitespace after it.
+		if isPlaceholder(value[authorizationHeaderRE.FindStringSubmatchIndex(value)[5]:]) {
+			return value
+		}
 		finding = "credential_assignment"
 		return authorizationHeaderRE.ReplaceAllString(value, "${1}${2} [REDACTED]")
 	})

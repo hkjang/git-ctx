@@ -125,6 +125,18 @@ func TestCredentialShapesAnInstallationActuallyHolds(t *testing.T) {
 			input:  "env:\n  - name: APP\n    client_secret: >-\n      s3cr3tvalue\n",
 			leaked: "s3cr3tvalue", kept: "client_secret",
 		},
+		{
+			// A variable reference is left alone, but the default that shell
+			// syntax lets follow it is where a real value gets written down.
+			name:   "a variable reference with a default value",
+			input:  `password: ${DB_PASSWORD:-hunter2secret}`,
+			leaked: "hunter2secret", kept: "password",
+		},
+		{
+			name:   "a variable reference followed by more of the value",
+			input:  `api_key: ${API_KEY}$uffix`,
+			leaked: "uffix", kept: "api_key",
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			masked, finding := Sanitize(c.input)
@@ -175,10 +187,49 @@ func TestOrdinaryContentIsLeftAlone(t *testing.T) {
 		"token: > 5 && retries < 2\n",
 		// A block with nothing under it states no value.
 		"password: |\n",
+		// A variable reference in the value's place is how a file keeps the
+		// credential out of itself. The reference is the whole value.
+		`password: ${DB_PASSWORD}`,
+		`password: $DB_PASSWORD`,
+		`password: "${DB_PASSWORD}"`,
+		`"password": "${DB_PASSWORD}"`,
+		`api_key: %(API_KEY)s`,
+		`Authorization: Bearer ${API_TOKEN}`,
+		`postgres://app:${DB_PASSWORD}@db:5432/app`,
+		`<password>${env.DB_PASSWORD}</password>`,
+		`<property name="db.password" value="${db.password}"/>`,
+		`machine api login ${USER} password ${PASS}`,
+		`curl -u app:${API_PASSWORD} https://api.company/v1/health`,
 	} {
 		if masked, finding := Sanitize(input); masked != input {
 			t.Errorf("ordinary content was masked as %q:\n  in:  %s\n  out: %s", finding, input, masked)
 		}
+	}
+}
+
+// docker-compose, .env.example, CI YAML, a Maven settings.xml and a Spring
+// context all put ${VAR} where the credential would go precisely so that the
+// credential is not in the file. Masking the reference raised a security event
+// for a file holding no secret and removed the one thing the line said — which
+// variable the value comes from. A file made only of references states nothing
+// worth finding, and comes back exactly as it went in.
+func TestAVariableReferenceIsNotACredential(t *testing.T) {
+	input := strings.Join([]string{
+		"services:",
+		"  api:",
+		"    environment:",
+		"      DATABASE_URL: postgres://app:${DB_PASSWORD}@db:5432/app",
+		"      API_KEY: ${API_KEY}",
+		`      SESSION_SECRET: "$SESSION_SECRET"`,
+		"      AUTHORIZATION: Bearer ${API_TOKEN}",
+		"",
+	}, "\n")
+	masked, finding := Sanitize(input)
+	if finding != "" {
+		t.Errorf("a file of variable references raised a %q event", finding)
+	}
+	if masked != input {
+		t.Errorf("the references were masked:\n%s", masked)
 	}
 }
 
