@@ -2582,3 +2582,49 @@ func TestVectorDatabaseParticipationIsReported(t *testing.T) {
 		t.Fatalf("an unconfigured store must not be mentioned:\n%s", plain)
 	}
 }
+
+func TestReadFileIndexFallbackPreservesCurlCommand(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:curl-read-file?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	for _, statement := range []string{
+		`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch) VALUES('r','core','demo','Demo','gitlab','1','/core/demo','main')`,
+		`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('r','alice','read')`,
+		`INSERT INTO repository_files(repository_id,ref_name,path,base_name,size_bytes,content_indexed,commit_id) VALUES('r','main','curl.md','curl.md',200,1,'abc')`,
+	} {
+		if _, err := db.DB.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Exercise both legacy raw chunks and already masked chunks, with no remote
+	// connector: ReadFile must preserve the command in either stored form.
+	for _, flag := range []string{"-u", "--silent --user"} {
+		for _, masked := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/masked=%t", flag, masked), func(t *testing.T) {
+				value := "admin:Passw0rd"
+				if masked {
+					value = "[REDACTED]"
+				}
+				body := "Example\n\tcurl " + flag + "\t" + value + " https://api.company/v1/health\nDone"
+				want := "Example\n\tcurl " + flag + "\t[REDACTED] https://api.company/v1/health\nDone"
+				_, err := db.DB.ExecContext(ctx, `INSERT OR REPLACE INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('c','r','main','abc','curl.md',1,3,'Example','document',?,'h')`, body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				file, err := New(db).ReadFile(ctx, []string{"alice"}, "/core/demo", "", "curl.md", "", 0, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if file.Origin != "index" || file.Content != want || file.Redacted != !masked || file.TotalLines != 3 {
+					t.Error("index fallback did not preserve the masked command and line count")
+				}
+				if strings.Contains(file.Content, "Passw0rd") {
+					t.Error("index fallback exposed the credential")
+				}
+			})
+		}
+	}
+}
