@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -26,6 +27,13 @@ type Config struct {
 	// Empty in production, where the worker names itself from the host and
 	// process; set by tests that need to tell two replicas apart.
 	WorkerIdentity string
+	// WorkerPollInterval is how long the background worker waits before it looks
+	// for the next queued index job. Zero in production, where the worker keeps
+	// its own default: polling faster would multiply the calls this platform
+	// makes to the on-premise GitLab and Bitbucket servers. Tests set a short
+	// interval so a fixture does not spend a whole poll waiting for the job it
+	// just queued. FromEnv never fills it in.
+	WorkerPollInterval time.Duration
 }
 
 func FromEnv() (Config, error) {

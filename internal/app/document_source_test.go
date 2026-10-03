@@ -38,6 +38,7 @@ func documentSourceApp(t *testing.T, confluenceURL, jiraURL, modelURL, name stri
 		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(directory, name+".db") + "?_foreign_keys=on&_busy_timeout=5000",
 		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
 		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
+		WorkerPollInterval: testWorkerPoll,
 	})
 	if err != nil {
 		t.Fatal(err)

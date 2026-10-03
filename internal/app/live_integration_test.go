@@ -66,6 +66,7 @@ func TestPlatformChainIntegration(t *testing.T) {
 		DatabaseDriver: chainDriver, DatabaseDSN: chainDSN,
 		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
 		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
+		WorkerPollInterval: testWorkerPoll,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -245,6 +246,13 @@ func mcpCallWithKey(t *testing.T, a *App, secret, tool, arguments string) string
 	}
 	return response.Result.Content[0].Text
 }
+
+// testWorkerPoll is the interval the fixtures of this package give the
+// background worker. The production default is two seconds, which a fixture
+// spends waiting for the job it queued a millisecond earlier; the work itself
+// is unchanged, only the idle wait before the worker looks at the queue.
+// Production keeps its own default — see config.Config.WorkerPollInterval.
+const testWorkerPoll = 25 * time.Millisecond
 
 // waitFor polls until the condition holds, and fails with what it was waiting
 // for rather than with a bare timeout.
@@ -556,6 +564,7 @@ func TestPlatformDegradationIntegration(t *testing.T) {
 		DatabaseDriver: chainDriver, DatabaseDSN: chainDSN,
 		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
 		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
+		WorkerPollInterval: testWorkerPoll,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -694,6 +703,7 @@ func TestBitbucketChainIntegration(t *testing.T) {
 		DatabaseDriver: chainDriver, DatabaseDSN: chainDSN,
 		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
 		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
+		WorkerPollInterval: testWorkerPoll,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -862,6 +872,7 @@ func TestIncrementalPushChainIntegration(t *testing.T) {
 		DatabaseDriver: chainDriver, DatabaseDSN: chainDSN,
 		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
 		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
+		WorkerPollInterval: testWorkerPoll,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -990,6 +1001,7 @@ func TestAccessControlChainIntegration(t *testing.T) {
 		DatabaseDriver: chainDriver, DatabaseDSN: chainDSN,
 		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
 		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
+		WorkerPollInterval: testWorkerPoll,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1141,6 +1153,7 @@ func TestDocumentSourceChainIntegration(t *testing.T) {
 		DatabaseDriver: chainDriver, DatabaseDSN: chainDSN,
 		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
 		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
+		WorkerPollInterval: testWorkerPoll,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1383,6 +1396,7 @@ func TestOpenSearchProjectionChainIntegration(t *testing.T) {
 		DatabaseDriver: chainDriver, DatabaseDSN: chainDSN,
 		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
 		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
+		WorkerPollInterval: testWorkerPoll,
 	})
 	if err != nil {
 		t.Fatal(err)
