@@ -197,8 +197,16 @@ func TestReadFileCountIgnoresContentSubsectionHeadings(t *testing.T) {
 	if got == subsections {
 		t.Errorf("mcp_calls.result_count=%d is the number of `#### ` subsections in the file being shown", got)
 	}
-	if want := strings.Count(text, "\n### "); got != want {
-		t.Errorf("mcp_calls.result_count=%d, want the unchanged `### ` count %d", got, want)
+	// The file's `### Escalation` heading is inside the fence and so is content
+	// too; the only section of the answer itself is the `### Notes` block the
+	// formatter appends after the closing fence. This assertion used to pin the
+	// then-unchanged `### ` count, which counted both — see
+	// TestReadFileCountIgnoresHeadingsInsideTheFencedContent.
+	if headings := strings.Count(text, "\n### "); headings != 2 {
+		t.Fatalf("the answer was supposed to carry one `### ` heading of its own and one of the file, got %d:\n%s", headings, text)
+	}
+	if got != 1 {
+		t.Errorf("mcp_calls.result_count=%d, want 1 — the answer's own sections are the `### Notes` block alone", got)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"git-ctx/internal/auth"
 	"git-ctx/internal/search"
 	"git-ctx/internal/store"
+	"git-ctx/internal/toolcatalog"
 )
 
 func fixture(t *testing.T) *Server {
@@ -255,7 +256,7 @@ func TestResponseBudgetTruncatesOnResultBoundaryAndKeepsNotes(t *testing.T) {
 	b.WriteString("\n### Notes\n- Repository /kcb/legacy is still indexing; answered live.\n")
 	full := b.String()
 
-	clamped := clampResponse(full, 8000)
+	clamped := clampResponse(toolcatalog.SearchCode, full, 8000)
 	if len(clamped) > 8000 {
 		t.Fatalf("clamped to %d bytes, over the 8000 budget", len(clamped))
 	}
@@ -275,7 +276,7 @@ func TestResponseBudgetTruncatesOnResultBoundaryAndKeepsNotes(t *testing.T) {
 	if len(clamped) < 6000 {
 		t.Fatalf("the cut wasted the budget: %d of 8000 bytes used", len(clamped))
 	}
-	if unchanged := clampResponse(full, len(full)+1); unchanged != full {
+	if unchanged := clampResponse(toolcatalog.SearchCode, full, len(full)+1); unchanged != full {
 		t.Fatal("an answer within budget must not be touched")
 	}
 
@@ -673,7 +674,7 @@ func TestTruncationKeepsTextValid(t *testing.T) {
 	for _, unit := range []string{"é", "가나다라마바사아자차카타파하", "😀", "aé가😀Z"} {
 		dense := "## 결과\n" + strings.Repeat(unit, 4000)
 		for budget := 3000; budget < 3012; budget++ {
-			clamped := clampResponse(dense, budget)
+			clamped := clampResponse(toolcatalog.ReadFile, dense, budget)
 			if !utf8.ValidString(clamped) {
 				t.Errorf("%q budget %d produced invalid UTF-8", unit, budget)
 			}
