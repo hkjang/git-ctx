@@ -35,6 +35,41 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-10-03 v0.77.23 릴리스 전 검증 결과:
+
+```text
+설정한 폴링 간격이 실제 등록 경로를 거쳐 워커 루프에 닿음   PASS
+비양수 값은 기본 2초를 그대로 남김                          PASS
+배선 없는 코드에서 해당 시험 실패 재현                      PASS
+픽스처 간격을 되돌리면 수트 벽시계도 함께 복귀              PASS
+단정 삭제·건너뜀 없이 internal/app 수트 벽시계 단축         PASS
+재시도 일정(next_run_at) 동작 무변경                        PASS
+태그 없는 빌드·전체 테스트                                  PASS
+FTS5 빌드·전체 테스트·전체 race·vet·gofmt                   PASS
+app·worker -race -count=2 경쟁 보고 없음                    PASS
+버전 메타데이터 정합성·회귀 시험                            PASS
+콘솔 구문·계약 시험                                         PASS
+Kubernetes Kustomize·:4747·v0.77.23 렌더링                  PASS
+Docker linux/amd64·UID 10001·v0.77.23 빌드                  태그 푸시 후 CI 수행
+govulncheck ./...                                           태그 푸시 후 CI 수행
+```
+
+백그라운드 워커의 유휴 폴링 간격이 `New()` 의 구조체 리터럴에 `2 * time.Second` 로 적혀 있어
+바깥에서 바꿀 수 없었다. 작업 등록은 즉시 일어나므로 — 저장소 등록이 그 요청 안에서 `index_jobs`
+에 `pending` 행을 넣는다 — 루프가 시작된 뒤 큐에 들어간 작업은 남은 틱을 그대로 흘렸고, `RunOnce`
+가 틱당 한 건만 집으므로 저장소 N 개는 틱 N 번을 썼다. 그것이 `internal/app` 수트 벽시계의 대부분
+이었고(저장소 한 개 2.3~2.5s, 두 개 4.2s, 다섯 개 10.3s 로 양자화), 릴리스 빌드 잡은 이 수트를
+평문과 `-race` 로 두 번 돌린 뒤에도 통합 시험·`govulncheck`·Docker 빌드·패키징을 한 타임아웃 안에서
+끝내야 한다. 값을 줄이는 대신 주입 경로만 더했다 — `config.Config.WorkerPollInterval`(운영에서 0,
+`FromEnv` 가 채우지 않음, 기존 `WorkerIdentity` 와 같은 관례) → `App.startBackground` →
+`Worker.SetPollInterval`(비양수 무시). `FromEnv` 가 이 필드를 채우지 않으므로 운영자가 돌릴
+손잡이가 생긴 것은 아니다. 운영 기본값은 `DefaultPollInterval` 이라는 이름을 얻었을 뿐
+2초 그대로다. 큐를 더 자주 읽으면 사내 GitLab·Bitbucket 서버로 가는 호출이 늘고 매 틱이 모든
+복제본에서 공유 큐에 두 번 질의하기 때문이다. 재시도 일정은 손대지 않았다 — `claim` 이 여전히
+`next_run_at` 으로 거르므로 이 간격은 기한이 된 작업을 알아차리는 지연만 정한다. 단정은 하나도
+지우지 않았고 `t.Skip`·`-short` 분기도 더하지 않았다. PostgreSQL·pgvector·Vault 통합,
+`govulncheck`, Docker 이미지 검증은 릴리스 CI에서 수행한다.
+
 2026-10-03 v0.77.22 릴리스 전 검증 결과:
 
 ```text
