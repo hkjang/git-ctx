@@ -24,8 +24,8 @@ MCP GET은 initialize로 발급된 session에서 SSE 연결을 유지하고 DELE
 붙이지 않는다.
 
 ```bash
-scripts/package-offline-image.sh 0.77.21 git-ctx:v0.77.21
-scripts/verify-offline-image.sh 0.77.21 dist/git-ctx-v0.77.21.tar.gz <릴리스-커밋-SHA>
+scripts/package-offline-image.sh 0.77.22 git-ctx:v0.77.22
+scripts/verify-offline-image.sh 0.77.22 dist/git-ctx-v0.77.22.tar.gz <릴리스-커밋-SHA>
 ```
 
 실제 PostgreSQL 백업·복원 계약 시험은 격리된 빈 시험 DB DSN을 명시해서 실행한다.

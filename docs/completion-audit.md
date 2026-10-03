@@ -35,6 +35,38 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-10-03 v0.77.22 릴리스 전 검증 결과:
+
+```text
+read-file·get-symbol-context 절단이 내용 속 제목에서 안 멈춤  PASS
+결과 개수가 내용의 제목·항목 수를 따라가지 않음              PASS
+산문 경로의 적중 개수·절단 자리 동작 무변경                  PASS
+짝 없는 백틱 연속을 담은 청크가 적중을 가리지 않음           PASS
+수정 전 코드에서 해당 케이스 실패 재현                       PASS
+태그 없는 빌드·전체 테스트                                   PASS
+FTS5 빌드·전체 테스트·전체 race·vet·gofmt                    PASS
+버전 메타데이터 정합성·회귀 시험                             PASS
+콘솔 구문·계약 시험                                          PASS
+OpenTelemetry v1.45.0 상향, GO-2026-6505 해소                PASS
+govulncheck ./... (로컬 v1.6.0, CI 는 v1.7.0)                PASS (취약점 없음)
+Kubernetes Kustomize·:4747·v0.77.22 렌더링                   PASS
+Docker linux/amd64·UID 10001·v0.77.22 빌드                   태그 푸시 후 CI 수행
+```
+
+예산 계층이 보여 주는 내용의 마크다운을 답변 자신의 구조로 읽었다. `read-file`·`get-symbol-context`
+는 내용 전체를 답변의 코드 펜스로 감싸는데, `sectionCount` 는 그 펜스 안의 `### ` 제목을, 그런
+제목이 없으면 `- ` 항목을 결과 구역으로 셌고 `cutAtBoundary` 는 그 제목을 절단 경계로 썼다. 그래서
+자체 제목을 가진 문서는 예산을 다 쓰지 못한 채 잘렸고 — 1만 2천 바이트 요청이 8천 바이트 응답 —
+`mcp_calls.result_count` 에는 그 문서의 제목 개수가, 단계를 나열하는 심볼 본문에는 단계 수가
+기록되었다. `closeOpenFence` 의 줄 단위 주사를 `lineFence` 로 떼어 개수 세기와 절단이 함께 쓰도록
+했다. 이 규칙은 `fencesContent` 가 꼽는 두 도구에만 적용한다 — 다른 형식기는 색인된 내용을 펜스
+없는 산문으로 쓰고 청킹이 펜스를 따라가지 않으므로(`indexer.go:1110`) 청크에 짝 없는 백틱 연속이
+남는 것이 정상이며, 그것을 답변의 펜스로 읽으면 그 아래 적중이 개수와 절단에서 사라진다(적중
+열한 건이 여덟 건으로 감사됨). 함께 `GO-2026-6505`(OTLP 내보내기의 endpoint URL 로그 유출)을 위해
+OpenTelemetry 를 v1.44.0 에서 v1.45.0 으로 올렸고, 수정 전 조합에서 해당 권고가 보고되고 수정 후
+`govulncheck` 가 취약점 없음을 반환함을 확인했다. 애플리케이션 코드 변경은 없다.
+PostgreSQL·pgvector·Vault 통합 및 Docker 이미지 검증은 릴리스 CI에서 수행한다.
+
 2026-10-01 v0.77.21 릴리스 전 검증 결과:
 
 ```text
