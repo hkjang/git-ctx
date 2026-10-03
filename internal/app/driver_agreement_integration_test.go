@@ -124,6 +124,7 @@ func indexedAppOn(t *testing.T, driver, dsn, sourceURL, modelURL string) *App {
 		DatabaseDriver: driver, DatabaseDSN: dsn,
 		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
 		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
+		WorkerPollInterval: testWorkerPoll,
 	})
 	if err != nil {
 		t.Fatalf("%s: %v", driver, err)
@@ -339,6 +340,7 @@ func answerEachSource(t *testing.T, sourceType, sourceURL, modelURL, settings, r
 		DatabaseDriver: "sqlite", DatabaseDSN: "file:" + filepath.Join(directory, sourceType+".db") + "?_foreign_keys=on&_busy_timeout=5000",
 		KeyPepper: strings.Repeat("p", 32), MasterKey: strings.Repeat("m", 32), BootstrapAdmin: "bootstrap",
 		PublicURL: "http://localhost:4747", BackupDirectory: filepath.Join(directory, "backups"),
+		WorkerPollInterval: testWorkerPoll,
 	})
 	if err != nil {
 		t.Fatalf("%s: %v", sourceType, err)

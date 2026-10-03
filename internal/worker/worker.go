@@ -65,8 +65,20 @@ func (w *Worker) SetRetrievalModeLoader(loader RetrievalModeLoader) {
 func (w *Worker) SetProjection(projection Projection) { w.projection = projection }
 
 func New(s *store.Store, idx *indexer.Indexer, f SourceFactory) *Worker {
-	return &Worker{store: s, indexer: idx, factory: f, poll: 2 * time.Second, maxAttempts: 5,
+	return &Worker{store: s, indexer: idx, factory: f, poll: DefaultPollInterval, maxAttempts: 5,
 		lease: JobLeaseDuration, timeout: jobTimeout, identity: instanceIdentity()}
+}
+
+// SetPollInterval overrides how long the loop waits before it looks for the
+// next queued job. A non-positive value leaves the default in place, which is
+// what production hands over: its configuration carries the zero value, and
+// polling the queue faster would multiply the calls this platform makes to the
+// on-premise source servers. Only tests ask for a shorter interval, so a
+// fixture does not idle through a whole poll waiting for the job it queued.
+func (w *Worker) SetPollInterval(d time.Duration) {
+	if d > 0 {
+		w.poll = d
+	}
 }
 
 // instanceIdentity is what one running copy of this platform calls itself. The
@@ -99,6 +111,11 @@ const (
 	// replicas a shorter lease lets a second worker claim a healthy long-running
 	// job while the first worker is still writing its result.
 	JobLeaseDuration = jobTimeout + 5*time.Minute
+	// DefaultPollInterval is how long the loop waits before it looks for the
+	// next queued job when nothing overrides it. Every tick costs two queries
+	// against the shared job queue in every replica, so it is deliberately not
+	// sub-second.
+	DefaultPollInterval = 2 * time.Second
 )
 
 type job struct {

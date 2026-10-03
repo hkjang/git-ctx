@@ -365,6 +365,7 @@ func (a *App) startBackground() {
 	if a.workerIdentity != "" {
 		backgroundWorker.SetIdentity(a.workerIdentity)
 	}
+	backgroundWorker.SetPollInterval(a.cfg.WorkerPollInterval)
 	backgroundWorker.SetEmbeddingFactory(a.semanticEmbeddingProvider)
 	backgroundWorker.SetRetrievalModeLoader(a.retrievalMode)
 	backgroundWorker.SetProjection(a.projectSearchStores)
