@@ -878,11 +878,15 @@ func TestAdministratorRolesSearchWithoutRepositoryACL(t *testing.T) {
 // repository that has been registered but not indexed yet.
 type treeSource struct {
 	querySource
-	files []string
-	calls int
+	files   []string
+	calls   int
+	content string
 }
 
 func (t *treeSource) GetFile(_ context.Context, _ source.RepositoryRef, _ string, path string) ([]byte, error) {
+	if t.content != "" {
+		return []byte(t.content), nil
+	}
 	return []byte("replicaCount: 2\nimage:\n  tag: v1\n"), nil
 }
 
@@ -1474,6 +1478,15 @@ func TestReadFileServesIndexedAndUnindexedFiles(t *testing.T) {
 	live, err := service.ReadFile(ctx, []string{"alice"}, "", "", "charts/values.yaml", "", 0, 0)
 	if err != nil || live.Origin != "remote" || live.Content == "" {
 		t.Fatalf("remote read=%#v err=%v", live, err)
+	}
+
+	// A list block hides only its value; the same item's public fields survive
+	// the complete remote read and sanitization path.
+	remote.content = "items:\n  - password: |\n      hunter2\n    name: public-service\n    port: 8080\n  - name: next\n"
+	want := "items:\n  - password: |\n      [REDACTED]\n    name: public-service\n    port: 8080\n  - name: next\n"
+	masked, err := service.ReadFile(ctx, []string{"alice"}, "", "", "charts/values.yaml", "", 0, 0)
+	if err != nil || masked.Origin != "remote" || !masked.Redacted || masked.Content != want {
+		t.Fatalf("list block read=%#v err=%v; want content=%q", masked, err, want)
 	}
 
 	if _, err = service.ReadFile(ctx, []string{"mallory"}, "", "", "docs/gpu.md", "", 0, 0); err == nil {
