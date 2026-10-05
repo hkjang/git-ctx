@@ -35,6 +35,43 @@
 | DB 연결 관리 | 완료 | 공개 비민감 상태, 관리자 DB·pool·migration 진단, Prometheus up, SQLite 단일 Writer pool, PostgreSQL 실패 복구 기동·연결 시험·논리 이전·재시작 전환 |
 | 운영 정책 | 완료(애플리케이션 범위) | 동적 점검 모드, 재기동형 수신 주소·HTTP Timeout, 인앱 키 알림, Webhook·메신저·SMTP Outbox와 재시도, 감사·호출·알림·작업·설정 이력 보존 정리 |
 
+2026-10-05 v0.77.24 릴리스 전 검증 결과:
+
+```text
+내용 속 `### Notes` 제목을 답변의 Notes 구역으로 읽지 않음        PASS
+실제 Notes 구역을 쓰는 도구의 예약 동작 무변경                    PASS
+get-symbol-context 절단 응답이 코드 블록을 닫음                   PASS
+find-runbook 공지가 찾은 구역 전체를 셈                           PASS
+절단 공지 뒤에 결과 제목이 남지 않음                              PASS
+예산에 걸리지 않는 응답 무변경                                    PASS
+eachLine 분리 후 unfencedLines 오프셋 규약 동일                   PASS
+태그 없는 빌드·전체 테스트                                        PASS
+FTS5 빌드·전체 테스트·전체 race·vet·gofmt                         PASS
+버전 메타데이터 정합성·회귀 시험                                  PASS
+콘솔 구문·계약 시험                                               PASS
+Kubernetes Kustomize·:4747·v0.77.24 렌더링                        PASS
+Docker linux/amd64·UID 10001·v0.77.24 빌드                        태그 푸시 후 CI 수행
+govulncheck ./...                                                 태그 푸시 후 CI 수행
+```
+
+`clampResponse` 는 답변 어디에 있든 마지막 `### Notes` 줄을 뒤쪽 Notes 블록의 시작으로 보고 그
+자리부터 끝까지를 절단 공지 뒤로 예약했다. 그런 줄이 될 수 있는 것은 Notes 블록만이 아니었다.
+`get-symbol-context` 는 Notes 구역이 없고 심볼 본문을 자기 펜스로 감싸므로, Markdown 보고서
+템플릿을 돌려주는 Go 헬퍼는 본문 나머지와 닫는 펜스까지 공지 뒤로 옮겨졌고 그 자리에서 펜스가
+새 블록을 열어 끝내 닫히지 않았다 — v0.77.20~v0.77.22 의 펜스 작업이 막으려던 상태 그 자체다.
+`find-runbook` 도 Notes 구역이 없고 찾은 문서 구역마다 `### ` 제목을 하나씩 쓰므로 Notes 라는
+제목의 문서 구역은 결과 하나인데, 그것을 예약하면 그 아래 결과가 전부 공지 뒤로 밀리고 공지는
+위쪽 결과만 세었다 — 런북 다섯 건이 "1 of 2 result sections" 로 보고되었다. Notes 블록을 쓰는
+형식기는 모두 그것을 맨 뒤에 쓰므로(진단이고 뒤에 결과가 없다) `notesSection` 은 그 줄이 답변의
+마지막 `### ` 제목일 때만 인정하고, `fencesContent` 도구에서는 내용 펜스 바깥일 것도 요구한다.
+잘못 읽힌 줄에는 언제나 아래에 결과 제목이 있으므로 이 조건이 두 경우를 함께 막는다. 펜스 규칙은
+`fencesContent` 두 도구에만 둔다 — 다른 형식기는 내용을 펜스 없는 산문으로 쓰므로, 청크 하나의
+짝 안 맞는 백틱 연속이 그 아래의 진짜 Notes 를 가려 반대 방향으로 틀린다. 줄 순회는 `eachLine`
+으로 떼어 `unfencedLines` 가 그 위에서 펜스 상태만 따라가게 했고 돌려주는 줄과 오프셋은 같다.
+회귀 시험은 대역 타입 없이 실제 서버 픽스처와 실제 도구 호출로 쓰고, 먼저 예산을 넘지 않는
+호출로 픽스처가 의도한 모양인지 확인한 뒤 예산을 줄여 절단을 일으킨다. PostgreSQL·pgvector·
+Vault 통합, `govulncheck`, Docker 이미지 검증은 릴리스 CI에서 수행한다.
+
 2026-10-03 v0.77.23 릴리스 전 검증 결과:
 
 ```text
