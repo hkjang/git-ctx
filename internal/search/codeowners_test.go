@@ -29,6 +29,26 @@ func TestCodeownersPatternsFollowTheGitignoreRules(t *testing.T) {
 		{"docs/**/*.md", "docs/ko/guide.md", true},
 		{"/web/**", "web/app.js", true},
 		{"/web/**", "internal/web/app.js", false},
+		// A directory name and a file name are both bare names, so they have to
+		// behave the same way about depth: writing the trailing slash says "this
+		// is a directory", not "this is at the root".
+		{"docs", "src/docs/readme.md", true},
+		{"docs/", "src/docs/readme.md", true},
+		{"internal", "cmd/internal/app/auth.go", true},
+		{"internal/", "cmd/internal/app/auth.go", true},
+		{"docs/", "src/docs", true},
+		{"docs/", "docs/readme.md", true},
+		// Depth must not become a licence to match a different name.
+		{"docs/", "mydocs/readme.md", false},
+		{"docs/", "src/mydocs/readme.md", false},
+		{"docs/", "src/docsx/readme.md", false},
+		// A pattern that anchors itself, or carries its own slash, stays anchored.
+		{"/docs/", "docs/readme.md", true},
+		{"/docs/", "src/docs/readme.md", false},
+		{"/docs", "src/docs/readme.md", false},
+		{"docs/api/", "docs/api/x.md", true},
+		{"docs/api/", "src/docs/api/x.md", false},
+		{"a/b/", "a/b/c/d.md", true},
 	}
 	for _, item := range cases {
 		if got := codeownersMatch(item.pattern, item.path); got != item.want {
@@ -114,5 +134,42 @@ func TestDeclaredOwnersAnswerWithoutTheSourceServer(t *testing.T) {
 	// pretending the question was answered.
 	if _, err = service.FindOwners(ctx, []string{"alice"}, "/core/api", "", "internal/search/nothing.go", "main", 5); err == nil {
 		t.Fatal("an unknown path with no declaration must not report success")
+	}
+}
+
+// A directory rule written with the trailing slash has to reach the same files
+// the bare name reaches, all the way through find-code-owner: a declaration the
+// matcher drops is a declaration the answer replaces with a guess.
+func TestDeclaredOwnersApplyADirectoryRuleBelowTheRoot(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(ctx, "sqlite", "file:codeowners-nested-directory?mode=memory&cache=shared&_foreign_keys=on")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.DB.Close()
+	exec := func(query string, args ...any) {
+		t.Helper()
+		if _, err := db.DB.Exec(query, args...); err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+	}
+	exec(`INSERT INTO repositories(id,project_key,slug,name,source_type,source_external_id,library_id,default_branch,enabled) VALUES('gitlab:2','core','web','web','gitlab','2','/core/web','main',1)`)
+	exec(`INSERT INTO repository_permissions(repository_id,principal,permission) VALUES('gitlab:2','alice','read')`)
+	exec(`INSERT INTO repository_files(repository_id,ref_name,path,base_name,size_bytes,content_indexed,commit_id) VALUES('gitlab:2','main','src/docs/readme.md','readme.md',100,1,'abc')`)
+	exec(`INSERT INTO document_chunks(id,repository_id,ref_name,commit_id,file_path,line_start,line_end,heading,content_type,content,content_hash) VALUES('co2','gitlab:2','main','abc','CODEOWNERS',1,2,'CODEOWNERS','configuration','docs/ @docs-team','h2')`)
+
+	service := New(db)
+	result, err := service.FindOwners(ctx, []string{"alice"}, "/core/web", "", "src/docs/readme.md", "main", 5)
+	if err != nil {
+		t.Fatalf("the declared directory owner must answer: %v", err)
+	}
+	if len(result.Declared) != 1 || result.Declared[0].Pattern != "docs/" {
+		t.Fatalf("declared=%#v", result.Declared)
+	}
+	if got := result.Declared[0].Owners[0]; got != "@docs-team" {
+		t.Fatalf("owner=%q", got)
+	}
+	if rendered := FormatOwners(result); !strings.Contains(rendered, "@docs-team") {
+		t.Fatalf("the declaration is not in the answer:\n%s", rendered)
 	}
 }
