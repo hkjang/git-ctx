@@ -38,7 +38,7 @@ func clampResponse(tool, text string, budget int) string {
 		return text
 	}
 	body, notes := text, ""
-	if at := strings.LastIndex(text, "\n### Notes\n"); at >= 0 {
+	if at := notesSection(tool, text); at >= 0 {
 		body, notes = text[:at], text[at:]
 	}
 	// The notes only keep their reservation while they stay a small part of the
@@ -124,11 +124,77 @@ func fencesContent(tool string) bool {
 	return tool == toolcatalog.ReadFile || tool == toolcatalog.GetSymbolContext
 }
 
+// notesSection locates the answer's own trailing Notes section — the offset
+// clampResponse splits the reservation at — or -1 for an answer that has none.
+//
+// Every formatter that writes a Notes block writes it last: it is the
+// diagnostics, and no result follows it. Taking the last `### Notes` line
+// anywhere in the answer instead read two other things as that block.
+//
+// A fencesContent tool shows content that can carry a `### Notes` heading of its
+// own, and that heading sits inside the fence. get-symbol-context has no Notes
+// section at all, so a Go helper returning a Markdown report template had the
+// rest of its body and the closing fence reserved, moved past the truncation
+// notice and left opening a block that never closes — the one thing the fence
+// rules exist to prevent.
+//
+// find-runbook has no Notes section either, and writes one `### ` heading per
+// section it found, so a document section titled Notes is a result. Reserving it
+// moved it and every result below it past the notice, and left the notice
+// counting the results above it alone: five runbooks were reported as "1 of 2".
+//
+// Requiring the line to be the answer's last `### ` heading settles both, since
+// a misread one always has a result heading under it. The fence rule is for a
+// fencesContent tool only: the other formatters write their content as prose, and
+// an unbalanced backtick run in one chunk would otherwise hide the real Notes
+// below it — see fencesContent.
+func notesSection(tool, text string) int {
+	last, notes := -1, -1
+	visit := func(at int, line string) {
+		if !strings.HasPrefix(line, "### ") {
+			return
+		}
+		last = at
+		if line == "### Notes" {
+			notes = at
+		}
+	}
+	if fencesContent(tool) {
+		unfencedLines(text, visit)
+	} else {
+		eachLine(text, func(at int, line string) {
+			if at >= 0 {
+				visit(at, line)
+			}
+		})
+	}
+	if notes >= 0 && notes == last {
+		return notes
+	}
+	return -1
+}
+
+// eachLine visits every line of text, passing the offset of the newline before it
+// — -1 for the first line, which no boundary rule can land on, and which is also
+// how the formatters write an answer: every one of them opens with its own `## `
+// title.
+func eachLine(text string, visit func(at int, line string)) {
+	for start := 0; ; {
+		line, next := text[start:], len(text)+1
+		if end := strings.IndexByte(line, '\n'); end >= 0 {
+			line, next = line[:end], start+end+1
+		}
+		visit(start-1, line)
+		if next > len(text) {
+			return
+		}
+		start = next
+	}
+}
+
 // unfencedLines visits the lines of text that lie outside a code fence, passing
 // the offset of the newline before each one — the position the boundary rules
-// below search for. The first line has no preceding newline and so is never a
-// boundary, which is also how the formatters write an answer: every one of them
-// opens with its own `## ` title.
+// below search for.
 //
 // What a fencesContent tool puts inside its fence is the content being shown, not
 // the structure of the answer, and reading the two as one thing cost an agent
@@ -143,21 +209,13 @@ func fencesContent(tool string) bool {
 // layer that closes a fence and the layer that counts and cuts now agree on
 // where the fences are.
 func unfencedLines(text string, visit func(at int, line string)) {
-	fence, start := 0, 0
-	for {
-		line, next := text[start:], len(text)+1
-		if end := strings.IndexByte(line, '\n'); end >= 0 {
-			line, next = line[:end], start+end+1
-		}
-		if fence == 0 && start > 0 {
-			visit(start-1, line)
+	fence := 0
+	eachLine(text, func(at int, line string) {
+		if fence == 0 && at >= 0 {
+			visit(at, line)
 		}
 		fence = lineFence(fence, line)
-		if next > len(text) {
-			return
-		}
-		start = next
-	}
+	})
 }
 
 // countUnfenced counts the lines of text that start with prefix outside a code
