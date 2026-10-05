@@ -117,7 +117,8 @@ func matchCodeowners(content, filePath, source string) []OwnerDeclaration {
 // syntax is gitignore's, narrowed to what CODEOWNERS files actually use:
 // a leading slash anchors to the repository root, a trailing slash matches a
 // directory and everything under it, * does not cross a directory boundary and
-// ** does, and a bare name matches at any depth.
+// ** does, and a bare name matches at any depth — a directory name included, so
+// "docs/" covers src/docs/readme.md exactly as "docs" does.
 func codeownersMatch(pattern, filePath string) bool {
 	filePath = strings.TrimPrefix(strings.TrimSpace(filePath), "/")
 	pattern = strings.TrimSpace(pattern)
@@ -131,10 +132,15 @@ func codeownersMatch(pattern, filePath string) bool {
 	pattern = strings.TrimSuffix(pattern, "/")
 	anchored := strings.HasPrefix(pattern, "/")
 	pattern = strings.TrimPrefix(pattern, "/")
+	// Whether the pattern reaches below the root is decided on what the author
+	// wrote, before the trailing slash is expanded: the "/**" added just below is
+	// this code's own, and reading it back as the author's slash would anchor
+	// every directory name to the root.
+	nested := strings.Contains(pattern, "/")
 	if directoryOnly {
 		pattern += "/**"
 	}
-	if anchored || strings.Contains(pattern, "/") {
+	if anchored || nested {
 		if globMatch(pattern, filePath) {
 			return true
 		}
