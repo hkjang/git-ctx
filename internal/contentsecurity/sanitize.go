@@ -109,8 +109,9 @@ var xmlSecretAttributeRE = regexp.MustCompile(`(?i)(name\s*=\s*"[^"\r\n]*(?:pass
 
 // A command line is where a credential is most often written down for someone
 // else to copy, and curl's -u takes it as user:password. The curl anchor keeps
-// this away from every other tool that happens to have a -u flag.
-var curlUserRE = regexp.MustCompile(`(?i)\bcurl\b[^\n]{0,200}?(\s-u\s+|\s--user\s+)[^\s:"']+:[^\s"']+`)
+// this away from every other tool that happens to have a -u flag. Capture the
+// entire command prefix so replacing the credential preserves options and whitespace.
+var curlUserRE = regexp.MustCompile(`(?i)(\bcurl\b[^\n]{0,200}?(?:\s-u\s+|\s--user\s+))[^\s:"']+:[^\s"']+`)
 
 // .netrc and its imitators separate the value with spaces rather than a colon
 // or an equals sign, which no assignment rule reaches. Requiring the login
