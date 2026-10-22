@@ -228,7 +228,11 @@ API 키, Keycloak secret, Bitbucket PAT, 문서 전체 원문은 로그에 남�
 XML 설정의 `<password>`·`name="password" value="..."` 쌍, `Authorization` 헤더,
 `curl -u user:pass`, `.netrc`의 `login ... password ...`도 함께 치환한다. 값이 다음
 줄부터 이어지는 YAML 블록 스칼라(`password: |`, `client_secret: >-`)는 들여쓰기가
-키 이하로 얕아지는 줄 전까지 본문을 줄마다 치환해 줄 수를 그대로 둔다. 호스트는
+키 이하로 얕아지는 줄 전까지 본문을 줄마다 치환해 줄 수를 그대로 둔다. 값 자리에
+변수 참조 하나만 있으면(`${VAR}`, `$VAR`, `%(VAR)s` — compose·CI YAML·Maven
+`settings.xml`·Spring XML이 비밀을 파일 밖에 두는 방식) 치환하지 않고 이벤트도 올리지
+않는다. 다만 기본값이 붙은 `${VAR:-value}`나 참조 뒤에 다른 문자가 이어지는 값은
+실제 비밀이 들어갈 수 있는 자리이므로 계속 가린다. 호스트는
 남긴다 — 어느 시스템의 자격증명인지가 조치의 출발점이기 때문이다. 탐지 경로와 조치는
 `index_security_events`에 기록되지만 탐지된 원문은 기록하지 않는다.
 
