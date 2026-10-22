@@ -123,7 +123,12 @@ var netrcRE = regexp.MustCompile(`(?i)\b(login\s+)\S+(\s+password\s+)\S{4,}`)
 
 // An Authorization header carries a credential whose shape is the issuer's
 // business, so no vendor prefix and no entropy floor will find it.
-var authorizationHeaderRE = regexp.MustCompile(`(?i)\b(authorization\s*[:=]\s*)(bearer|basic|token)\s+[^\s"'<>]{8,}`)
+//
+// The whitespace after the scheme is captured and written back for the same
+// reason as the .netrc separators: a header split after "Bearer" — an HTTP
+// dump's folded line, a YAML value that continues on the next line — had its
+// newline rewritten as one space, and every line after it moved.
+var authorizationHeaderRE = regexp.MustCompile(`(?i)\b(authorization\s*[:=]\s*)(bearer|basic|token)(\s+)[^\s"'<>]{8,}`)
 var entropyCandidateRE = regexp.MustCompile(`[A-Za-z0-9+/=_-]{32,}`)
 var commonHashRE = regexp.MustCompile(`(?i)^(?:[a-f0-9]{40}|[a-f0-9]{64})$`)
 
@@ -195,7 +200,7 @@ func Sanitize(content string) (string, string) {
 	})
 	masked = authorizationHeaderRE.ReplaceAllStringFunc(masked, func(value string) string {
 		finding = "credential_assignment"
-		return authorizationHeaderRE.ReplaceAllString(value, "${1}${2} [REDACTED]")
+		return authorizationHeaderRE.ReplaceAllString(value, "${1}${2}${3}[REDACTED]")
 	})
 	masked = entropyCandidateRE.ReplaceAllStringFunc(masked, func(value string) string {
 		if commonHashRE.MatchString(value) || shannonEntropy(value) < 4.2 {
